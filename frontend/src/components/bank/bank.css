@@ -1,0 +1,255 @@
+/* WP7 bank components: AttentionBadge, AddWordPreviewRow, SuggestionRow (FRONTEND §4, §5.6, §5.7). */
+
+/* ---------- AttentionBadge ---------- */
+.attn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.attn__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.attn__chip--pending {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.attn__chip--rechecking {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+}
+
+.attn__chip--collect {
+  background: var(--ink-soft);
+  color: var(--muted);
+}
+
+.attn__spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: attn-spin 0.8s linear infinite;
+}
+
+@keyframes attn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.attn__msg {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-s);
+  background: var(--again-soft);
+  color: var(--again-ink);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.attn__msg-icon {
+  flex: none;
+  font-weight: 700;
+}
+
+.attn__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---------- AddWordPreviewRow ---------- */
+.preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.preview-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--bg);
+}
+
+.preview-row.is-duplicate {
+  opacity: 0.55;
+}
+
+.preview-row__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.preview-row__input {
+  font-family: var(--font-word);
+  font-weight: 600;
+}
+
+.preview-row__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.preview-row--ok .preview-row__status {
+  color: var(--good-ink);
+}
+
+.preview-row--warn .preview-row__status {
+  color: var(--hard-ink);
+}
+
+.preview-row--invalid .preview-row__status {
+  color: var(--again-ink);
+}
+
+.preview-row__detail {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.preview-row__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.chip-btn {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.chip-btn:hover:not(:disabled) {
+  border-color: var(--brand);
+  color: var(--brand-ink);
+}
+
+.chip-btn[aria-pressed="true"] {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+
+.chip-btn__sub {
+  margin-left: 6px;
+  opacity: 0.75;
+  font-size: var(--text-xs);
+}
+
+/* ---------- AddStatusBadge (AddResult / import statuses) ---------- */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.6;
+  background: var(--ink-soft);
+  color: var(--muted);
+}
+
+.status-badge--added,
+.status-badge--readded {
+  background: var(--good-soft);
+  color: var(--good-ink);
+}
+
+.status-badge--pending_ai,
+.status-badge--ambiguous {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.status-badge--invalid {
+  background: var(--again-soft);
+  color: var(--again-ink);
+}
+
+/* ---------- SuggestionRow ---------- */
+.sugg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.sugg__text {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.sugg__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.sugg__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.sugg__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sugg__actions .btn {
+  flex: 1 1 120px;
+}
+
+@media (min-width: 768px) {
+  .sugg {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .sugg__body {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .sugg__actions .btn {
+    flex: none;
+  }
+}

@@ -1,0 +1,91 @@
+/* AddWordsPage — 添加生词 (FRONTEND §5.6). */
+.addwords textarea {
+  min-height: 120px;
+  font-family: var(--font-word);
+  font-size: var(--text-lg);
+  line-height: 1.5;
+}
+
+.addwords__hint {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  margin: var(--space-1) 0 var(--space-3);
+}
+
+.addwords__hint .is-over {
+  color: var(--again-ink);
+  font-weight: 600;
+}
+
+.addwords__preview {
+  margin-bottom: var(--space-4);
+}
+
+.addwords__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.addwords__results {
+  margin-top: var(--space-5);
+}
+
+.addwords__results h2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.addwords__summary {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.result-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+}
+
+.result-row__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.result-row__input {
+  font-family: var(--font-word);
+  font-weight: 600;
+  font-size: var(--text-lg);
+}
+
+.result-row__detail,
+.result-row__note {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.result-row__today {
+  color: var(--good-ink);
+  font-size: var(--text-sm);
+}

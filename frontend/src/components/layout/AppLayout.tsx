@@ -1,40 +1,142 @@
-// P0 STUB — WP7 owns components/layout/* and replaces this file with the responsive shell
-// (TopNav ≥ 768 px, TabBar < 768 px, badges from `counters`; FRONTEND §2/§4). routes.tsx (frozen)
-// mounts <AppLayout/> as the layout route around every authenticated page, so only this file changes.
-// Keep the inner <Suspense>: a lazily loaded page must never blank the shell.
-import { Suspense } from 'react';
-import { NavLink, Outlet } from 'react-router';
+// AppLayout — responsive shell around every authenticated page (FRONTEND §2/§4; routes.tsx mounts it
+// as the layout route). TopNav ≥ 768 px, TabBar < 768 px; badges from AuthContext.counters (bank) and
+// the today-badge store below (today dot while ungraded items exist). Sets `--tabbar-h` on the root
+// while the TabBar is shown so fixed bars and toasts clear it, and hides the whole shell on `/study`
+// (the study card owns the viewport, FRONTEND §6.2). The inner <Suspense> keeps the shell visible while
+// a lazy page chunk loads.
+import { Suspense, useCallback, useEffect, useSyncExternalStore } from 'react';
+import { Outlet, useLocation } from 'react-router';
+import * as endpoints from '@/api/endpoints';
 import { useAuth } from '@/auth/AuthContext';
 import { cx } from '@/components/ui/cx';
 import { zh } from '@/i18n/zh';
+import { TabBar, type ShellBadges } from './TabBar';
+import { TopNav } from './TopNav';
 import './AppLayout.css';
 
-const NAV: { to: string; label: string }[] = [
-  { to: '/today', label: zh.nav.today },
-  { to: '/vocab', label: zh.nav.vocab },
-  { to: '/bank', label: zh.nav.bank },
-  { to: '/history', label: zh.nav.history },
-  { to: '/settings', label: zh.nav.me },
-];
+export const PHONE_QUERY = '(max-width: 767.98px)';
+/** Height reserved for the TabBar (+ the safe-area inset) — mirrors `.tabbar` in AppLayout.css. */
+export const TABBAR_HEIGHT_CSS = 'calc(56px + env(safe-area-inset-bottom, 0px))';
+/** Routes that render without the shell (full-viewport study session). */
+export const BARE_ROUTES: readonly string[] = ['/study'];
+/** The today badge is re-checked at most this often (ms) when the route or tab visibility changes. */
+export const TODAY_BADGE_STALE_MS = 60_000;
+
+/** `window.matchMedia(query).matches`, live. False during SSR/tests without matchMedia. */
+export function useMediaQuery(query: string): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => undefined;
+      const mq = window.matchMedia(query);
+      mq.addEventListener('change', onChange);
+      return () => mq.removeEventListener('change', onChange);
+    },
+    [query],
+  );
+  const getSnapshot = () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(query).matches : false);
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Today badge store — "ungraded items exist". Pages that already hold a TodayResponse (today / study,
+// WP8) call `setTodayUngraded(...)` after loading or grading; the shell itself checks GET /api/today
+// (side-effect free, API.md 43) once per route change / tab return, at most every minute.
+// ---------------------------------------------------------------------------------------------------
+
+let todayUngraded = false;
+let lastCheckedAt = 0;
+const listeners = new Set<() => void>();
+
+function subscribeToday(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function setTodayUngraded(value: boolean): void {
+  lastCheckedAt = Date.now();
+  if (todayUngraded === value) return;
+  todayUngraded = value;
+  for (const listener of listeners) listener();
+}
+
+/** Derives the badge from a TodayResponse-like value (`counts.done < counts.total`). */
+export function hasUngradedItems(today: { batch: { counts: { done: number; total: number } } | null } | null | undefined): boolean {
+  return Boolean(today?.batch && today.batch.counts.done < today.batch.counts.total);
+}
+
+export function useTodayUngraded(): boolean {
+  return useSyncExternalStore(subscribeToday, () => todayUngraded, () => false);
+}
+
+/** Test/integration hook: forget the last check so the next shell mount re-fetches. */
+export function resetTodayBadge(): void {
+  todayUngraded = false;
+  lastCheckedAt = 0;
+  for (const listener of listeners) listener();
+}
+
+function useTodayBadgeCheck(enabled: boolean, pathname: string): void {
+  useEffect(() => {
+    if (!enabled) {
+      if (todayUngraded) setTodayUngraded(false);
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    const check = async () => {
+      if (Date.now() - lastCheckedAt < TODAY_BADGE_STALE_MS) return;
+      lastCheckedAt = Date.now();
+      try {
+        const today = await endpoints.getToday(controller.signal);
+        if (!cancelled) setTodayUngraded(hasUngradedItems(today));
+      } catch {
+        /* 409 before onboarding or a network hiccup: keep the previous value */
+      }
+    };
+    void check();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void check();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [enabled, pathname]);
+}
+
+function useTabBarHeight(active: boolean): void {
+  useEffect(() => {
+    const root = document.documentElement;
+    if (active) root.style.setProperty('--tabbar-h', TABBAR_HEIGHT_CSS);
+    else root.style.removeProperty('--tabbar-h');
+    return () => {
+      root.style.removeProperty('--tabbar-h');
+    };
+  }, [active]);
+}
 
 export function AppLayout() {
-  const { user } = useAuth();
-  const items = user?.role === 'admin' ? [...NAV, { to: '/admin', label: zh.nav.admin }] : NAV;
+  const { user, counters } = useAuth();
+  const location = useLocation();
+  const bare = BARE_ROUTES.includes(location.pathname);
+  const isPhone = useMediaQuery(PHONE_QUERY);
+  const todayBadge = useTodayUngraded();
+  useTodayBadgeCheck(user?.onboarding_state === 'done', location.pathname);
+  useTabBarHeight(isPhone && !bare);
+
+  const badges: ShellBadges = {
+    today: todayBadge,
+    bank: (counters?.suggestions_open ?? 0) + (counters?.attention ?? 0),
+  };
+
   return (
-    <div className="app-shell">
-      <nav className="app-nav" aria-label={zh.app.name}>
-        <span className="app-nav__brand">{zh.app.name}</span>
-        <ul className="app-nav__list">
-          {items.map((item) => (
-            <li key={item.to}>
-              <NavLink to={item.to} className={({ isActive }) => cx('app-nav__link', isActive && 'is-active')}>
-                {item.label}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
-      <main className="app-main">
+    <div className={cx('app-shell', bare && 'app-shell--bare')}>
+      {!bare && <TopNav badges={badges} isAdmin={user?.role === 'admin'} userName={user?.display_name || user?.username} />}
+      <main className="app-main" id="main">
         <Suspense
           fallback={
             <div className="loading-screen" role="status" aria-busy="true">
@@ -45,6 +147,7 @@ export function AppLayout() {
           <Outlet />
         </Suspense>
       </main>
+      {!bare && <TabBar badges={badges} />}
     </div>
   );
 }

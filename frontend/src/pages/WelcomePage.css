@@ -1,0 +1,143 @@
+/* WelcomePage — onboarding (FRONTEND §2, DESIGN §6.2). Rendered outside the shell. */
+.welcome {
+  padding-block: var(--space-5) var(--space-6);
+}
+
+.welcome__steps {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.welcome__step {
+  flex: 1 1 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.welcome__step.is-active {
+  background: var(--brand);
+}
+
+.welcome__lead {
+  color: var(--muted);
+  margin-bottom: var(--space-4);
+}
+
+.welcome__group {
+  margin-bottom: var(--space-5);
+}
+
+.welcome__label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+.welcome__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.welcome__chips .chip-btn {
+  min-height: var(--tap);
+  padding: 0 var(--space-4);
+  font-size: var(--text-md);
+}
+
+.welcome__tz {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.welcome__tz select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.welcome__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+}
+
+/* step 2 — screening card */
+.welcome__progress {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  min-height: 280px;
+  padding: var(--space-5) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  background: var(--bg);
+  box-shadow: var(--shadow-1);
+  text-align: center;
+}
+
+.welcome-card__peek {
+  min-height: 1.6em;
+  color: var(--muted);
+}
+
+.welcome-card__peek strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.welcome__verdicts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.welcome__verdicts .btn--ghost {
+  grid-column: 1 / -1;
+}
+
+.welcome__done {
+  text-align: center;
+  padding: var(--space-6) var(--space-4);
+  color: var(--muted);
+}
+
+.welcome__keys {
+  margin-top: var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+
+.welcome__keys kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-2);
+  text-align: center;
+}
+
+@media (min-width: 768px) {
+  .welcome__actions {
+    flex-direction: row-reverse;
+    justify-content: flex-start;
+  }
+}

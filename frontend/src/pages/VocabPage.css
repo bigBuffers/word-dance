@@ -1,0 +1,108 @@
+/* VocabPage — 词库 browser (FRONTEND §5.5). */
+.vocab {
+  max-width: calc(960px + 2 * var(--gutter));
+}
+
+.vocab__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.vocab__count {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.vocab__controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+}
+
+.vocab__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.vocab__filters select {
+  width: auto;
+  min-height: 38px;
+  padding-block: 6px;
+}
+
+.vocab__filters .switch {
+  min-height: 38px;
+}
+
+.vocab__bulk {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.vocab__bulk-count {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.vocab__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.vocab__main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.vocab__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-s);
+  background: var(--again-soft);
+  color: var(--again-ink);
+}
+
+.vocab__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+}
+
+@media (min-width: 768px) {
+  .vocab__bulk {
+    display: flex;
+  }
+}
+
+@media (min-width: 1024px) {
+  .vocab__body {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  .vocab__letters--inline {
+    display: none;
+  }
+}
+
+@media (max-width: 1023.98px) {
+  .vocab__letters--rail {
+    display: none;
+  }
+}
