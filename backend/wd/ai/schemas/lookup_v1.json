@@ -1,0 +1,15 @@
+{"type":"object","properties":{"items":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{
+ "input":{"type":"string","description":"copied verbatim"},
+ "is_english":{"type":"boolean","description":"true if a real English word, fixed phrase or widely used abbreviation"},
+ "kind":{"type":"string","enum":["word","phrase","abbreviation","proper_noun","invalid"]},
+ "headword":{"type":"string","description":"dictionary headword (lemma) to store it under, lower-case unless an acronym or proper noun; copy the input lower-cased when is_english is false"},
+ "form_note_zh":{"type":"string","description":"Chinese note when the input differs from the headword, e.g. 'go 的过去式'; else empty"},
+ "phonetic":{"type":"string","description":"IPA for the headword like /əˈbændən/, or empty"},
+ "pos":{"type":"string","description":"part(s) of speech like 'v.' or 'n./v.', or empty"},
+ "meaning_zh":{"type":"string","description":"common senses in Simplified Chinese, at most 80 characters, empty when not English"},
+ "definition_en":{"type":"string","description":"one short English definition, empty when not English"},
+ "difficulty":{"type":"integer","enum":[1,2,3,4,5]},
+ "suggested_correction":{"type":"string","description":"if the input looks like a misspelling of a common word, that word; else empty"},
+ "safe_for_sharing":{"type":"boolean","description":"false if the string is a personal name, offensive, private or otherwise unsuitable to show other users"},
+ "note_zh":{"type":"string","description":"short Chinese explanation when is_english is false or a correction is suggested; else empty"}
+},"required":["input","is_english","kind","headword","form_note_zh","phonetic","pos","meaning_zh","definition_en","difficulty","suggested_correction","safe_for_sharing","note_zh"]}}},"required":["items"]}

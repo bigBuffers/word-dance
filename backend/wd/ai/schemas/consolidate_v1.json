@@ -1,0 +1,12 @@
+{"type":"object","properties":{
+ "items":{"type":"array","minItems":1,"maxItems":80,"items":{"type":"object","properties":{
+   "id":{"type":"integer","description":"the item id from the input, copied"},
+   "verdict":{"type":"string","enum":["ok","lemmatize","merge_duplicate","fix_spelling","invalid_word","split_phrase","fill_data"]},
+   "target":{"type":"string","description":"the canonical headword this entry should become or merge into when verdict is not ok; else empty"},
+   "confidence":{"type":"number","description":"0 to 1"},
+   "note_zh":{"type":"string","description":"at most 40 Chinese characters explaining the suggestion to the learner"},
+   "fill":{"type":"object","properties":{"phonetic":{"type":"string"},"pos":{"type":"string"},"meaning_zh":{"type":"string"},"definition_en":{"type":"string"},"difficulty":{"type":"integer","enum":[1,2,3,4,5]}},"required":["phonetic","pos","meaning_zh","definition_en","difficulty"],"description":"dictionary data; only meaningful when has_dictionary_data was false"}
+ },"required":["id","verdict","target","confidence","note_zh","fill"]}},
+ "confusable_groups":{"type":"array","maxItems":15,"items":{"type":"array","minItems":2,"maxItems":4,"items":{"type":"string"}},"description":"groups of 2-4 headwords FROM the given bank list that learners typically confuse"},
+ "difficulty_tags":{"type":"array","maxItems":80,"items":{"type":"object","properties":{"id":{"type":"integer"},"difficulty":{"type":"integer","enum":[1,2,3,4,5]}},"required":["id","difficulty"]}}
+},"required":["items","confusable_groups","difficulty_tags"]}
