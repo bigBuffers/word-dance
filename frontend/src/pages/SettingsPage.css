@@ -1,0 +1,130 @@
+/* SettingsPage — 我的 (FRONTEND §5.8). */
+.settings__section {
+  margin-bottom: var(--space-5);
+}
+
+.settings__section h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.settings__saved {
+  color: var(--good-ink);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings__row:last-child {
+  border-bottom: 0;
+}
+
+.settings__row > label:first-child,
+.settings__row > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.settings__row input[type="number"],
+.settings__row input[type="time"] {
+  width: 7em;
+  text-align: right;
+}
+
+.settings__row select {
+  width: auto;
+  max-width: 60%;
+}
+
+.settings__row .segmented {
+  flex: none;
+}
+
+.settings__inline {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.settings__inline input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.settings__hint {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.settings__stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.settings__buttons {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) 0;
+}
+
+.settings__code {
+  letter-spacing: 0.3em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.settings__about p {
+  margin: 0 0 var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.settings__danger {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--line);
+}
+
+.import-results {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  max-height: 50dvh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.import-results li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+}
