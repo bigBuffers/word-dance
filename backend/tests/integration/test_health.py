@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 
@@ -165,7 +166,8 @@ def test_lifespan_migrated_db_and_public_url_guess(client: TestClient, settings)
         assert len(db.table_names(c)) == 25
         guess = db.kv_get(c, "public_url_guess")
         assert guess is None or guess.startswith("http://") and guess.endswith(f":{settings.port}")
-        assert db.kv_get(c, "seed_version") is None  # wd.seed (WP1) absent → warn-and-continue
+        assert db.kv_get(c, "seed_version") == hashlib.sha256(settings.seed_path.read_bytes()).hexdigest()  # lifespan imported WD_SEED_PATH via wd.seed (WP1)
+        assert c.execute("SELECT COUNT(*) FROM words WHERE source='seed'").fetchone()[0] == 60
         assert db.kv_get(c, "worker_lease") is None  # WD_WORKER_ENABLED=0
     finally:
         c.close()
