@@ -22,6 +22,7 @@ from ..config import Settings
 from ..deps import client_ip, current_user, get_db
 from ..errors import ApiError
 from ..schemas import AuthResponse, LoginRequest, MeResponse, RegisterRequest
+from ..services import bank, suggestions
 
 log = logging.getLogger("wd.routers.auth")
 
@@ -63,16 +64,16 @@ def server_flags(conn: sqlite3.Connection, cfg: Settings) -> dict[str, Any]:
     }
 
 
-def counters(conn: sqlite3.Connection, user_id: int) -> dict[str, int]:
-    """API.md endpoint 5: open 整理建议 and 待处理 bank rows (the tab-bar badges)."""
-    suggestions_open = int(conn.execute("SELECT COUNT(*) FROM bank_suggestions WHERE user_id = ? AND status = 'open'", (user_id,)).fetchone()[0])
-    attention = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM user_words WHERE user_id = ? AND needs_attention = 1 AND state IN ('new','learning')",
-            (user_id,),
-        ).fetchone()[0]
-    )
-    return {"suggestions_open": suggestions_open, "attention": attention}
+def counters(conn: sqlite3.Connection, user_id: int, now: str) -> dict[str, int]:
+    """API.md endpoint 5: open 整理建议 and 待处理 bank rows (the tab-bar badges).
+
+    The same predicates as ``GET /api/suggestions`` (``open_count``: live open rows, ``confusable_group`` rows
+    excluded) and ``GET /api/bank`` (``counts.attention``), so the badges never disagree with the lists (WP3).
+    """
+    return {
+        "suggestions_open": suggestions.open_count(conn, user_id, now),
+        "attention": bank.attention_count(conn, user_id),
+    }
 
 
 @router.post("/api/auth/register", status_code=201, response_model=AuthResponse)
@@ -157,5 +158,5 @@ def me(request: Request, user: dict[str, Any] = Depends(current_user), conn: sql
         "user": security.user_dto(user),
         "settings": security.settings_dto(conn, int(user["id"])),
         "server": server_flags(conn, cfg),
-        "counters": counters(conn, int(user["id"])),
+        "counters": counters(conn, int(user["id"]), to_iso(request.app.state.clock.now_utc())),
     }
