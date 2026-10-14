@@ -36,6 +36,9 @@ def make_user(conn, username: str, role: str = "user") -> tuple[int, str]:
 def insert_word(conn, lemma: str, **cols) -> int:
     row = {"lemma": lemma, "display": lemma, "source": "seed", "is_public": 1, "is_valid_english": 1, "translation": "vt. 放弃", "phonetic": "ə'bændən"}
     row.update(cols)
+    # the client fixture's lifespan imports the mini seed (WP1), which already holds `abandon`/`apple`; the tests
+    # want a row with exactly these columns, so replace any seeded one (children cascade)
+    conn.execute("DELETE FROM words WHERE lemma = ?", (lemma,))
     return conn.execute(f"INSERT INTO words({','.join(row)}) VALUES ({','.join('?' * len(row))}) RETURNING id", list(row.values())).fetchone()[0]
 
 
