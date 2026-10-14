@@ -57,11 +57,18 @@ def count(settings, table: str, where: str = "1=1", params=()) -> int:
 
 
 def insert_word(c: sqlite3.Connection, lemma: str, *, is_public: int = 1, created_by: int | None = None, **cols) -> int:
+    """Insert a word row and return its id.
+
+    A lemma that is already present (the lifespan imports the mini seed through WP1's ``wd.seed``, so public words such as
+    ``abandon`` exist before the test runs) is reused: the given columns are written onto the existing row instead.
+    """
     base = {"lemma": lemma, "display": lemma, "source": "seed" if is_public else "user", "is_public": is_public, "is_valid_english": 1 if is_public else None, "created_by_user_id": created_by}
     base.update(cols)
     keys = ", ".join(base)
     marks = ", ".join("?" * len(base))
-    return int(c.execute(f"INSERT INTO words({keys}) VALUES ({marks})", list(base.values())).lastrowid)
+    updates = ", ".join(f"{k} = excluded.{k}" for k in base if k != "lemma")
+    c.execute(f"INSERT INTO words({keys}) VALUES ({marks}) ON CONFLICT(lemma) DO UPDATE SET {updates}", list(base.values()))
+    return int(c.execute("SELECT id FROM words WHERE lemma = ?", (lemma,)).fetchone()[0])
 
 
 # ------------------------------------------------------------------------------------- register
