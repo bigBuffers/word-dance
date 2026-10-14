@@ -1,0 +1,106 @@
+/* word-Dance design tokens (FRONTEND.md §6.3).
+   Light palette on bare :root; the dark palette applies under prefers-color-scheme: dark unless
+   data-theme="light" is set, and always under data-theme="dark". No web fonts, no CDN. */
+
+:root {
+  color-scheme: light;
+  --font-ui: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font-word: "Charter", Georgia, "Source Serif 4", "Noto Serif CJK SC", serif; /* English headwords only */
+  --bg: #ffffff;
+  --bg-2: #f5f6f8;
+  --ink: #1d2433;
+  --muted: #667085;
+  --line: #e4e7ec;
+  --brand: #3b5bdb;
+  --again: #d6453d;
+  --hard: #d98d0b;
+  --good: #2f9e63;
+  --screen: #7048e8;
+
+  /* text-safe variants of the accent colours (≥ 4.5:1 on --bg; FRONTEND §6.3) — use for coloured TEXT,
+     the raw --again/--hard/--good/--screen for fills that carry a label */
+  --brand-ink: #3250c9;
+  --again-ink: #b4322b;
+  --hard-ink: #8a5a06;
+  --good-ink: #22784b;
+  --screen-ink: #5b36c9;
+
+  /* derived colours */
+  --on-brand: #ffffff;
+  --brand-soft: color-mix(in srgb, var(--brand) 12%, transparent);
+  --again-soft: color-mix(in srgb, var(--again) 14%, transparent);
+  --hard-soft: color-mix(in srgb, var(--hard) 18%, transparent);
+  --good-soft: color-mix(in srgb, var(--good) 14%, transparent);
+  --screen-soft: color-mix(in srgb, var(--screen) 14%, transparent);
+  --ink-soft: color-mix(in srgb, var(--ink) 7%, transparent);
+  --overlay: rgba(16, 24, 40, 0.45);
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+  --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.18);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--brand) 40%, transparent);
+
+  /* shape, spacing, sizing */
+  --radius-s: 8px;
+  --radius: 12px;
+  --radius-l: 20px;
+  --radius-pill: 999px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --tap: 44px;           /* minimum tap target (FRONTEND §6.2) */
+  --gutter: 16px;        /* body side gutter at every width */
+  --content-max: 720px;  /* card / page max-width, centred */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --tabbar-h: 0px;       /* layout/TabBar sets this on phones so fixed bars and toasts clear it */
+
+  /* motion */
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* type scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121620;
+    --bg-2: #1a2030;
+    --ink: #e8ecf3;
+    --muted: #98a2b3;
+    --line: #2a3345;
+    --brand-ink: #91a7ff;
+    --again-ink: #f08a84;
+    --hard-ink: #f0b84a;
+    --good-ink: #6fcf97;
+    --screen-ink: #b197fc;
+    --overlay: rgba(0, 0, 0, 0.6);
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121620;
+  --bg-2: #1a2030;
+  --ink: #e8ecf3;
+  --muted: #98a2b3;
+  --line: #2a3345;
+  --brand-ink: #91a7ff;
+  --again-ink: #f08a84;
+  --hard-ink: #f0b84a;
+  --good-ink: #6fcf97;
+  --screen-ink: #b197fc;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.5);
+}

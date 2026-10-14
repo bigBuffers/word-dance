@@ -1,0 +1,65 @@
+/* P0 stub shell — replaced by WP7 (TopNav / TabBar). */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.app-nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: calc(var(--space-2) + var(--safe-top)) var(--gutter) var(--space-2);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.app-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.app-nav__brand {
+  font-weight: 700;
+  color: var(--brand-ink);
+  white-space: nowrap;
+}
+
+.app-nav__list {
+  display: flex;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0 0 0 auto;
+  padding: 0;
+}
+
+.app-nav__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-s);
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.app-nav__link:hover {
+  text-decoration: none;
+  background: var(--ink-soft);
+}
+
+.app-nav__link.is-active {
+  color: var(--brand-ink);
+  background: var(--brand-soft);
+}
+
+.app-main {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}

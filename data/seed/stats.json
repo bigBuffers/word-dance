@@ -1,0 +1,41 @@
+{
+ "total_words": 9162,
+ "per_stage": {
+  "zk": 2099,
+  "gk": 3829,
+  "cet4": 4722,
+  "cet6": 7671
+ },
+ "only_stage": {
+  "zk": 33,
+  "gk": 193,
+  "cet4": 65,
+  "cet6": 3694
+ },
+ "first_stage": {
+  "zk": 2099,
+  "gk": 1792,
+  "cet4": 1577,
+  "cet6": 3694
+ },
+ "with_phonetic": 8997,
+ "with_translation": 9162,
+ "with_definition": 9102,
+ "with_exchange": 7799,
+ "multiword": 13,
+ "uppercase": 141,
+ "syllabus_sizes": {
+  "zk": 1887,
+  "gk": 3446,
+  "cet4": 4539,
+  "cet6": 2220,
+  "cet46": 8008,
+  "cet6star": 1721
+ },
+ "missing_from_ecdict": {
+  "cet46": [
+   "instalation"
+  ]
+ },
+ "file_bytes": 4978924
+}

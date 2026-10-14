@@ -1,0 +1,190 @@
+/* P0 word components: WordHeader, SpeakButton, StageChips, StateBadge, KindBadge */
+
+/* ---------- WordHeader ---------- */
+.word-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.word-head__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.word-head__display {
+  margin: 0;
+  font-family: var(--font-word);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  font-size: var(--word-size);
+}
+
+.word-head--sm {
+  --word-size: var(--text-lg);
+}
+
+.word-head--md {
+  --word-size: clamp(1.5rem, 6vw, 2rem);
+}
+
+.word-head--lg {
+  --word-size: clamp(2rem, 10vw, 3rem);
+}
+
+/* long words shrink (FRONTEND §4) */
+.word-head--md[data-len="long"] {
+  --word-size: clamp(1.25rem, 5vw, 1.6rem);
+}
+
+.word-head--md[data-len="xlong"] {
+  --word-size: clamp(1.1rem, 4vw, 1.4rem);
+}
+
+.word-head--lg[data-len="long"] {
+  --word-size: clamp(1.5rem, 7.5vw, 2.4rem);
+}
+
+.word-head--lg[data-len="xlong"] {
+  --word-size: clamp(1.25rem, 5.5vw, 1.9rem);
+}
+
+.word-head__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.word-head--lg .word-head__meta {
+  font-size: var(--text-md);
+}
+
+.word-head__phonetic {
+  font-family: var(--font-word);
+  letter-spacing: 0.01em;
+}
+
+/* ---------- chips (StageChips) ---------- */
+.chips {
+  display: inline-flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.chips--md .chip {
+  padding: 2px 10px;
+  font-size: var(--text-sm);
+}
+
+.chip--min {
+  color: var(--brand-ink);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  background: var(--brand-soft);
+}
+
+.chip__star {
+  color: var(--hard-ink);
+}
+
+/* ---------- badges (KindBadge, StateBadge) ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--ink-soft);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.badge--review {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+}
+
+.badge--new {
+  background: var(--good-soft);
+  color: var(--good-ink);
+}
+
+.badge--screen {
+  background: var(--screen-soft);
+  color: var(--screen-ink);
+}
+
+.badge--extra {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.state-badge--new {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+}
+
+.state-badge--learning {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.state-badge--mastered {
+  background: var(--good-soft);
+  color: var(--good-ink);
+}
+
+.state-badge--known {
+  background: var(--ink-soft);
+  color: var(--muted);
+}
+
+.state-badge--removed {
+  background: var(--ink-soft);
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.state-badge--none {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+
+.state-badge__due {
+  font-weight: 500;
+}
+
+/* ---------- SpeakButton ---------- */
+.speak.is-speaking {
+  color: var(--brand-ink);
+  background: var(--brand-soft);
+}

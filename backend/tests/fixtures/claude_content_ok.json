@@ -1,0 +1,362 @@
+{
+ "type": "result",
+ "subtype": "success",
+ "is_error": false,
+ "structured_output": {
+  "items": [
+   {
+    "word": "abandon",
+    "valid": true,
+    "meaning_zh": "v. 放弃；抛弃；离弃 n. 放纵",
+    "meaning_en": "to leave someone or something behind completely, or to give up an idea or plan",
+    "examples": [
+     {
+      "en": "The owners abandoned the car on the highway after it broke down.",
+      "zh": "车坏了之后,车主把它丢弃在了高速公路上。"
+     },
+     {
+      "en": "After months of losses, the company abandoned its plan to expand overseas.",
+      "zh": "连续几个月亏损后,公司放弃了海外扩张的计划。"
+     },
+     {
+      "en": "She felt abandoned when all her friends moved away after graduation.",
+      "zh": "毕业后朋友们都搬走了,她感到被抛弃了。"
+     }
+    ],
+    "collocations": [
+     "abandon a plan",
+     "abandon ship",
+     "abandoned building",
+     "abandon hope"
+    ],
+    "mnemonic_zh": "a-(去)+ bandon(控制):脱离控制 → 放弃、抛弃。",
+    "image_keywords": [
+     "abandoned house",
+     "empty road",
+     "rusty abandoned car"
+    ],
+    "image_alt_zh": "一辆被遗弃在荒野路边的锈迹斑斑的汽车",
+    "difficulty": 2
+   },
+   {
+    "word": "ability",
+    "valid": true,
+    "meaning_zh": "n. 能力；才能；本领",
+    "meaning_en": "the physical or mental power to do something",
+    "examples": [
+     {
+      "en": "She has a remarkable ability to stay calm under pressure.",
+      "zh": "她有一种在压力下保持冷静的非凡能力。"
+     },
+     {
+      "en": "Employers value the ability to work well in a team.",
+      "zh": "雇主看重良好的团队合作能力。"
+     },
+     {
+      "en": "He did the job to the best of his ability.",
+      "zh": "他竭尽所能把这份工作做好了。"
+     }
+    ],
+    "collocations": [
+     "the ability to do",
+     "to the best of one's ability",
+     "natural ability",
+     "problem-solving ability"
+    ],
+    "mnemonic_zh": "来自 able(能够)+ -ity(名词后缀),能够做某事的特质。",
+    "image_keywords": [
+     "student solving puzzle",
+     "pianist performing",
+     "athlete training"
+    ],
+    "image_alt_zh": "一名学生专注地解开复杂的拼图",
+    "difficulty": 1
+   },
+   {
+    "word": "abnormal",
+    "valid": true,
+    "meaning_zh": "adj. 反常的;不正常的;变态的",
+    "meaning_en": "different from what is usual or expected, often in a worrying way",
+    "examples": [
+     {
+      "en": "The doctor ordered more tests because the results were abnormal.",
+      "zh": "检查结果异常,医生又开了更多检查。"
+     },
+     {
+      "en": "Scientists say this summer's heat is abnormal for the region.",
+      "zh": "科学家说,今年夏天的高温对该地区来说很反常。"
+     },
+     {
+      "en": "Please report any abnormal behavior on campus to security.",
+      "zh": "校园内如有任何异常行为,请向保安报告。"
+     }
+    ],
+    "collocations": [
+     "abnormal behavior",
+     "abnormal weather",
+     "abnormal heart rhythm",
+     "abnormal growth"
+    ],
+    "mnemonic_zh": "ab-(偏离)+ normal(正常)= 偏离正常 → 反常的。",
+    "image_keywords": [
+     "doctor examining x-ray",
+     "heart monitor",
+     "storm clouds"
+    ],
+    "image_alt_zh": "医生查看一张显示异常数据的心电图",
+    "difficulty": 3
+   },
+   {
+    "word": "aboard",
+    "valid": true,
+    "meaning_zh": "adv./prep. 在船(飞机、车)上;上船(车、飞机)",
+    "meaning_en": "on or onto a ship, plane, train or bus",
+    "examples": [
+     {
+      "en": "All passengers were safely aboard the ferry before it left the dock.",
+      "zh": "渡轮离港前,所有乘客都已安全上船。"
+     },
+     {
+      "en": "Welcome aboard! Please find your seat and fasten your seat belt.",
+      "zh": "欢迎登机!请找到座位并系好安全带。"
+     },
+     {
+      "en": "We're glad to have you aboard as our new project manager.",
+      "zh": "很高兴你加入我们团队,担任新的项目经理。"
+     }
+    ],
+    "collocations": [
+     "welcome aboard",
+     "go aboard",
+     "all aboard",
+     "aboard a flight"
+    ],
+    "mnemonic_zh": "a-(在…上)+ board(甲板、船舷)= 在船上。",
+    "image_keywords": [
+     "passengers boarding plane",
+     "ferry deck",
+     "train platform"
+    ],
+    "image_alt_zh": "乘客们正沿着舷梯登上渡轮",
+    "difficulty": 2
+   },
+   {
+    "word": "abolish",
+    "valid": true,
+    "meaning_zh": "v. 废除;废止;取消",
+    "meaning_en": "to officially end a law, system or practice",
+    "examples": [
+     {
+      "en": "Many countries have abolished the death penalty in recent decades.",
+      "zh": "近几十年来,许多国家已废除了死刑。"
+     },
+     {
+      "en": "The university decided to abolish its outdated attendance policy.",
+      "zh": "大学决定废除过时的考勤规定。"
+     },
+     {
+      "en": "Activists called on the government to abolish single-use plastic bags.",
+      "zh": "活动人士呼吁政府取缔一次性塑料袋。"
+     }
+    ],
+    "collocations": [
+     "abolish slavery",
+     "abolish a law",
+     "abolish a system",
+     "abolish the tax"
+    ],
+    "mnemonic_zh": "ab-(离开)+ ol(生长)→ 使不再生长 → 废除;与 abolition(废除)同源。",
+    "image_keywords": [
+     "parliament debate",
+     "protest sign",
+     "torn paper law"
+    ],
+    "image_alt_zh": "一叠被红色印章盖上“废止”字样的旧文件",
+    "difficulty": 3
+   },
+   {
+    "word": "abrupt",
+    "valid": true,
+    "meaning_zh": "adj. 突然的;唐突的;陡峭的",
+    "meaning_en": "sudden and unexpected, or rude and short in manner",
+    "examples": [
+     {
+      "en": "The meeting came to an abrupt end when the power went out.",
+      "zh": "停电时会议戛然而止。"
+     },
+     {
+      "en": "He was quite abrupt with me on the phone this morning.",
+      "zh": "今早他在电话里对我很生硬冷淡。"
+     },
+     {
+      "en": "The road makes an abrupt turn just before the bridge.",
+      "zh": "这条路在桥前突然急转弯。"
+     }
+    ],
+    "collocations": [
+     "abrupt change",
+     "abrupt end",
+     "abrupt departure",
+     "abrupt manner"
+    ],
+    "mnemonic_zh": "ab-(离开)+ rupt(断裂)= 突然断开 → 突然的。",
+    "image_keywords": [
+     "sharp cliff edge",
+     "sudden brake car",
+     "broken rope"
+    ],
+    "image_alt_zh": "一条公路在悬崖边突然中断",
+    "difficulty": 4
+   },
+   {
+    "word": "absence",
+    "valid": true,
+    "meaning_zh": "n. 缺席;缺乏;不在",
+    "meaning_en": "the state of being away, or of not existing or being present",
+    "examples": [
+     {
+      "en": "Her absence from class last week worried her teachers.",
+      "zh": "她上周缺课,让老师们很担心。"
+     },
+     {
+      "en": "In the absence of clear evidence, the case was dropped.",
+      "zh": "由于缺乏明确证据,此案被撤销了。"
+     },
+     {
+      "en": "Absence makes the heart grow fonder, as the saying goes.",
+      "zh": "俗话说,小别胜新婚(离别使感情更深)。"
+     }
+    ],
+    "collocations": [
+     "absence from work",
+     "in the absence of",
+     "leave of absence",
+     "absence of evidence"
+    ],
+    "mnemonic_zh": "ab-(离开)+ sence(是、在)= 不在场;与 present(在场)相对。",
+    "image_keywords": [
+     "empty classroom desk",
+     "empty chair",
+     "vacant office"
+    ],
+    "image_alt_zh": "教室里一张空着的课桌和椅子",
+    "difficulty": 2
+   },
+   {
+    "word": "absorb",
+    "valid": true,
+    "meaning_zh": "v. 吸收;吸引(注意力);承受",
+    "meaning_en": "to take in a liquid, energy or information, or to hold someone's full attention",
+    "examples": [
+     {
+      "en": "Plants absorb sunlight and carbon dioxide to make food.",
+      "zh": "植物吸收阳光和二氧化碳来制造养分。"
+     },
+     {
+      "en": "It takes time to absorb so much new information in a lecture.",
+      "zh": "要消化讲座中这么多新信息需要时间。"
+     },
+     {
+      "en": "She was so absorbed in her novel that she missed her stop.",
+      "zh": "她看小说看得入迷,坐过了站。"
+     }
+    ],
+    "collocations": [
+     "absorb water",
+     "absorb information",
+     "absorbed in",
+     "absorb the cost"
+    ],
+    "mnemonic_zh": "ab-(离开)+ sorb(吸)= 吸走;sorb 同 sorbent 吸附剂。",
+    "image_keywords": [
+     "sponge soaking water",
+     "student reading book",
+     "green leaves sunlight"
+    ],
+    "image_alt_zh": "一块海绵把桌上的水完全吸干",
+    "difficulty": 3
+   },
+   {
+    "word": "abstract",
+    "valid": true,
+    "meaning_zh": "adj. 抽象的 n. 摘要;抽象画 v. 提取;摘要",
+    "meaning_en": "existing as an idea rather than a physical thing; also a short summary of a paper",
+    "examples": [
+     {
+      "en": "Freedom is an abstract concept that people understand in different ways.",
+      "zh": "自由是一个抽象概念,人们的理解各不相同。"
+     },
+     {
+      "en": "You must submit a 200-word abstract along with your research paper.",
+      "zh": "提交研究论文时,须附上一份两百字的摘要。"
+     },
+     {
+      "en": "The gallery's new exhibit features bold abstract paintings by young artists.",
+      "zh": "画廊的新展览展出了年轻艺术家大胆的抽象画作。"
+     }
+    ],
+    "collocations": [
+     "abstract concept",
+     "abstract art",
+     "abstract of a paper",
+     "abstract thinking"
+    ],
+    "mnemonic_zh": "abs-(离开)+ tract(拉)= 从具体事物中抽离出来 → 抽象。",
+    "image_keywords": [
+     "abstract painting",
+     "research paper abstract",
+     "art gallery"
+    ],
+    "image_alt_zh": "一幅由色块和线条组成的抽象画",
+    "difficulty": 3
+   },
+   {
+    "word": "absurd",
+    "valid": true,
+    "meaning_zh": "adj. 荒谬的;可笑的",
+    "meaning_en": "completely unreasonable, foolish or ridiculous",
+    "examples": [
+     {
+      "en": "It's absurd to pay that much for a plain white T-shirt.",
+      "zh": "花那么多钱买一件普通白T恤太荒唐了。"
+     },
+     {
+      "en": "The comedian's absurd jokes had the whole audience laughing.",
+      "zh": "喜剧演员荒诞的笑话把全场观众都逗乐了。"
+     },
+     {
+      "en": "Don't be absurd; nobody is going to steal your old bike.",
+      "zh": "别犯傻了,没人会偷你那辆旧自行车。"
+     }
+    ],
+    "collocations": [
+     "absurd idea",
+     "utterly absurd",
+     "theatre of the absurd",
+     "absurd price"
+    ],
+    "mnemonic_zh": "ab-(完全)+ surd(耳聋的)→ 听不进道理 → 荒谬的。",
+    "image_keywords": [
+     "surreal clown",
+     "comedy theater audience",
+     "confused man shrugging"
+    ],
+    "image_alt_zh": "一只戴着太阳镜的猫坐在办公桌前",
+    "difficulty": 4
+   }
+  ]
+ },
+ "total_cost_usd": 0.04,
+ "duration_ms": 1200,
+ "usage": {
+  "input_tokens": 2,
+  "output_tokens": 3300,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 1691
+ },
+ "modelUsage": {
+  "claude-sonnet-fake": {}
+ },
+ "session_id": "fake",
+ "num_turns": 2
+}

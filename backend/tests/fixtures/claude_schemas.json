@@ -1,0 +1,50 @@
+{
+ "_doc": "The --json-schema payloads of CLAUDE_INTEGRATION.md §2 (probe_v1) and §4 (content_v1, lookup_v1, consolidate_v1, svg_v1), copied verbatim for tests. WP5 ships the authoritative files under backend/wd/ai/schemas/; tests/unit/test_claude_fixtures.py validates the claude_*_ok.json fixtures and fake_claude.py's output against these copies.",
+ "probe_v1": {"type":"object","properties":{
+  "ok":{"type":"boolean"},
+  "echo":{"type":"string","description":"copied verbatim"},
+  "level":{"type":"integer","enum":[1,2,3]},
+  "mode":{"type":"string","enum":["a","b"]},
+  "tags":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"}}
+ },"required":["ok","echo","level","mode","tags"]},
+ "content_v1": {"type":"object","properties":{"items":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{
+  "word":{"type":"string","description":"the input word, copied verbatim"},
+  "valid":{"type":"boolean","description":"true if the input is a real English word or fixed phrase"},
+  "meaning_zh":{"type":"string","description":"concise Simplified-Chinese gloss with POS labels, e.g. 'v. 放弃；抛弃  n. 放纵', at most 80 characters"},
+  "meaning_en":{"type":"string","description":"short learner-friendly English definition, at most 160 characters"},
+  "examples":{"type":"array","minItems":0,"maxItems":4,"items":{"type":"object","properties":{"en":{"type":"string"},"zh":{"type":"string"}},"required":["en","zh"]},"description":"3 to 4 authentic sentences (empty only when valid is false)"},
+  "collocations":{"type":"array","maxItems":4,"items":{"type":"string"},"description":"high-frequency collocations containing the word"},
+  "mnemonic_zh":{"type":"string","description":"one-sentence memory tip in Chinese (词根词缀 / 联想 / 辨析), at most 60 characters, empty if nothing useful"},
+  "image_keywords":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"string"},"description":"concrete, photographable English search phrases (2-4 words each) for a stock-photo search"},
+  "image_alt_zh":{"type":"string","description":"one Chinese sentence (at most 30 characters) describing the ideal picture and its link to the meaning"},
+  "difficulty":{"type":"integer","enum":[1,2,3,4,5],"description":"1 junior high, 2 senior high, 3 CET-4, 4 CET-6, 5 beyond CET-6"}
+ },"required":["word","valid","meaning_zh","meaning_en","examples","collocations","mnemonic_zh","image_keywords","image_alt_zh","difficulty"]}}},"required":["items"]},
+ "lookup_v1": {"type":"object","properties":{"items":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{
+  "input":{"type":"string","description":"copied verbatim"},
+  "is_english":{"type":"boolean","description":"true if a real English word, fixed phrase or widely used abbreviation"},
+  "kind":{"type":"string","enum":["word","phrase","abbreviation","proper_noun","invalid"]},
+  "headword":{"type":"string","description":"dictionary headword (lemma) to store it under, lower-case unless an acronym or proper noun; copy the input lower-cased when is_english is false"},
+  "form_note_zh":{"type":"string","description":"Chinese note when the input differs from the headword, e.g. 'go 的过去式'; else empty"},
+  "phonetic":{"type":"string","description":"IPA for the headword like /əˈbændən/, or empty"},
+  "pos":{"type":"string","description":"part(s) of speech like 'v.' or 'n./v.', or empty"},
+  "meaning_zh":{"type":"string","description":"common senses in Simplified Chinese, at most 80 characters, empty when not English"},
+  "definition_en":{"type":"string","description":"one short English definition, empty when not English"},
+  "difficulty":{"type":"integer","enum":[1,2,3,4,5]},
+  "suggested_correction":{"type":"string","description":"if the input looks like a misspelling of a common word, that word; else empty"},
+  "safe_for_sharing":{"type":"boolean","description":"false if the string is a personal name, offensive, private or otherwise unsuitable to show other users"},
+  "note_zh":{"type":"string","description":"short Chinese explanation when is_english is false or a correction is suggested; else empty"}
+ },"required":["input","is_english","kind","headword","form_note_zh","phonetic","pos","meaning_zh","definition_en","difficulty","suggested_correction","safe_for_sharing","note_zh"]}}},"required":["items"]},
+ "consolidate_v1": {"type":"object","properties":{
+  "items":{"type":"array","minItems":1,"maxItems":80,"items":{"type":"object","properties":{
+    "id":{"type":"integer","description":"the item id from the input, copied"},
+    "verdict":{"type":"string","enum":["ok","lemmatize","merge_duplicate","fix_spelling","invalid_word","split_phrase","fill_data"]},
+    "target":{"type":"string","description":"the canonical headword this entry should become or merge into when verdict is not ok; else empty"},
+    "confidence":{"type":"number","description":"0 to 1"},
+    "note_zh":{"type":"string","description":"at most 40 Chinese characters explaining the suggestion to the learner"},
+    "fill":{"type":"object","properties":{"phonetic":{"type":"string"},"pos":{"type":"string"},"meaning_zh":{"type":"string"},"definition_en":{"type":"string"},"difficulty":{"type":"integer","enum":[1,2,3,4,5]}},"required":["phonetic","pos","meaning_zh","definition_en","difficulty"],"description":"dictionary data; only meaningful when has_dictionary_data was false"}
+  },"required":["id","verdict","target","confidence","note_zh","fill"]}},
+  "confusable_groups":{"type":"array","maxItems":15,"items":{"type":"array","minItems":2,"maxItems":4,"items":{"type":"string"}},"description":"groups of 2-4 headwords FROM the given bank list that learners typically confuse"},
+  "difficulty_tags":{"type":"array","maxItems":80,"items":{"type":"object","properties":{"id":{"type":"integer"},"difficulty":{"type":"integer","enum":[1,2,3,4,5]}},"required":["id","difficulty"]}}
+ },"required":["items","confusable_groups","difficulty_tags"]},
+ "svg_v1": {"type":"object","properties":{"svg":{"type":"string","description":"a complete <svg> element"},"alt_zh":{"type":"string","description":"one Chinese sentence describing the picture"}},"required":["svg","alt_zh"]}
+}

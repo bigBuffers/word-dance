@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "word-dance"
+version = "0.1.0"
+description = "word-Dance — English vocabulary trainer for Chinese learners (backend: FastAPI + SQLite + Claude Code)"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dynamic = ["dependencies"]
+
+[project.scripts]
+wd = "wd.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wd*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.package-data]
+# non-Python files must ship inside the package (TASKS P0 step 3)
+wd = ["migrations/*.sql", "ai/prompts/*.txt", "ai/schemas/*.json", "data/*.txt", "delivery/templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "full_seed: needs the full 9,162-word seed (set WD_FULL_SEED_DB=<path to an imported DB>); skipped on the mini seed",
+]

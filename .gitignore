@@ -1,0 +1,38 @@
+# word-Dance — ignore rules.
+# Runtime state never lives in the checkout (WD_DATA_DIR defaults to
+# /home/sqin/word-dance-data, docs/DEPLOY.md §1), so this list only covers tool
+# outputs that land inside the repository.
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+backend/build/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+coverage/
+
+# Local SQLite files and the `make dev` data directory
+*.db
+*.db-wal
+*.db-shm
+.dev-data/
+
+# Secrets (the tracked template is deploy/env.example)
+.env
+
+# Seed build intermediate — only data/seed/vocab.jsonl.gz is tracked (make seed)
+data/seed/vocab.jsonl
+
+# Editors, OS, tooling
+.DS_Store
+/tmp-*
+.claude/worktrees/
+.claude/settings.local.json

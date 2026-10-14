@@ -1,0 +1,434 @@
+"""Runtime configuration (Phase 0, frozen contract — TASKS.md P0 step 4).
+
+Every ``WD_*`` variable of DEPLOY.md §4 with its default, read from the process
+environment (systemd ``EnvironmentFile`` in production; ``.env`` loaded by the CLI
+through python-dotenv for manual runs; monkeypatched env in tests).
+
+Validation rules:
+* paths are resolved to absolute ``Path`` objects (directories are *not* created here —
+  see :func:`ensure_dirs`);
+* ``WD_TZ`` must be a known IANA zone;
+* numeric ranges raise :class:`ConfigError`, except ``WD_AI_BATCH_SIZE`` (clamped to 1–12
+  because ``content_v1.json`` has ``items.maxItems: 12``) and ``WD_AI_CONCURRENCY``
+  (clamped to 1–3), which are clamped with a warning as DEPLOY §4 specifies;
+* ``WD_SEED_PATH`` defaults to ``<repo>/data/seed/vocab.jsonl.gz`` resolved from the
+  installed package (``Path(wd.__file__).parents[2]``), correct for the editable install.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import secrets
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Mapping
+
+from . import clock as _clock
+
+log = logging.getLogger("wd.config")
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_DIR = Path("/home/sqin/word-dance-data")
+DEFAULT_SEED_PATH = REPO_ROOT / "data" / "seed" / "vocab.jsonl.gz"
+DEFAULT_FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
+
+REGISTRATION_MODES = ("open", "invite", "closed")
+SMTP_TLS_MODES = ("starttls", "ssl", "none")
+COOKIE_SECURE_MODES = ("auto", "1", "0")
+IMAGE_PROVIDERS = ("wikimedia", "openverse", "pixabay", "pexels")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+LOG_FORMATS = ("json", "text")
+
+# values masked as "***" by GET /api/admin/config (API.md 73) and never logged
+SECRET_KEYS = frozenset(
+    {
+        "WD_SECRET_KEY",
+        "WD_SMTP_PASSWORD",
+        "WD_OPENVERSE_CLIENT_SECRET",
+        "WD_PIXABAY_KEY",
+        "WD_PEXELS_KEY",
+        "WD_ADMIN_PASSWORD",
+    }
+)
+
+
+class ConfigError(ValueError):
+    """An invalid ``WD_*`` value; the message names the variable."""
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Effective configuration. Field names drop the ``WD_`` prefix and are lower-case."""
+
+    # --- paths / network ------------------------------------------------------------
+    data_dir: Path = DEFAULT_DATA_DIR
+    db_path: Path = DEFAULT_DATA_DIR / "word-dance.db"
+    host: str = "0.0.0.0"
+    port: int = 8000
+    public_url: str = ""
+    seed_path: Path = DEFAULT_SEED_PATH
+    frontend_dist: Path = DEFAULT_FRONTEND_DIST
+    trust_proxy: bool = False
+    cookie_secure: str = "auto"
+    dev: bool = False
+    secret_key: str = ""
+    tz: str = "Asia/Shanghai"
+    registration_mode: str = "invite"
+    session_days: int = 30
+    max_body_bytes: int = 1_048_576
+    worker_enabled: bool = True
+    tick_seconds: int = 60
+    prebuild_hours: int = 3
+    contact_email: str = ""
+    # --- claude ---------------------------------------------------------------------
+    claude_bin: str = "/home/sqin/.local/bin/claude"
+    claude_home: str = ""
+    claude_path: str = "/home/sqin/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    claude_cwd: Path = DEFAULT_DATA_DIR / "claude-cwd"
+    ai_enabled: bool = True
+    ai_model: str = "sonnet"
+    ai_fallback_model: str = ""
+    ai_extra_args: str = ""
+    ai_batch_size: int = 10
+    ai_concurrency: int = 1
+    ai_timeout_content_sec: int = 180
+    ai_timeout_lookup_sec: int = 120
+    ai_timeout_consolidate_sec: int = 240
+    ai_timeout_svg_sec: int = 120
+    ai_budget_content: float = 0.25
+    ai_budget_lookup: float = 0.15
+    ai_budget_consolidate: float = 0.40
+    ai_budget_svg: float = 0.10
+    ai_daily_budget_usd: float = 3.00
+    ai_monthly_budget_usd: float = 40.00
+    ai_prewarm_daily_budget_usd: float = 1.00
+    ai_hourly_call_cap: int = 60
+    ai_svg_daily_budget_usd: float = 0.50
+    ai_log_keep_days: int = 14
+    ecdict_db_path: Path | None = None
+    # --- images ---------------------------------------------------------------------
+    images_enabled: bool = True
+    image_providers: tuple[str, ...] = ("wikimedia", "openverse")
+    svg_via_claude: bool = True
+    image_max_bytes: int = 8_000_000
+    image_max_edge: int = 800
+    wikimedia_min_interval_ms: int = 1000
+    wikimedia_daily_limit: int = 2000
+    openverse_minute_limit: int = 15
+    openverse_daily_limit: int = 160
+    openverse_client_id: str = ""
+    openverse_client_secret: str = ""
+    pixabay_key: str = ""
+    pexels_key: str = ""
+    # --- e-mail ---------------------------------------------------------------------
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_tls: str = "starttls"
+    # --- logging / backups / misc ---------------------------------------------------
+    log_level: str = "INFO"
+    log_format: str = "json"
+    log_file: str = ""
+    backup_keep_daily: int = 14
+    backup_keep_weekly: int = 8
+    admin_username: str = ""
+    admin_password: str = ""
+    dev_real_claude: bool = False
+    smoke_mock_http: bool = False
+    # which WD_* variables were present in the environment (for GET /api/admin/config `source`)
+    env_sources: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
+
+    # ------------------------------------------------------------------ derived values
+    @property
+    def public_url_is_https(self) -> bool:
+        return self.public_url.lower().startswith("https://")
+
+    @property
+    def cookie_secure_effective(self) -> bool:
+        """``WD_COOKIE_SECURE``: ``1`` forces Secure, ``0`` disables it, ``auto`` follows an https ``WD_PUBLIC_URL``."""
+        if self.cookie_secure == "1":
+            return True
+        if self.cookie_secure == "0":
+            return False
+        return self.public_url_is_https
+
+    @property
+    def public_origin(self) -> str | None:
+        """Scheme + host[:port] of ``WD_PUBLIC_URL`` (accepted as a CSRF Origin, API.md §1), or None."""
+        return origin_of(self.public_url) if self.public_url else None
+
+    @property
+    def email_configured(self) -> bool:
+        """The e-mail channel exists when host and from-address are set (DEPLOY §4)."""
+        return bool(self.smtp_host and self.smtp_from)
+
+    @property
+    def claude_home_effective(self) -> str:
+        return self.claude_home or os.environ.get("HOME", "/home/sqin")
+
+    @property
+    def contact_email_effective(self) -> str:
+        return self.contact_email or "admin@localhost"
+
+    @property
+    def images_dir(self) -> Path:
+        return self.data_dir / "images"
+
+    @property
+    def claude_logs_dir(self) -> Path:
+        return self.data_dir / "claude-logs"
+
+    @property
+    def backups_dir(self) -> Path:
+        return self.data_dir / "backups"
+
+    @property
+    def tmp_dir(self) -> Path:
+        return self.data_dir / "tmp"
+
+    def runtime_dirs(self) -> tuple[Path, ...]:
+        """Directories that must exist under the data dir (DEPLOY §1)."""
+        return (self.data_dir, self.images_dir, self.claude_cwd, self.claude_logs_dir, self.backups_dir, self.tmp_dir)
+
+    # ------------------------------------------------------------------- constructors
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
+        """Build and validate the settings from ``env`` (default ``os.environ``)."""
+        e = dict(os.environ if env is None else env)
+        present = frozenset(k for k in e if k.startswith("WD_"))
+
+        def raw(name: str) -> str | None:
+            v = e.get(name)
+            return v if v is not None and v != "" else None
+
+        def text(name: str, default: str) -> str:
+            v = raw(name)
+            return default if v is None else v.strip()
+
+        def flag(name: str, default: bool) -> bool:
+            v = raw(name)
+            if v is None:
+                return default
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+            raise ConfigError(f"{name} must be 0 or 1, got {v!r}")
+
+        def integer(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
+            v = raw(name)
+            if v is None:
+                return default
+            try:
+                n = int(v.strip())
+            except ValueError:
+                raise ConfigError(f"{name} must be an integer, got {v!r}") from None
+            if (lo is not None and n < lo) or (hi is not None and n > hi):
+                raise ConfigError(f"{name} must be between {lo} and {hi}, got {n}")
+            return n
+
+        def clamped(name: str, default: int, lo: int, hi: int) -> int:
+            v = raw(name)
+            if v is None:
+                return default
+            try:
+                n = int(v.strip())
+            except ValueError:
+                raise ConfigError(f"{name} must be an integer, got {v!r}") from None
+            c = max(lo, min(hi, n))
+            if c != n:
+                log.warning("%s=%d is outside %d–%d; clamped to %d", name, n, lo, hi, c)
+            return c
+
+        def money(name: str, default: float) -> float:
+            v = raw(name)
+            if v is None:
+                return default
+            try:
+                x = float(v.strip())
+            except ValueError:
+                raise ConfigError(f"{name} must be a number, got {v!r}") from None
+            if x < 0:
+                raise ConfigError(f"{name} must be >= 0, got {x}")
+            return x
+
+        def choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+            v = text(name, default)
+            if v not in allowed:
+                raise ConfigError(f"{name} must be one of {', '.join(allowed)}, got {v!r}")
+            return v
+
+        data_dir = Path(text("WD_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve()
+        db_path = Path(text("WD_DB_PATH", str(data_dir / "word-dance.db"))).expanduser().resolve()
+        seed_path = Path(text("WD_SEED_PATH", str(DEFAULT_SEED_PATH))).expanduser().resolve()
+        frontend_dist = Path(text("WD_FRONTEND_DIST", str(DEFAULT_FRONTEND_DIST))).expanduser().resolve()
+        claude_cwd = Path(text("WD_CLAUDE_CWD", str(data_dir / "claude-cwd"))).expanduser().resolve()
+        ecdict_raw = raw("WD_ECDICT_DB_PATH")
+        ecdict_db_path = Path(ecdict_raw.strip()).expanduser().resolve() if ecdict_raw else None
+
+        tz = text("WD_TZ", "Asia/Shanghai")
+        if not _clock.is_valid_timezone(tz):
+            raise ConfigError(f"WD_TZ is not a known IANA timezone: {tz!r}")
+
+        public_url = text("WD_PUBLIC_URL", "").rstrip("/")
+        if public_url and not (public_url.startswith("http://") or public_url.startswith("https://")):
+            raise ConfigError(f"WD_PUBLIC_URL must start with http:// or https://, got {public_url!r}")
+
+        secret_key = text("WD_SECRET_KEY", "")
+        if not secret_key:
+            # DEPLOY §4: must be non-empty in production (install.sh generates it). A per-process random key keeps
+            # dev/test instances working; only unexpired e-mail codes depend on it.
+            secret_key = "ephemeral-" + secrets.token_hex(32)
+            log.warning("WD_SECRET_KEY is not set; using a random per-process key (e-mail codes will not survive a restart)")
+
+        providers_raw = text("WD_IMAGE_PROVIDERS", "wikimedia,openverse")
+        providers: list[str] = []
+        for p in (x.strip().lower() for x in providers_raw.split(",")):
+            if not p:
+                continue
+            if p not in IMAGE_PROVIDERS:
+                raise ConfigError(f"WD_IMAGE_PROVIDERS contains an unknown provider {p!r}; allowed: {', '.join(IMAGE_PROVIDERS)}")
+            if p not in providers:
+                providers.append(p)
+        pixabay_key = text("WD_PIXABAY_KEY", "")
+        pexels_key = text("WD_PEXELS_KEY", "")
+        if pixabay_key and "pixabay" not in providers:
+            providers.append("pixabay")  # keyed providers are appended to the chain (DEPLOY §4)
+        if pexels_key and "pexels" not in providers:
+            providers.append("pexels")
+
+        log_level = text("WD_LOG_LEVEL", "INFO").upper()
+        if log_level not in LOG_LEVELS:
+            raise ConfigError(f"WD_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
+
+        return cls(
+            data_dir=data_dir,
+            db_path=db_path,
+            host=text("WD_HOST", "0.0.0.0"),
+            port=integer("WD_PORT", 8000, 1, 65535),
+            public_url=public_url,
+            seed_path=seed_path,
+            frontend_dist=frontend_dist,
+            trust_proxy=flag("WD_TRUST_PROXY", False),
+            cookie_secure=choice("WD_COOKIE_SECURE", "auto", COOKIE_SECURE_MODES),
+            dev=flag("WD_DEV", False),
+            secret_key=secret_key,
+            tz=tz,
+            registration_mode=choice("WD_REGISTRATION_MODE", "invite", REGISTRATION_MODES),
+            session_days=integer("WD_SESSION_DAYS", 30, 1, 3650),
+            max_body_bytes=integer("WD_MAX_BODY_BYTES", 1_048_576, 1024, 1 << 30),
+            worker_enabled=flag("WD_WORKER_ENABLED", True),
+            tick_seconds=integer("WD_TICK_SECONDS", 60, 1, 3600),
+            prebuild_hours=integer("WD_PREBUILD_HOURS", 3, 0, 23),
+            contact_email=text("WD_CONTACT_EMAIL", ""),
+            claude_bin=text("WD_CLAUDE_BIN", "/home/sqin/.local/bin/claude"),
+            claude_home=text("WD_CLAUDE_HOME", ""),
+            claude_path=text("WD_CLAUDE_PATH", "/home/sqin/.local/bin:/usr/local/bin:/usr/bin:/bin"),
+            claude_cwd=claude_cwd,
+            ai_enabled=flag("WD_AI_ENABLED", True),
+            ai_model=text("WD_AI_MODEL", "sonnet"),
+            ai_fallback_model=text("WD_AI_FALLBACK_MODEL", ""),
+            ai_extra_args=text("WD_AI_EXTRA_ARGS", ""),
+            ai_batch_size=clamped("WD_AI_BATCH_SIZE", 10, 1, 12),
+            ai_concurrency=clamped("WD_AI_CONCURRENCY", 1, 1, 3),
+            ai_timeout_content_sec=integer("WD_AI_TIMEOUT_CONTENT_SEC", 180, 5, 3600),
+            ai_timeout_lookup_sec=integer("WD_AI_TIMEOUT_LOOKUP_SEC", 120, 5, 3600),
+            ai_timeout_consolidate_sec=integer("WD_AI_TIMEOUT_CONSOLIDATE_SEC", 240, 5, 3600),
+            ai_timeout_svg_sec=integer("WD_AI_TIMEOUT_SVG_SEC", 120, 5, 3600),
+            ai_budget_content=money("WD_AI_BUDGET_CONTENT", 0.25),
+            ai_budget_lookup=money("WD_AI_BUDGET_LOOKUP", 0.15),
+            ai_budget_consolidate=money("WD_AI_BUDGET_CONSOLIDATE", 0.40),
+            ai_budget_svg=money("WD_AI_BUDGET_SVG", 0.10),
+            ai_daily_budget_usd=money("WD_AI_DAILY_BUDGET_USD", 3.00),
+            ai_monthly_budget_usd=money("WD_AI_MONTHLY_BUDGET_USD", 40.00),
+            ai_prewarm_daily_budget_usd=money("WD_AI_PREWARM_DAILY_BUDGET_USD", 1.00),
+            ai_hourly_call_cap=integer("WD_AI_HOURLY_CALL_CAP", 60, 1, 100_000),
+            ai_svg_daily_budget_usd=money("WD_AI_SVG_DAILY_BUDGET_USD", 0.50),
+            ai_log_keep_days=integer("WD_AI_LOG_KEEP_DAYS", 14, 0, 3650),
+            ecdict_db_path=ecdict_db_path,
+            images_enabled=flag("WD_IMAGES_ENABLED", True),
+            image_providers=tuple(providers),
+            svg_via_claude=flag("WD_SVG_VIA_CLAUDE", True),
+            image_max_bytes=integer("WD_IMAGE_MAX_BYTES", 8_000_000, 10_000, 1 << 30),
+            image_max_edge=integer("WD_IMAGE_MAX_EDGE", 800, 100, 4096),
+            wikimedia_min_interval_ms=integer("WD_WIKIMEDIA_MIN_INTERVAL_MS", 1000, 0, 600_000),
+            wikimedia_daily_limit=integer("WD_WIKIMEDIA_DAILY_LIMIT", 2000, 0, 1_000_000),
+            openverse_minute_limit=integer("WD_OPENVERSE_MINUTE_LIMIT", 15, 0, 100_000),
+            openverse_daily_limit=integer("WD_OPENVERSE_DAILY_LIMIT", 160, 0, 1_000_000),
+            openverse_client_id=text("WD_OPENVERSE_CLIENT_ID", ""),
+            openverse_client_secret=text("WD_OPENVERSE_CLIENT_SECRET", ""),
+            pixabay_key=pixabay_key,
+            pexels_key=pexels_key,
+            smtp_host=text("WD_SMTP_HOST", ""),
+            smtp_port=integer("WD_SMTP_PORT", 587, 1, 65535),
+            smtp_user=text("WD_SMTP_USER", ""),
+            smtp_password=text("WD_SMTP_PASSWORD", ""),
+            smtp_from=text("WD_SMTP_FROM", ""),
+            smtp_tls=choice("WD_SMTP_TLS", "starttls", SMTP_TLS_MODES),
+            log_level=log_level,
+            log_format=choice("WD_LOG_FORMAT", "json", LOG_FORMATS),
+            log_file=text("WD_LOG_FILE", ""),
+            backup_keep_daily=integer("WD_BACKUP_KEEP_DAILY", 14, 0, 10_000),
+            backup_keep_weekly=integer("WD_BACKUP_KEEP_WEEKLY", 8, 0, 10_000),
+            admin_username=text("WD_ADMIN_USERNAME", ""),
+            admin_password=text("WD_ADMIN_PASSWORD", ""),
+            dev_real_claude=flag("WD_DEV_REAL_CLAUDE", False),
+            smoke_mock_http=flag("WD_SMOKE_MOCK_HTTP", False),
+            env_sources=present,
+        )
+
+    # --------------------------------------------------------------------- reporting
+    def entries(self) -> list[dict[str, Any]]:
+        """``[{key, value, source}]`` for ``GET /api/admin/config`` (API.md 73); secrets masked as ``***``."""
+        out: list[dict[str, Any]] = []
+        for f in fields(self):
+            if f.name == "env_sources":
+                continue
+            key = "WD_" + f.name.upper()
+            value = getattr(self, f.name)
+            if key in SECRET_KEYS:
+                shown: Any = "***" if value else ""
+            elif isinstance(value, Path):
+                shown = str(value)
+            elif isinstance(value, tuple):
+                shown = ",".join(value)
+            elif isinstance(value, bool):
+                shown = "1" if value else "0"
+            elif value is None:
+                shown = ""
+            else:
+                shown = str(value)
+            out.append({"key": key, "value": shown, "source": "env" if key in self.env_sources else "default"})
+        return out
+
+
+def origin_of(url: str) -> str | None:
+    """``scheme://host[:port]`` of a URL (lower-case), or None when it has no host."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url.strip())
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def ensure_dirs(cfg: Settings, mode: int = 0o700) -> None:
+    """Create the data dir and its runtime subdirectories (0700, DEPLOY §1). Idempotent."""
+    for d in cfg.runtime_dirs():
+        d.mkdir(parents=True, exist_ok=True, mode=mode)
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True, mode=mode)
+
+
+_cached: Settings | None = None
+
+
+def get_settings(refresh: bool = False) -> Settings:
+    """Process-wide settings built from ``os.environ`` on first use (the app stores its own copy on ``app.state``)."""
+    global _cached
+    if _cached is None or refresh:
+        _cached = Settings.from_env()
+    return _cached

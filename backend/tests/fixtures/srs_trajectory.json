@@ -1,0 +1,43 @@
+{
+ "_doc": {
+  "source": "DESIGN.md §7 — pinned WD-SRS trajectory with fuzz disabled; consumed by backend/tests/unit/test_srs.py (WP4) and frontend utils/srsPreview test (WP8)",
+  "trajectory": "start from a fresh `new` row (ease 2.5, interval 0, step 0, repetitions 0, consecutive_good 0) and apply grades[i] in order; after grade i the row has intervals[i], eases[i], steps[i] and GradeResponse.next_due_zh == next_due_zh[i]. Step 0 is the first exposure graded good → the 10-minute learning step (interval still 0); step 1 graduates to 1 day; mastery_suggested becomes true from index mastery_suggested_from_step on (interval ≥ 30, consecutive_good ≥ 3, step 0).",
+  "lapse": "apply the trajectory up to and including index lapse.after_step (the 20-day step: ease 2.55, consecutive_good 4, repetitions 5), then grade lapse.grades in order: `again` in the review phase lapses (lapses+1, ease 2.55→2.35, consecutive_good 0, relearning step, interval kept at 20), the following `good` on the step graduates with interval max(1, rnd(20 × 0.5)) = 10 days."
+ },
+ "ease_start": 2.5,
+ "grades": ["good", "good", "good", "good", "good", "good", "good", "good"],
+ "intervals": [0, 1, 3, 8, 20, 51, 133, 180],
+ "eases": [2.5, 2.5, 2.5, 2.55, 2.55, 2.55, 2.6, 2.6],
+ "steps": [1, 0, 0, 0, 0, 0, 0, 0],
+ "consecutive_good": [0, 1, 2, 3, 4, 5, 6, 7],
+ "next_due_zh": ["10 分钟后", "明天", "3 天后", "8 天后", "20 天后", "51 天后", "约 4 个月后", "约 6 个月后"],
+ "mastery_suggested_from_step": 5,
+ "lapse": {
+  "after_step": 4,
+  "state_before": {"state": "learning", "ease": 2.55, "interval_days": 20, "step": 0, "repetitions": 5, "lapses": 0, "consecutive_good": 4},
+  "grades": ["again", "good"],
+  "intervals": [20, 10],
+  "eases": [2.35, 2.35],
+  "steps": [1, 0],
+  "lapses": [1, 1],
+  "consecutive_good": [0, 1],
+  "next_due_zh": ["10 分钟后", "10 天后"],
+  "mastery_suggested": [false, false]
+ },
+ "humanize": {
+  "_doc": "GradeResponse.next_due_zh thresholds (API.md §9.1): step 1 → '10 分钟后'; interval 1 → '明天'; 2–59 → 'N 天后'; ≥ 60 → '约 M 个月后' with M = rnd(interval/30) half-up; master → '已掌握'; skip → '已跳过'; screen unfamiliar without a same-day study row → '明天'",
+  "cases": [
+   {"step": 1, "interval_days": 0, "zh": "10 分钟后"},
+   {"step": 1, "interval_days": 20, "zh": "10 分钟后"},
+   {"step": 0, "interval_days": 1, "zh": "明天"},
+   {"step": 0, "interval_days": 2, "zh": "2 天后"},
+   {"step": 0, "interval_days": 59, "zh": "59 天后"},
+   {"step": 0, "interval_days": 60, "zh": "约 2 个月后"},
+   {"step": 0, "interval_days": 133, "zh": "约 4 个月后"},
+   {"step": 0, "interval_days": 180, "zh": "约 6 个月后"}
+  ],
+  "master": "已掌握",
+  "skip": "已跳过",
+  "screen_unfamiliar_no_study_row": "明天"
+ }
+}
