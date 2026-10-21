@@ -447,43 +447,21 @@ def config(admin: dict[str, Any] = Depends(require_admin), cfg: Settings = Depen
     return {"entries": cfg.entries()}
 
 
-def _batch_id(batch: Any) -> int:
-    if isinstance(batch, int):
-        return batch
-    if isinstance(batch, dict):
-        return int(batch["id"])
-    return int(getattr(batch, "id"))
-
-
 @router.post("/api/admin/push/run", response_model=schemas.PushRunResponse)
 def push_run(
     body: schemas.PushRunRequest,
     admin: dict[str, Any] = Depends(require_admin),
     conn: sqlite3.Connection = Depends(get_db),
     clock: Clock = Depends(get_clock),
-    cfg: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     now_dt = clock.now_utc()
-    now = to_iso(now_dt)
     user = conn.execute("SELECT id FROM users WHERE id = ?", (body.user_id,)).fetchone()
     if user is None:
         raise ApiError("not_found")
-    build_batch = bank.late_import("wd.services.batches", "build_batch")
-    publish_batch = bank.late_import("wd.services.batches", "publish_batch")
-    if build_batch is None or publish_batch is None:
+    # WP4's helper (also behind `wd push-now`): build today's batch if missing, publish once, enqueue the deliveries
+    # the user enabled (dedupe email:<id> / webhook:<id>, statuses → 'queued'); late import until the final integration.
+    push_now = bank.late_import("wd.services.batches", "push_now")
+    if push_now is None:
         raise ApiError("ai_disabled", message_zh="每日推送模块尚未安装")
-    uid = int(body.user_id)
-    settings_row = bank.user_settings_row(conn, uid)
-    today = bank.local_date_str(now_dt, str(settings_row["timezone"]))
-    batch = build_batch(conn, uid, today, "admin", now_dt)
-    batch_id = _batch_id(batch)
-    published = bool(publish_batch(conn, batch_id, now_dt))
-    if published:
-        with db.tx(conn):
-            urow = conn.execute("SELECT email, email_verified_at FROM users WHERE id = ?", (uid,)).fetchone()
-            if cfg.email_configured and int(settings_row.get("email_enabled") or 0) and urow and urow["email"] and urow["email_verified_at"]:
-                queue.enqueue(conn, "send_email", {"batch_id": batch_id}, dedupe_key=f"email:{batch_id}", priority=10, now=now)
-            if int(settings_row.get("webhook_enabled") or 0) and settings_row.get("webhook_url"):
-                queue.enqueue(conn, "send_webhook", {"batch_id": batch_id}, dedupe_key=f"webhook:{batch_id}", priority=10, now=now)
-    row = conn.execute("SELECT status FROM push_batches WHERE id = ?", (batch_id,)).fetchone()
-    return {"batch_id": batch_id, "status": str(row[0]) if row else "published"}
+    batch_id, status = push_now(conn, int(body.user_id), now_dt, trigger="admin")
+    return {"batch_id": int(batch_id), "status": str(status)}

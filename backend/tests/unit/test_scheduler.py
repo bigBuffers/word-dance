@@ -242,7 +242,7 @@ class FakeBudget:
         monkeypatch.setitem(sys.modules, "wd.ai.budget", mod)
         return self
 
-    def spent_today(self, conn, now):
+    def spent_today(self, conn, cfg=None, now=None):  # the real wd.ai.budget.spent_today signature (WP5)
         self.calls.append(now)
         return self.spent
 
@@ -320,6 +320,32 @@ def test_prefetch_skips_when_spend_is_high_ai_paused_or_module_missing(settings,
     # everything fine → jobs for the 5 推荐词
     FakeBudget(spent=0.0).install(monkeypatch)
     assert scheduler.prefetch(conn, t, cfg=settings) == 5
+    assert uid
+
+
+def test_prefetch_against_the_real_budget_module(settings, seeded):
+    """Integration seam: the late import meets WP5's real ``spent_today(conn, cfg=None, now=None)`` (no FakeBudget)."""
+    import importlib
+
+    conn = seeded
+    budget = importlib.import_module("wd.ai.budget")
+    assert budget.spent_today.__module__ == "wd.ai.budget"  # the real module, not a stub left over from another test
+    uid = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_screen_count=5)
+    t = datetime(2026, 10, 14, 19, 30, tzinfo=UTC)  # 03:30 Asia/Shanghai (WD_TZ) on 2026-10-15
+    cap = float(settings.ai_daily_budget_usd)
+    # a real ledger row worth 50 % of the daily cap, started on the WD_TZ day of `t` → prefetch skipped
+    conn.execute(
+        "INSERT INTO ai_calls(kind, status, model_requested, flag_tier, word_count, max_budget_usd, reserved_usd, cost_usd, started_at, finished_at) "
+        "VALUES ('content', 'success', 'sonnet', 0, 1, 0.25, 0, ?, '2026-10-14T19:00:00Z', '2026-10-14T19:00:00Z')",
+        (cap * scheduler.PREFETCH_SPEND_SHARE,),
+    )
+    assert budget.spent_today(conn, settings, "2026-10-14T19:30:00Z") >= cap * scheduler.PREFETCH_SPEND_SHARE
+    assert scheduler.prefetch(conn, t, cfg=settings) == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    # nothing spent → the 5 推荐词 get priority-30 content jobs
+    conn.execute("DELETE FROM ai_calls")
+    assert scheduler.prefetch(conn, t, cfg=settings) == 5
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND priority = 30").fetchone()[0] == 5
     assert uid
 
 

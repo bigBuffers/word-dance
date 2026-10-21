@@ -15,8 +15,8 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
 * ``kv.last_tick_at``; a ``downtime`` event with ``{"from","to"}`` when the gap since the last tick exceeds 10 min.
 
-``prefetch`` reads ``wd.ai.budget.spent_today(conn, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` through a late
-import (WP5) and simply skips while that module does not exist.
+``prefetch`` reads ``wd.ai.budget.spent_today(conn, cfg, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` through a
+late import (WP5) and simply skips while that module does not exist.
 """
 
 from __future__ import annotations
@@ -239,7 +239,7 @@ def prefetch(conn: sqlite3.Connection, now: datetime | str | None, *, cfg: Any =
     enabled = bool(ai_enabled(conn, cfg)) if callable(ai_enabled) else bank.ai_enabled(conn, cfg)
     if not enabled or bank.ai_paused_until(conn, now_s) is not None:
         return 0
-    spent = float(budget.spent_today(conn, now_s))
+    spent = float(budget.spent_today(conn, cfg, now_s))  # WP5 signature: spent_today(conn, cfg=None, now=None)
     cap = float(getattr(cfg, "ai_daily_budget_usd", 0.0) or 0.0)
     if spent >= PREFETCH_SPEND_SHARE * cap:
         log.info("prefetch skipped: spent %.3f of %.2f today", spent, cap, extra={"event": "prefetch_skipped"})

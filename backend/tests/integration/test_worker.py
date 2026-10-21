@@ -166,7 +166,7 @@ def test_worker_threads_start_stop_join(seeded, ctx):
     (res,) = bank.add_custom_words(seeded, alice, "GDP", None, False, NOW, "Asia/Shanghai")
     sync_lookups(seeded)
     ctx.clock.advance(seconds=20)
-    queue.enqueue(seeded, "send_webhook", {"batch_id": 1}, dedupe_key="webhook:1", now=NOW)  # no handler in this checkout → failed with backoff by the IoWorker
+    queue.enqueue(seeded, "send_webhook", {"batch_id": 1}, dedupe_key="webhook:1", now=NOW)  # no such batch → WP4's handler finishes it as skipped in the IoWorker
     claude = worker.ClaudeWorker(ctx, idle_wait=0.05)
     io = worker.IoWorker(replace(ctx, worker_id="io-1"), idle_wait=0.05)
     claude.start()
@@ -177,10 +177,11 @@ def test_worker_threads_start_stop_join(seeded, ctx):
         try:
             lookup_done = c.execute("SELECT COUNT(*) FROM jobs WHERE type = 'lookup_word' AND status = 'done'").fetchone()[0] == 1
             content_done = c.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND status = 'done'").fetchone()[0] == 1
-            webhook_failed = c.execute("SELECT last_error FROM jobs WHERE type = 'send_webhook'").fetchone()[0] is not None
+            webhook_row = c.execute("SELECT status, result_json FROM jobs WHERE type = 'send_webhook'").fetchone()
+            webhook_done = webhook_row[0] == "done" and json.loads(webhook_row[1] or "{}").get("skipped") == "batch_missing"
         finally:
             c.close()
-        if lookup_done and content_done and webhook_failed:
+        if lookup_done and content_done and webhook_done:
             break
         time.sleep(0.05)
     claude.stop()
@@ -188,7 +189,7 @@ def test_worker_threads_start_stop_join(seeded, ctx):
     claude.join(timeout=10)
     io.join(timeout=10)
     assert not claude.is_alive() and not io.is_alive()
-    assert lookup_done and content_done and webhook_failed
+    assert lookup_done and content_done and webhook_done
     assert claude.processed == 2 and claude.last_error is None and claude.name == "claude-1" and io.name == "io-1"
     assert words.word_row(seeded, res.word_id)["content_state"] == "ready"
 
