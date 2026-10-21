@@ -1,0 +1,118 @@
+/* WP8 stats components: ProgressRing, HeatStrip (tokens from styles/tokens.css) */
+
+/* ---------- ProgressRing ---------- */
+.ring {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+
+.ring__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ring__track {
+  fill: none;
+  stroke: var(--line);
+}
+
+.ring__value {
+  fill: none;
+  stroke: var(--brand);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 900ms var(--ease);
+}
+
+.ring--complete .ring__value {
+  stroke: var(--good);
+}
+
+.ring__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.ring__figure {
+  font-weight: 700;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.ring__caption {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+/* ---------- HeatStrip ---------- */
+.heat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.heat__grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 3px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.heat__cell {
+  display: block;
+  aspect-ratio: 1;
+  min-width: 8px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  border: 1px solid transparent;
+}
+
+.heat__cell[data-level="1"] {
+  background: color-mix(in srgb, var(--brand) 25%, var(--bg));
+}
+
+.heat__cell[data-level="2"] {
+  background: color-mix(in srgb, var(--brand) 45%, var(--bg));
+}
+
+.heat__cell[data-level="3"] {
+  background: color-mix(in srgb, var(--brand) 70%, var(--bg));
+}
+
+.heat__cell[data-level="4"] {
+  background: var(--brand);
+}
+
+.heat__cell--goal {
+  box-shadow: inset 0 0 0 2px var(--bg), 0 0 0 1px var(--good);
+}
+
+.heat__cell--future {
+  background: transparent;
+  border-color: var(--line);
+  border-style: dashed;
+}
+
+.heat__legend {
+  display: flex;
+  gap: 3px;
+  justify-content: flex-end;
+}
+
+.heat__cell--legend {
+  width: 12px;
+  min-width: 12px;
+}

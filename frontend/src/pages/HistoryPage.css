@@ -1,0 +1,126 @@
+/* HistoryPage */
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.history__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.history__streaks {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.history__streak {
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--good-soft);
+  color: var(--good-ink);
+  font-weight: 600;
+}
+
+.history__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.history__section-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.history__days,
+.history__stubborn,
+.history__batches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__day {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-s);
+  background: var(--bg-2);
+  color: inherit;
+}
+
+a.history__day:hover {
+  text-decoration: none;
+  background: var(--brand-soft);
+}
+
+.history__day--goal {
+  background: var(--good-soft);
+}
+
+.history__day--offline {
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  background: transparent;
+}
+
+.history__stubborn-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  color: inherit;
+}
+
+.history__stubborn-row:hover {
+  text-decoration: none;
+  color: var(--brand-ink);
+}
+
+.history__stubborn-word {
+  font-family: var(--font-word);
+  font-weight: 600;
+}
+
+.history__stubborn-zh {
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history__batch {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: inherit;
+}
+
+.history__batch:hover {
+  text-decoration: none;
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+}
+
+.history__batch-date {
+  font-weight: 700;
+}
+
+.history__batch-kinds {
+  font-size: var(--text-sm);
+}

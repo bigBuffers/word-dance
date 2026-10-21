@@ -1,0 +1,95 @@
+/* StudyPage — 100dvh session layout, grade bar sticky at the bottom (FRONTEND §6.2) */
+.study-page {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100dvh - var(--safe-top));
+  padding-bottom: 0;
+}
+
+.study-page__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  margin-bottom: var(--space-2);
+}
+
+.study-page__exit {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.study-page__exit:hover {
+  color: var(--brand-ink);
+  text-decoration: none;
+}
+
+.study-page__meter {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.study-page__meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand);
+  transition: width var(--dur) var(--ease);
+}
+
+.study-page__progress {
+  flex: none;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.study-page__sync {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-s);
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.study-page__waiting {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+
+.study-page__waiting-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-lg);
+}
+
+.study-page__skeleton {
+  margin: var(--space-4) 0;
+}
+
+.study-page__replay-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 calc(var(--space-4) + var(--safe-bottom) + var(--tabbar-h));
+}
+
+.study-page--replay .study-card__back {
+  padding-bottom: var(--space-3);
+}
