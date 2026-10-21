@@ -11,6 +11,7 @@ import { buildToday, getBank, getToday, requestMore } from '@/api/endpoints';
 import type { MoreSource } from '@/api/endpoints';
 import type { TodayCounts, TodayResponse } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
+import { hasUngradedItems, setTodayUngraded } from '@/components/layout/AppLayout';
 import { ProgressRing } from '@/components/stats/ProgressRing';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -52,6 +53,11 @@ export default function TodayPage() {
   // the empty-bank state needs to know whether the bank has anything to push (FRONTEND §6.1)
   const probe = useApi((signal) => getBank({ state: 'active', page_size: 1 }, signal), [], { enabled: data?.status === 'none' });
   const bankEmpty = data?.status === 'none' && probe.data !== null && probe.data.total === 0;
+
+  // shell today-badge (WP7 AppLayout): mirror "ungraded items exist" from every TodayResponse we hold
+  useEffect(() => {
+    if (data) setTodayUngraded(hasUngradedItems(data));
+  }, [data]);
 
   useEffect(() => {
     if (pending <= 0) return;

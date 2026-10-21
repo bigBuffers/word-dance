@@ -15,6 +15,7 @@ import { buildToday, completeToday, getBatch, getToday, getWordContent, gradeIte
 import type { ContentResponse, GradeBody, MoreSource } from '@/api/endpoints';
 import type { Grade, GradeResponse, ScreenVerdict, SessionSummary as SessionSummaryDto, StudyItem, TodayResponse, WordBrief } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
+import { setTodayUngraded } from '@/components/layout/AppLayout';
 import { SessionSummary } from '@/components/study/SessionSummary';
 import { StudyCard, resultLabel } from '@/components/study/StudyCard';
 import { Button } from '@/components/ui/Button';
@@ -176,6 +177,12 @@ export default function StudyPage() {
   const current = currentId !== null ? (items[currentId] ?? null) : null;
   const complete = batch !== null && isComplete(queue);
   const waiting = isWaiting(queue);
+
+  // ---- shell today-badge (WP7 AppLayout): "ungraded items exist" for today's batch, once the queue holds it
+  useEffect(() => {
+    if (!batch || !isToday || queue.batchId !== batch.id) return;
+    setTodayUngraded(!complete);
+  }, [batch, isToday, queue.batchId, complete]);
 
   // ---- per-card bookkeeping: elapsed timer, hint reset, auto-pronounce -----------------------------
   // keyed on the card id and its display string only: a content-poll patch of the same card must not
