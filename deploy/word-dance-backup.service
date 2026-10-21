@@ -1,0 +1,11 @@
+# deploy/word-dance-backup.service
+[Unit]
+Description=word-Dance nightly backup (VACUUM INTO + integrity_check + gzip)
+[Service]
+Type=oneshot
+User=__USER__
+Group=__USER__
+EnvironmentFile=__DATA__/.env
+Environment=HOME=/home/__USER__
+UMask=0077
+ExecStart=__REPO__/.venv/bin/wd backup --keep-daily 14 --keep-weekly 8

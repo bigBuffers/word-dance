@@ -43,6 +43,8 @@ WORDLISTS_DIR ?=
 BACKUP_ARGS  ?= --keep-daily 14 --keep-weekly 8
 # Extra flags for deploy/install.sh, e.g. make install INSTALL_ARGS="--with-caddy words.example.com"
 INSTALL_ARGS ?=
+# Extra flags for scripts/smoke.py, e.g. make smoke SMOKE_ARGS="--keep --port 8011"
+SMOKE_ARGS   ?=
 
 # $(call need,<path>,<hint>) — fail early with a hint instead of bash's "No such file".
 define need
@@ -79,10 +81,9 @@ test: ## pytest + tsc + vitest + vite build
 
 check: test ## Alias of `make test`
 
-smoke: ## End-to-end smoke run against a throwaway instance with the fake claude (scripts/smoke.py)
+smoke: ## End-to-end smoke run against a throwaway instance with the fake claude (scripts/smoke.py: temp data dir, port 8010, mocked providers)
 	$(call need,$(PY),run 'make setup' first)
-	@test -f scripts/smoke.py || { echo "make: scripts/smoke.py is not in this checkout yet (added by WP9)" >&2; exit 2; }
-	$(PYENV) $(PY) scripts/smoke.py
+	$(PYENV) $(PY) scripts/smoke.py $(SMOKE_ARGS)
 
 seed: ## Rebuild data/seed from ECDICT + syllabus lists: make seed ECDICT_DB=<stardict.db> WORDLISTS_DIR=<dir>
 	@test -f "$(ECDICT_DB)" || { echo "make: set ECDICT_DB=<path to ECDICT stardict.db> (deploy/fetch_ecdict.sh downloads it)" >&2; exit 2; }
@@ -91,8 +92,7 @@ seed: ## Rebuild data/seed from ECDICT + syllabus lists: make seed ECDICT_DB=<st
 	gzip -9 -n -k -f data/seed/vocab.jsonl
 	@echo "data/seed/vocab.jsonl.gz: $$(zcat data/seed/vocab.jsonl.gz | wc -l) records"
 
-install: ## Install or upgrade the systemd service on this box (deploy/install.sh)
-	@test -x deploy/install.sh || { echo "make: deploy/install.sh is not in this checkout yet (added by WP9)" >&2; exit 2; }
+install: ## Install or upgrade the systemd service on this box (deploy/install.sh; INSTALL_ARGS="--with-caddy DOMAIN" etc.)
 	deploy/install.sh $(INSTALL_ARGS)
 
 backup: ## Snapshot the live database with retention (wd backup --keep-daily 14 --keep-weekly 8)

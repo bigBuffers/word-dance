@@ -1,0 +1,40 @@
+# deploy/word-dance.service  (rendered: __USER__=sqin, __REPO__=/home/sqin/word-Dance, __DATA__=/home/sqin/word-dance-data)
+[Unit]
+Description=word-Dance vocabulary service (API + web + scheduler + workers)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__REPO__
+EnvironmentFile=__DATA__/.env
+Environment=HOME=/home/__USER__
+Environment=PATH=/home/__USER__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1 LANG=C.UTF-8
+ExecStart=__REPO__/.venv/bin/wd serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=300
+KillMode=mixed
+UMask=0077
+LimitNOFILE=8192
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Deliberately NOT set: ProtectHome / ProtectSystem=strict — the claude CLI must read and write
+# /home/sqin/.claude and /home/sqin/.claude.json (OAuth credentials, FACTS §3), and the data dir lives under /home.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=word-dance
+
+[Install]
+WantedBy=multi-user.target
