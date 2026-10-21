@@ -1,0 +1,326 @@
+"""Webhook delivery (WP4, DESIGN §6.5, API.md 17): the ``send_webhook`` handler, the five formats and the SSRF-safe
+:func:`safe_post` (``https`` only, hostname never an IP literal, every DNS record public, the connection pinned to
+the resolved address with the ``Host`` header and ``sni_hostname``, 10 s timeout, no redirects).
+
+Formats (payload shapes): ``generic`` ``{type, date, title, body, counts, words:[{word, phonetic, meaning_zh}], url}``
+(``url: null`` when no public URL is known) · ``wecom`` ``{"msgtype":"text","text":{"content":…}}`` · ``feishu``
+``{"msg_type":"text","content":{"text":…}}`` · ``serverchan`` ``{"title":…,"desp":…}`` · ``bark`` ``{"title":…,"body":…,"url":…}``
+(``url`` omitted when unknown). :func:`send_test_webhook` is called synchronously by ``POST /api/settings/webhook/test``
+(WP2, late import).
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import logging
+import re
+import socket
+import sqlite3
+from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+
+from .. import __version__, db
+from ..interfaces import Job
+from ..jobs import queue
+from ..jobs.registry import JobContext, register
+from ..services import batches
+from . import email as email_mod
+
+log = logging.getLogger("wd.delivery.webhook")
+
+TIMEOUT_S = 10.0
+FORMATS: tuple[str, ...] = ("generic", "wecom", "feishu", "serverchan", "bark")
+HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".lan", ".home", ".intranet", ".corp", ".test", ".invalid", ".example")
+NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+SHARED_V4 = ipaddress.ip_network("100.64.0.0/10")
+TEST_TITLE_ZH = "word-Dance 测试消息"
+TEST_BODY_ZH = "Webhook 配置成功，每日词汇将推送到这里。"
+NO_LINK_ZH = email_mod.NO_LINK_ZH
+DELIVERY_ERROR_CHARS = 300
+
+#: tests replace this with a factory returning an ``httpx.Client`` on a ``MockTransport``
+CLIENT_FACTORY: Callable[[], httpx.Client] | None = None
+
+
+class WebhookError(Exception):
+    """The request was refused or failed (reason in the message)."""
+
+
+class SsrfError(WebhookError):
+    """The URL or a resolved address violates the SSRF rules (never retried)."""
+
+
+# -------------------------------------------------------------------------------------------- SSRF
+def is_public_ip(value: str) -> bool:
+    """True only for a globally routable unicast address (IPv4-mapped / NAT64 / 6to4 wrappers are unwrapped first)."""
+    try:
+        ip = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is not None:
+            ip = mapped
+        elif ip in NAT64_PREFIX:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif ip.teredo is not None:
+            return False
+    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return False
+    if isinstance(ip, ipaddress.IPv4Address) and ip in SHARED_V4:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local:
+        return False
+    return bool(ip.is_global)
+
+
+def resolve_host(host: str) -> list[str]:
+    """All A/AAAA records of ``host`` (module-level so tests can replace it)."""
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise SsrfError(f"cannot resolve {host}: {e}") from e
+    ips: list[str] = []
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        ip = str(sockaddr[0])
+        if ip not in ips:
+            ips.append(ip)
+    return ips
+
+
+def validate_url(url: str) -> tuple[str, str]:
+    """Shape check: ``https``, a real hostname, no credentials; returns ``(host, normalised_url)``."""
+    parts = urlsplit((url or "").strip())
+    if parts.scheme.lower() != "https":
+        raise SsrfError("only https URLs are allowed")
+    if parts.username is not None or parts.password is not None:
+        raise SsrfError("credentials in URL")
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host:
+        raise SsrfError("URL has no host")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise SsrfError("IP-literal URLs are refused")
+    if host == "localhost" or host.endswith(LOCAL_SUFFIXES) or "." not in host:
+        raise SsrfError(f"host {host} is not public")
+    if not HOSTNAME_RE.match(host):
+        raise SsrfError(f"invalid hostname {host!r}")
+    try:
+        port = parts.port
+    except ValueError as e:
+        raise SsrfError("invalid port") from e
+    netloc = host if port in (None, 443) else f"{host}:{port}"
+    return host, urlunsplit(("https", netloc, parts.path or "/", parts.query, ""))
+
+
+def pin(url: str) -> tuple[str, str]:
+    """Validate, resolve, require every record public; returns ``(host, url_with_the_resolved_ip)``."""
+    host, url = validate_url(url)
+    ips = resolve_host(host)
+    if not ips:
+        raise SsrfError(f"{host} has no address records")
+    for ip in ips:
+        if not is_public_ip(ip):
+            raise SsrfError(f"{host} resolves to a non-public address {ip}")
+    chosen = ips[0]
+    parts = urlsplit(url)
+    port = parts.port
+    netloc = f"[{chosen}]" if ":" in chosen else chosen
+    if port not in (None, 443):
+        netloc = f"{netloc}:{port}"
+    return host, urlunsplit(("https", netloc, parts.path or "/", parts.query, ""))
+
+
+def _client() -> httpx.Client:
+    if CLIENT_FACTORY is not None:
+        return CLIENT_FACTORY()
+    return httpx.Client(
+        timeout=httpx.Timeout(TIMEOUT_S, connect=TIMEOUT_S),
+        follow_redirects=False,
+        headers={"User-Agent": f"word-Dance/{__version__}"},
+    )
+
+
+def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOUT_S, client: httpx.Client | None = None) -> tuple[int | None, str | None]:
+    """POST ``payload`` as JSON under the SSRF rules; returns ``(http_status, error)`` and never raises.
+
+    ``error`` is None on a 2xx response. An :class:`SsrfError` reason is reported with ``http_status None``.
+    """
+    try:
+        host, pinned = pin(url)
+    except SsrfError as e:
+        return None, f"rejected: {e}"
+    own = client is None
+    c = client if client is not None else _client()
+    try:
+        response = c.post(
+            pinned,
+            json=dict(payload),
+            headers={"Host": host, "Content-Type": "application/json; charset=utf-8"},
+            extensions={"sni_hostname": host},
+            follow_redirects=False,
+            timeout=timeout_s,
+        )
+    except httpx.HTTPError as e:
+        return None, f"request failed: {e.__class__.__name__}: {e}"
+    finally:
+        if own:
+            c.close()
+    if 200 <= response.status_code < 300:
+        return response.status_code, None
+    return response.status_code, f"HTTP {response.status_code}"
+
+
+# ------------------------------------------------------------------------------------------ formats
+def digest_body(d: email_mod.Digest) -> str:
+    """The plain-text body shared by the text-style formats."""
+    lines = [d.summary_zh, ""]
+    lines.extend(d.word_lines())
+    lines.append("")
+    lines.append(f"{email_mod.OPEN_LINK_ZH}：{d.url}" if d.url else NO_LINK_ZH)
+    return "\n".join(lines).strip()
+
+
+def build_payload(fmt: str, title: str, body: str, *, url: str | None, date: str, counts: Mapping[str, int] | None = None, words: list[dict[str, Any]] | None = None, type_: str = "daily_push") -> dict[str, Any]:
+    """The request body for ``fmt`` (DESIGN §6.5 shapes)."""
+    if fmt not in FORMATS:
+        raise ValueError(f"unknown webhook format {fmt!r}")
+    text = f"{title}\n{body}"
+    if fmt == "generic":
+        return {
+            "type": type_,
+            "date": date,
+            "title": title,
+            "body": body,
+            "counts": dict(counts or {"review": 0, "new": 0, "screen": 0, "extra": 0, "deferred_reviews": 0}),
+            "words": list(words or []),
+            "url": url,
+        }
+    if fmt == "wecom":
+        return {"msgtype": "text", "text": {"content": text}}
+    if fmt == "feishu":
+        return {"msg_type": "text", "content": {"text": text}}
+    if fmt == "serverchan":
+        return {"title": title, "desp": body}
+    payload: dict[str, Any] = {"title": title, "body": body}  # bark
+    if url:
+        payload["url"] = url
+    return payload
+
+
+def digest_payload(fmt: str, d: email_mod.Digest) -> dict[str, Any]:
+    return build_payload(
+        fmt,
+        d.title,
+        digest_body(d),
+        url=d.url,
+        date=d.local_date,
+        counts={"review": d.review, "new": d.new, "screen": d.screen, "extra": d.extra, "deferred_reviews": d.deferred},
+        words=[{"word": w.word, "phonetic": w.phonetic, "meaning_zh": w.meaning_zh} for w in d.words],
+    )
+
+
+# ------------------------------------------------------------------------------------------ sending
+def _set_webhook_status(conn: sqlite3.Connection, batch_id: int, status: str, error: str | None = None) -> None:
+    with db.maybe_tx(conn):
+        conn.execute(
+            "UPDATE push_batches SET webhook_status = ?, delivery_error = ? WHERE id = ?",
+            (status, None if error is None else error[:DELIVERY_ERROR_CHARS], int(batch_id)),
+        )
+
+
+def send_batch_webhook(conn: sqlite3.Connection, cfg: Any, batch_id: int, now: str) -> dict[str, Any]:
+    """Send the digest of ``batch_id`` to the user's webhook; idempotent (``sent`` batches are not re-sent).
+
+    Raises :class:`WebhookError` on an HTTP/network failure (retried by the handler) and :class:`SsrfError` for a
+    refused URL (final).
+    """
+    batch = batches.batch_row(conn, batch_id)
+    if batch is None:
+        return {"skipped": "batch_missing"}
+    if batch.get("webhook_status") == "sent":
+        return {"skipped": "already_sent"}
+    s = conn.execute("SELECT webhook_enabled, webhook_url, webhook_format FROM user_settings WHERE user_id = ?", (int(batch["user_id"]),)).fetchone()
+    if s is None or not int(s["webhook_enabled"] or 0) or not s["webhook_url"]:
+        _set_webhook_status(conn, batch_id, "skipped")
+        return {"skipped": "channel_disabled"}
+    fmt = str(s["webhook_format"] or "generic")
+    payload = digest_payload(fmt, email_mod.build_digest(conn, cfg, batch))
+    status, error = safe_post(str(s["webhook_url"]), payload)
+    if error is None:
+        _set_webhook_status(conn, batch_id, "sent")
+        log.info("webhook sent", extra={"event": "webhook_sent", "user_id": int(batch["user_id"]), "status": status})
+        return {"sent": True, "http_status": status, "format": fmt}
+    if status is None and error.startswith("rejected:"):
+        raise SsrfError(error)
+    raise WebhookError(error)
+
+
+def send_test_webhook(settings_row: Mapping[str, Any]) -> dict[str, Any]:
+    """API.md 17: post a test message in the configured format synchronously → ``{ok, http_status, error}``."""
+    url = str(settings_row.get("webhook_url") or "")
+    fmt = str(settings_row.get("webhook_format") or "generic")
+    if fmt not in FORMATS:
+        fmt = "generic"
+    from datetime import datetime, timezone
+
+    payload = build_payload(fmt, TEST_TITLE_ZH, TEST_BODY_ZH, url=None, date=datetime.now(timezone.utc).date().isoformat(), type_="test")
+    status, error = safe_post(url, payload)
+    return {"ok": error is None, "http_status": status, "error": error}
+
+
+@register("send_webhook")
+def handle_send_webhook(ctx: JobContext, jobs: list[Job]) -> None:
+    """``send_webhook`` handler: HTTP failures retry through ``queue.fail``; SSRF rejections are final (``failed``)."""
+    for job in jobs:
+        conn = ctx.db()
+        try:
+            now = ctx.now()
+            batch_id = (job.payload or {}).get("batch_id")
+            if batch_id is None:
+                queue.fail(conn, job.id, "send_webhook payload without batch_id", now=now)
+                continue
+            try:
+                result = send_batch_webhook(conn, ctx.cfg, int(batch_id), now)
+            except SsrfError as e:
+                _set_webhook_status(conn, int(batch_id), "failed", str(e))
+                queue.finish(conn, job.id, {"error": str(e)[:DELIVERY_ERROR_CHARS], "final": True}, now=now)
+                log.warning("webhook refused: %s", e, extra={"event": "webhook_rejected", "job_id": job.id})
+                continue
+            except WebhookError as e:
+                status = queue.fail(conn, job.id, str(e), now=now)
+                _set_webhook_status(conn, int(batch_id), "failed" if status == "dead" else "queued", str(e))
+                log.warning("webhook delivery failed (%s): %s", status, e, extra={"event": "webhook_failed", "job_id": job.id})
+                continue
+            queue.finish(conn, job.id, result, now=now)
+        finally:
+            conn.close()
+
+
+__all__ = [
+    "CLIENT_FACTORY",
+    "FORMATS",
+    "SsrfError",
+    "TEST_BODY_ZH",
+    "TEST_TITLE_ZH",
+    "WebhookError",
+    "build_payload",
+    "digest_body",
+    "digest_payload",
+    "handle_send_webhook",
+    "is_public_ip",
+    "pin",
+    "resolve_host",
+    "safe_post",
+    "send_batch_webhook",
+    "send_test_webhook",
+    "validate_url",
+]
