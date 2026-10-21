@@ -39,8 +39,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 REPO = Path(__file__).resolve().parents[1]
-BACKEND = REPO / "backend"
-FAKE_CLAUDE = BACKEND / "tests" / "fake_claude.py"
+BACKEND = REPO / "backend"  # overridable with --backend (another checkout's backend/, e.g. an integration tree)
 UTC = timezone.utc
 
 USERNAME_A, USERNAME_B = "alice", "bob"
@@ -137,6 +136,8 @@ class Smoke:
         self.python: str = args.python
         self.verbose: bool = args.verbose
         self.startup_timeout: float = args.startup_timeout
+        self.backend = Path(args.backend).resolve() if args.backend else BACKEND
+        self.fake_claude = self.backend / "tests" / "fake_claude.py"
         self.data_dir = Path(args.data_dir).resolve() if args.data_dir else Path(tempfile.mkdtemp(prefix="wd-smoke-"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.data_dir, 0o700)
@@ -149,7 +150,7 @@ class Smoke:
     # ---------------------------------------------------------------- environment / processes
     def _build_env(self, seed: str | None) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if not k.startswith("WD_") and k not in ("CLAUDECODE", "FAKE_CLAUDE_MODE", "WEB_CONCURRENCY")}
-        env["PYTHONPATH"] = str(BACKEND) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["PYTHONPATH"] = str(self.backend) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env["PYTHONUNBUFFERED"] = "1"
         env.update(
             {
@@ -159,7 +160,7 @@ class Smoke:
                 "WD_PUBLIC_URL": "",
                 "WD_REGISTRATION_MODE": "open",
                 "WD_SECRET_KEY": secrets.token_hex(32),
-                "WD_CLAUDE_BIN": str(FAKE_CLAUDE),
+                "WD_CLAUDE_BIN": str(self.fake_claude),
                 "WD_CLAUDE_CWD": str(self.data_dir / "claude-cwd"),
                 "WD_SMOKE_MOCK_HTTP": "1",
                 "WD_WORKER_ENABLED": "0",
@@ -178,7 +179,7 @@ class Smoke:
 
     def cli(self, *args: str, check: bool = True, timeout: float = 300) -> subprocess.CompletedProcess[str]:
         cmd = [self.python, "-m", "wd.cli", *args]
-        cp = subprocess.run(cmd, env=self.env, cwd=str(REPO), capture_output=True, text=True, timeout=timeout)
+        cp = subprocess.run(cmd, env=self.env, cwd=str(self.backend.parent), capture_output=True, text=True, timeout=timeout)
         if self.verbose:
             print(f"    $ wd {' '.join(args)} → {cp.returncode}\n{cp.stdout.strip()}\n{cp.stderr.strip()}".rstrip())
         if check and cp.returncode != 0:
@@ -192,7 +193,7 @@ class Smoke:
         self.server = subprocess.Popen(
             [self.python, "-m", "wd.cli", "serve"],
             env=self.env,
-            cwd=str(REPO),
+            cwd=str(self.backend.parent),
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -589,8 +590,10 @@ def run_scenario(s: Smoke) -> None:
         bob.get(f"/api/batches/{ids['batch']}", expect_status=404)
         stats = alice.get("/api/stats")
         expect(len(stats["stages"]) == 4 and len(stats["heatmap"]) == 84, f"stats shape {len(stats['stages'])} {len(stats['heatmap'])}")
-        expect(stats["total_graded"] >= 1 and stats["total_mastered"] >= 1 and stats["streak_days"] >= 1, f"stats {stats['total_graded']} {stats['total_mastered']}")
-        expect(stats["bank"]["new"] + stats["bank"]["learning"] >= 1, f"bank {stats['bank']}")
+        # total_mastered counts words mastered *now*: the one word mastered above was deliberately re-added (times_added 2)
+        expect(stats["total_graded"] >= 1 and isinstance(stats["total_mastered"], int) and stats["streak_days"] >= 1, f"stats {stats['total_graded']} {stats['total_mastered']} {stats['streak_days']}")
+        expect(stats["bank"]["new"] + stats["bank"]["learning"] >= 1 and stats["bank"]["known"] >= 1, f"bank {stats['bank']}")
+        expect(stats["custom_words"] >= 1, f"custom_words {stats['custom_words']}")
 
     with s.step("admin overview: today_usd > 0 with the fake; image tiles sum to with_content; no dead jobs"):
         ov = alice.get("/api/admin/overview")
@@ -635,6 +638,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", default=None, help="WD_SEED_PATH override (default: the shipped data/seed/vocab.jsonl.gz)")
     p.add_argument("--startup-timeout", type=float, default=180.0, help="seconds to wait for /api/health (the first start imports the seed)")
     p.add_argument("--python", default=sys.executable, help="interpreter for `wd serve` / `wd worker-once` (default: this one)")
+    p.add_argument("--backend", default=None, help="backend/ directory to run (default: this checkout's; point it at another checkout to smoke that tree)")
     p.add_argument("-v", "--verbose", action="store_true", help="print every CLI invocation")
     return p.parse_args(argv)
 
@@ -646,11 +650,11 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         print("smoke: httpx is required (it is pinned in backend/requirements.txt — run with .venv/bin/python)", file=sys.stderr)
         return 2
-    if not FAKE_CLAUDE.is_file():
-        print(f"smoke: {FAKE_CLAUDE} missing", file=sys.stderr)
-        return 2
     s = Smoke(args)
-    print(f"smoke: data dir {s.data_dir}, port {s.port}, fake claude, mocked providers, registration open")
+    if not s.fake_claude.is_file():
+        print(f"smoke: {s.fake_claude} missing", file=sys.stderr)
+        return 2
+    print(f"smoke: backend {s.backend}, data dir {s.data_dir}, port {s.port}, fake claude, mocked providers, registration open")
     ok = False
     try:
         with s.step("start `wd serve` (worker threads off) and wait for /api/health"):
