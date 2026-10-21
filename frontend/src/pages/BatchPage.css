@@ -1,0 +1,123 @@
+/* BatchPage */
+.batch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.batch__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.batch__back {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.batch__title {
+  margin: 0;
+}
+
+.batch__hero {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.batch__hero-body {
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.batch__kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.batch__hero-body .btn {
+  align-self: flex-start;
+}
+
+.batch__items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 56px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: inherit;
+}
+
+.batch__item:hover {
+  text-decoration: none;
+  background: var(--bg-2);
+}
+
+.batch__item-word {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.batch__item-display {
+  font-family: var(--font-word);
+  font-weight: 600;
+}
+
+.batch__item-zh {
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch__item-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.batch__result--again,
+.batch__result--unfamiliar {
+  background: var(--again-soft);
+  color: var(--again-ink);
+}
+
+.batch__result--hard {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.batch__result--good,
+.batch__result--master,
+.batch__result--known {
+  background: var(--good-soft);
+  color: var(--good-ink);
+}

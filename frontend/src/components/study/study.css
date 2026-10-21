@@ -1,0 +1,558 @@
+/* WP8 study components: StudyCard, ScreenCard, ExampleList, WordImage, SessionSummary.
+   Tokens from styles/tokens.css; mobile-first; tap targets ≥ 44 px (FRONTEND §6.2). */
+
+/* ---------- keyboard hints (desktop with a fine pointer only) ---------- */
+.study-kbd {
+  display: none;
+  margin-left: var(--space-1);
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  font-size: 0.7em;
+  font-weight: 600;
+  line-height: 1.5;
+  opacity: 0.75;
+  vertical-align: middle;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .study-kbd {
+    display: inline-block;
+  }
+}
+
+/* ---------- StudyCard ---------- */
+.study-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+}
+
+.study-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: var(--tap);
+}
+
+.study-card__counter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.study-card__face {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+}
+
+.study-card__front {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 50dvh;
+}
+
+.study-card__front--tappable {
+  cursor: pointer;
+}
+
+.study-card__front .study-card__word,
+.screen-card__word {
+  align-items: center;
+}
+
+.study-card__front .word-head__row,
+.study-card__front .word-head__meta,
+.screen-card__word .word-head__row,
+.screen-card__word .word-head__meta {
+  justify-content: center;
+}
+
+.study-card__hint {
+  margin: 0;
+  max-width: 36em;
+  color: var(--muted);
+  font-size: var(--text-lg);
+  line-height: 1.6;
+}
+
+.study-card__front-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.study-card__peek {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.study-card__peek-link,
+.screen-card__peek-link,
+.example__zh-toggle {
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--brand-ink);
+  font-weight: 600;
+  border-radius: var(--radius-s);
+}
+
+.study-card__peek-link:hover,
+.screen-card__peek-link:hover,
+.example__zh-toggle:hover {
+  background: var(--brand-soft);
+}
+
+.study-card__back {
+  gap: var(--space-3);
+  padding-bottom: var(--space-5);
+}
+
+.study-card__meaning {
+  margin: 0;
+  font-size: var(--text-lg);
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.study-card__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.study-card__section-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.study-card__mnemonic {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.study-card__notice {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+.study-card__notice--deferred {
+  background: var(--hard-soft);
+}
+
+.study-card__notice-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.study-card__notice .btn {
+  align-self: flex-start;
+}
+
+.study-card__dict {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+}
+
+.study-card__dict summary {
+  cursor: pointer;
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+
+.study-card__dict-pos {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+
+.study-card__dict-lines {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.2em;
+  line-height: 1.7;
+}
+
+.study-card__dict-def {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.study-card__srs,
+.study-card__preview {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.study-card__result {
+  font-size: var(--text-sm);
+}
+
+.study-card__result--again,
+.study-card__result--unfamiliar {
+  background: var(--again-soft);
+  color: var(--again-ink);
+}
+
+.study-card__result--hard {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
+.study-card__result--good,
+.study-card__result--master,
+.study-card__result--known {
+  background: var(--good-soft);
+  color: var(--good-ink);
+}
+
+/* grade bar: fixed to the bottom of the study page (safe-area aware) */
+.study-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0 calc(var(--space-3) + var(--safe-bottom) + var(--tabbar-h));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.study-bar__grades {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+}
+
+.study-bar__grades .btn {
+  flex-direction: column;
+  gap: 2px;
+  min-height: 60px;
+  padding-inline: var(--space-2);
+}
+
+.study-bar__grades .btn__label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.study-bar__label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.study-bar__due {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.study-bar__secondary {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.study-bar__suggested {
+  margin-left: var(--space-1);
+  background: color-mix(in srgb, #ffffff 25%, transparent);
+  color: inherit;
+}
+
+.study-bar--screen {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+/* ---------- ScreenCard ---------- */
+.screen-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+}
+
+.screen-card__body {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  min-height: 45dvh;
+  padding: var(--space-5) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  background: var(--bg);
+  box-shadow: var(--shadow-1);
+  text-align: center;
+  touch-action: pan-y;
+  user-select: none;
+  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.screen-card__body.is-dragging {
+  transition: none;
+}
+
+.screen-card__body.is-right {
+  background: var(--good-soft);
+}
+
+.screen-card__body.is-left {
+  background: var(--again-soft);
+}
+
+.screen-card__swipe {
+  position: absolute;
+  top: var(--space-4);
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+  font-size: var(--text-sm);
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.screen-card__swipe--right {
+  left: var(--space-4);
+  background: var(--good);
+  color: #ffffff;
+}
+
+.screen-card__swipe--left {
+  right: var(--space-4);
+  background: var(--again);
+  color: #ffffff;
+}
+
+.screen-card__body.is-right .screen-card__swipe--right,
+.screen-card__body.is-left .screen-card__swipe--left {
+  opacity: 1;
+}
+
+.screen-card__peek {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.screen-card__bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  padding: var(--space-3) 0 calc(var(--space-3) + var(--safe-bottom) + var(--tabbar-h));
+}
+
+.screen-card__bar .btn--ghost {
+  grid-column: 1 / -1;
+}
+
+/* ---------- ExampleList ---------- */
+.examples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.example {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.example__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.example__en {
+  flex: 1 1 auto;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.example__speak {
+  flex: none;
+  margin-top: -6px;
+}
+
+.example__zh {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.example__zh-toggle {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* ---------- WordImage ---------- */
+.word-image {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.word-image__box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+.word-image__box--flat {
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.word-image__skeleton {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  border-radius: 0;
+}
+
+.word-image__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.word-image__box--flat .word-image__img {
+  object-fit: contain;
+}
+
+.word-image__img.is-loaded {
+  opacity: 1;
+}
+
+.word-image__caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.word-image__source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 12em;
+}
+
+.word-image__actions {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+/* ---------- SessionSummary ---------- */
+.summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--space-5) 0;
+  text-align: center;
+}
+
+.summary__title {
+  margin: 0;
+}
+
+.summary__counts,
+.summary__grades,
+.summary__meta {
+  margin: 0;
+}
+
+.summary__counts {
+  font-weight: 600;
+}
+
+.summary__sep {
+  color: var(--muted);
+}
+
+.summary__unfamiliar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.summary__subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.summary__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* chips that navigate (易混, 不熟悉 words) */
+.chip--link {
+  color: var(--brand-ink);
+  text-decoration: none;
+  min-height: 32px;
+}
+
+.chip--link:hover {
+  text-decoration: none;
+  background: var(--brand-soft);
+}
