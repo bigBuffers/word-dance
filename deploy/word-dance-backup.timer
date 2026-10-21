@@ -1,0 +1,9 @@
+# deploy/word-dance-backup.timer
+[Unit]
+Description=word-Dance nightly backup timer
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=10m
+[Install]
+WantedBy=timers.target

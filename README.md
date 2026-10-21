@@ -24,7 +24,7 @@
 | 前端 | React 19 · TypeScript 5.9 · Vite 8 · react-router 7 · 原生 CSS（移动优先，支持深色模式） |
 | AI | Claude Code CLI（`claude -p … --json-schema …`），按词批量调用、全局缓存、每次 / 每日 / 每月预算上限 |
 | 图片 | Wikimedia Commons（主）→ Openverse（次）→ 可选 Pixabay / Pexels → Claude 生成 SVG → 系统卡片；全部下载、重编码并由本机提供 |
-| 部署 | Ubuntu 24.04 · systemd 系统单元 · 一个数据目录 · 可选 Caddy / nginx 反向代理 |
+| 部署 | Ubuntu 24.04 · systemd 系统单元 · 一个数据目录 · 每夜自动备份 · 可选 Caddy / nginx 反向代理 |
 
 设计细节见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
@@ -34,25 +34,49 @@
 
 ```bash
 make setup   # 创建 .venv，安装后端依赖并以可编辑方式安装 wd 包，frontend 执行 npm ci
-make dev     # 后端 uvicorn --reload :8000（数据目录 ./.dev-data，开放注册）+ 前端 Vite :5173（代理 /api 与 /media）
+make dev     # scripts/dev.sh：后端 uvicorn --reload :8000（数据目录 ./.dev-data，开放注册）+ 前端 Vite :5173（代理 /api 与 /media）
 make test    # pytest + tsc + vitest + vite build
+make smoke   # scripts/smoke.py：在临时数据目录、端口 8010 上启动一次性实例，用假 claude 与模拟图片源走完整个产品流程
 ```
 
 打开 <http://localhost:5173>，注册的第一个账号即为管理员。`make help` 列出全部目标（`build`、`smoke`、`seed`、`install`、`backup`、`check`、`clean`）。
 
-## 部署
+## 部署（生产，Ubuntu 24.04）
 
-生产部署（`deploy/install.sh`、systemd 单元、`.env` 配置、备份与恢复、反向代理与 HTTPS、升级与回滚）以及界面截图：**见 [`docs/DEPLOY.md`](docs/DEPLOY.md)**。
+一台机器、一个数据目录、一个 systemd 系统单元；运行用户必须是已登录 `claude` CLI 的那个用户（本机为 `sqin`）。
+
+```bash
+git clone <repo> /home/sqin/word-Dance && cd /home/sqin/word-Dance
+deploy/install.sh                                   # 局域网部署：绑定 0.0.0.0:8000，打印 http://<LAN-ip>:8000
+deploy/install.sh --with-caddy words.example.com    # 公网域名 + 自动 HTTPS（或 --with-nginx DOMAIN）
+deploy/install.sh --with-ecdict                     # 可选：下载完整 ECDICT 词典（216 MB → 851 MB），用于种子之外单词的即时查询
+deploy/install.sh --dry-run                         # 只打印将要执行的步骤（每行以 + 开头），不做任何更改
+```
+
+`install.sh` 是幂等的：预检（Python 3.12、Node ≥ 22、`claude` 在 PATH 中、磁盘空间）→ 创建数据目录 `/home/sqin/word-dance-data`（0700）→ venv 与依赖 → 构建前端 → 首次生成 `.env`（0600，随机 `WD_SECRET_KEY`，之后永不覆盖）→ **停止运行中的服务** → `wd migrate`（先写 pre-migrate 快照）→ `wd import-seed` → `wd claude-check`（一次 ≤ $0.05 的探测调用）→ `wd create-admin --if-none` → 安装 `word-dance.service` 与 `word-dance-backup.timer` → 启动 → 健康检查。升级只需 `git pull && deploy/install.sh`（或 `make install`）。
+
+打开打印出的地址，**第一个注册的账号自动成为管理员**（无需邀请码）；之后在管理页或用 `.venv/bin/wd invite --uses 5 --days 7` 生成邀请码。配置都在 `/home/sqin/word-dance-data/.env`（每行 `KEY="value"`，模板与说明见 [`deploy/env.example`](deploy/env.example)），修改后 `sudo systemctl restart word-dance`。
+
+常用运维命令：
+
+```bash
+systemctl status word-dance && journalctl -u word-dance -f          # 状态与 JSON 日志
+.venv/bin/wd backup --keep-daily 14 --keep-weekly 8                 # 手动备份（定时器每天 03:30 Asia/Shanghai 自动执行）
+sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-data/backups/<file>.db.gz --yes && sudo systemctl start word-dance
+.venv/bin/wd check all                                              # db · claude · smtp · providers 自检
+```
+
+完整说明：安装脚本、systemd 单元、全部环境变量、数据目录、日志、反向代理、升级与回滚见 [`docs/DEPLOY.md`](docs/DEPLOY.md)；日常运维、备份与恢复演练、故障处理手册见 [`docs/ops.md`](docs/ops.md)；手工验收清单见 [`docs/qa.md`](docs/qa.md)。
 
 ## 仓库结构
 
 | 路径 | 说明 |
 |---|---|
-| `backend/` | FastAPI 后端：`wd` 包（API 路由、服务层、SQLite 迁移、任务队列与调度、Claude 与图片管线、`wd` 命令行）及 pytest 测试 |
+| `backend/` | FastAPI 后端：`wd` 包（API 路由、服务层、SQLite 迁移、任务队列与调度、Claude 与图片管线、备份、`wd` 命令行）及 pytest 测试 |
 | `frontend/` | React + TypeScript 单页应用（Vite）；构建产物 `frontend/dist` 由后端直接提供 |
 | `data/` | 随仓库分发的压缩词汇种子 `seed/vocab.jsonl.gz`（9,162 词）、统计 `seed/stats.json`、数据来源说明与 ECDICT 许可证文本 |
-| `scripts/` | 维护脚本：`build_seed.py`（从 ECDICT 与大纲词表重建种子）、`smoke.py`（端到端冒烟测试）、`dev.sh` |
-| `deploy/` | 安装脚本、systemd 单元与定时备份、`env.example`、Caddy / nginx 示例配置 |
+| `scripts/` | `build_seed.py`（从 ECDICT 与大纲词表重建种子）、`smoke.py`（端到端冒烟测试）、`dev.sh`（开发服务器） |
+| `deploy/` | `install.sh`、`fetch_ecdict.sh`、systemd 单元（服务 + 每夜备份定时器）、`env.example`、Caddy / nginx 示例配置 |
 | `docs/` | 设计与契约文档（见下）、运维手册与手工验收清单 |
 | `Makefile` | 开发与运维入口（`make help`） |
 | `README.md` · `LICENSE` · `ATTRIBUTION.md` | 本文件、MIT 许可证、第三方数据与服务的来源与许可说明 |
@@ -69,7 +93,9 @@ make test    # pytest + tsc + vitest + vite build
 | [`docs/CLAUDE_INTEGRATION.md`](docs/CLAUDE_INTEGRATION.md) | `claude` CLI 的精确调用方式、提示词、JSON Schema、批处理、预算与失败处理、整理规则 |
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 路由、页面、组件、状态、交互、响应式规则与全部中文文案 |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | 安装脚本、systemd、环境变量、数据目录、备份、日志、反向代理、开发流程、CLI 参考 |
-| [`docs/TASKS.md`](docs/TASKS.md) | 实现工作包：文件归属、依赖关系、验收标准 |
+| [`docs/ops.md`](docs/ops.md) | 运维手册：日常检查、备份与恢复、升级与回滚、配置修改、故障处理表 |
+| [`docs/qa.md`](docs/qa.md) | 手工验收索引：部署验收、真实 Claude 验收、推送渠道检查；链接前端 / 学习流程清单 `qa-frontend.md`、`qa-study.md` |
+| [`docs/TASKS.md`](docs/TASKS.md) · [`docs/P0_STATUS.md`](docs/P0_STATUS.md) | 实现工作包（文件归属、依赖关系、验收标准）与 Phase 0 验证记录 |
 
 ## 数据来源与许可
 
