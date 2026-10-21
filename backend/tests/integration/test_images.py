@@ -28,7 +28,7 @@ _drop_editable_finder()
 from wd import cli, db  # noqa: E402
 from wd.images import activate_svg, handler as image_handler, image_meta, photo_mix, quota, reject_active_image, request_refresh, service, store
 from wd.images.sanitize_svg import SvgRejected
-from wd.jobs import queue, registry
+from wd.jobs import queue, registry, worker
 from wd.jobs.registry import JobContext
 from wd.schemas import ImageMeta
 
@@ -93,6 +93,12 @@ def add_to_bank(conn, word_id: int, username: str = "alice") -> int:
 
 def svg_jobs(conn, word_id: int) -> list[dict]:
     return [db.row_to_dict(r) for r in conn.execute("SELECT * FROM jobs WHERE type='generate_svg' AND json_extract(payload_json,'$.word_id')=?", (word_id,))]
+
+
+def drain_images(ctx: JobContext) -> int:
+    """Drain only ``fetch_image`` jobs: the ``generate_svg`` jobs this chain enqueues must stay queued for the
+    assertions below (their handler is WP5's and would otherwise activate the fake's SVG; it has its own tests)."""
+    return worker.drain(ctx, ("fetch_image",))
 
 
 def distinct_photos(mock_http) -> None:
@@ -208,7 +214,7 @@ def test_all_providers_fail_svg_rules(ctx, conn, cfg, mock_http, pinned_dns, con
     bid = conn.execute("INSERT INTO push_batches(user_id, local_date, timezone, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'manual') RETURNING id", (uid,)).fetchone()[0]
     conn.execute("INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, 'screen', 0)", (bid, batch_word))
     jobs = {w: enqueue(conn, w) for w in (bank_word, lonely, batch_word)}
-    queue.run_once(ctx)
+    drain_images(ctx)
     for w in (bank_word, lonely, batch_word):
         assert json.loads(job(conn, jobs[w])["result_json"])["status"] == "failed"
         assert conn.execute("SELECT image_state FROM words WHERE id=?", (w,)).fetchone()[0] == "failed"
@@ -222,21 +228,21 @@ def test_all_providers_fail_svg_rules(ctx, conn, cfg, mock_http, pinned_dns, con
     assert len(svg_jobs(conn, batch_word)) == 1  # in an open batch counts as studied
     # a second failure for the same word folds into the live svg job (dedupe)
     enqueue(conn, bank_word, priority=10, now=ctx.now())
-    queue.run_once(ctx)
+    drain_images(ctx)
     assert len(svg_jobs(conn, bank_word)) == 1 and svg_jobs(conn, bank_word)[0]["priority"] == 10
     # WD_SVG_VIA_CLAUDE=0 → no svg job
     off = JobContext(db=connect, cfg=replace(cfg, svg_via_claude=False), clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test")
     w4 = insert_word(conn, "fig")
     add_to_bank(conn, w4, "bob")
     enqueue(conn, w4)
-    queue.run_once(off)
+    drain_images(off)
     assert svg_jobs(conn, w4) == []
     # AI kill switch / SVG sub-cap 0 → no svg job either
     for variant in (replace(cfg, ai_enabled=False), replace(cfg, ai_svg_daily_budget_usd=0)):
         w = insert_word(conn, f"kiwi{variant.ai_enabled}{variant.ai_svg_daily_budget_usd}")
         conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'learning','browse')", (uid, w))
         enqueue(conn, w)
-        queue.run_once(JobContext(db=connect, cfg=variant, clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test"))
+        drain_images(JobContext(db=connect, cfg=variant, clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test"))
         assert svg_jobs(conn, w) == []
 
 
