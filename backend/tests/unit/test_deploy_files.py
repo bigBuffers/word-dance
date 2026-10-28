@@ -141,7 +141,7 @@ def render_units(dest: Path, *, user: str, repo: Path, data: Path) -> list[Path]
 def test_units_match_deploy_contract():
     service = (DEPLOY / "word-dance.service").read_text(encoding="utf-8")
     for directive in (
-        "User=__USER__", "Group=__USER__", "WorkingDirectory=__REPO__", "EnvironmentFile=__DATA__/.env",
+        "User=__USER__", "WorkingDirectory=__REPO__", "EnvironmentFile=__DATA__/.env",
         "Environment=HOME=/home/__USER__", "Environment=PATH=/home/__USER__/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "ExecStart=__REPO__/.venv/bin/wd serve", "Restart=on-failure", "TimeoutStopSec=300", "KillMode=mixed", "UMask=0077",
         "NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=full", "WantedBy=multi-user.target", "After=network-online.target",
@@ -149,6 +149,10 @@ def test_units_match_deploy_contract():
         assert directive in service, directive
     assert "ProtectHome" not in service.replace("# Deliberately NOT set: ProtectHome", "")
     backup_service = (DEPLOY / "word-dance-backup.service").read_text(encoding="utf-8")
+    # never pin Group=: the service user's primary group is not necessarily named after the user (sqin → dip on this
+    # box); a non-existent group makes every start fail with status 216/GROUP
+    for unit in (service, backup_service):
+        assert not re.search(r"^Group=", unit, re.M), "Group= must not be set; systemd uses the user's primary group"
     assert "Type=oneshot" in backup_service and "ExecStart=__REPO__/.venv/bin/wd backup --keep-daily 14 --keep-weekly 8" in backup_service
     assert "UMask=0077" in backup_service and "EnvironmentFile=__DATA__/.env" in backup_service
     timer = (DEPLOY / "word-dance-backup.timer").read_text(encoding="utf-8")

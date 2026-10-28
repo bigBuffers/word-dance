@@ -4,7 +4,6 @@ Description=word-Dance nightly backup (VACUUM INTO + integrity_check + gzip)
 [Service]
 Type=oneshot
 User=__USER__
-Group=__USER__
 EnvironmentFile=__DATA__/.env
 Environment=HOME=/home/__USER__
 UMask=0077

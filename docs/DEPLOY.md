@@ -180,7 +180,7 @@ StartLimitBurst=10
 [Service]
 Type=simple
 User=__USER__
-Group=__USER__
+# no Group=: systemd uses the user's primary group (a group named after the user need not exist — status 216/GROUP otherwise)
 WorkingDirectory=__REPO__
 EnvironmentFile=__DATA__/.env
 Environment=HOME=/home/__USER__
@@ -221,7 +221,6 @@ Description=word-Dance nightly backup (VACUUM INTO + integrity_check + gzip)
 [Service]
 Type=oneshot
 User=__USER__
-Group=__USER__
 EnvironmentFile=__DATA__/.env
 Environment=HOME=/home/__USER__
 UMask=0077
