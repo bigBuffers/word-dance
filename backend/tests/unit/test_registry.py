@@ -1,9 +1,10 @@
-"""jobs/registry.py: registration, load_handlers tolerance for missing modules only, JobContext helpers."""
+"""jobs/registry.py: registration, load_handlers importing every handler module (no missing-module tolerance), JobContext helpers."""
 
 from __future__ import annotations
 
 import importlib
 import logging
+import sys
 
 import pytest
 
@@ -40,15 +41,15 @@ def test_register_and_registered_types():
         registry.register("brew_tea")
 
 
-def test_load_handlers_tolerates_missing_modules_only():
-    skipped = registry.load_handlers()
-    for module in skipped:
-        assert module in HANDLER_MODULES
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module(module)
+def test_load_handlers_imports_every_handler_module():
+    """Every HANDLER_MODULES entry exists and is imported (TASKS post-step 1: no Phase-0 tolerance left); that each one
+    registers its job type is test_registry_complete.py's job (it reloads the modules so the decorators run again)."""
+    assert registry.load_handlers() is None
+    for module in HANDLER_MODULES:
+        assert module in sys.modules, module
 
 
-def test_load_handlers_propagates_other_import_errors(monkeypatch):
+def test_load_handlers_propagates_import_errors(monkeypatch):
     real = importlib.import_module
 
     def fake(name, package=None):
@@ -63,14 +64,18 @@ def test_load_handlers_propagates_other_import_errors(monkeypatch):
         registry.load_handlers()
 
 
-def test_load_handlers_tolerates_a_missing_parent_package(monkeypatch):
+def test_load_handlers_does_not_tolerate_a_missing_handler_module(monkeypatch):
+    """A handler module that cannot be imported is a packaging error, never a silently missing handler."""
+
     def fake(name, package=None):
-        exc = ModuleNotFoundError(f"No module named '{name.rsplit('.', 1)[0]}'")
-        exc.name = name.rsplit(".", 1)[0]
+        exc = ModuleNotFoundError(f"No module named '{name}'")
+        exc.name = name
         raise exc
 
     monkeypatch.setattr(registry.importlib, "import_module", fake)
-    assert registry.load_handlers() == list(HANDLER_MODULES)
+    with pytest.raises(ModuleNotFoundError):
+        registry.load_handlers()
+    assert registry.registered_types() == set()
 
 
 def test_job_context_helpers(settings, connect, frozen_clock):

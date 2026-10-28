@@ -49,6 +49,7 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 | `account_locked` | 423 | login lockout (`details.retry_after_s`) |
 | `rate_limited` | 429 | throttle (`Retry-After` header, `details.retry_after_s`) |
 | `ai_disabled` | 503 | admin AI action while `WD_AI_ENABLED=0` / paused |
+| `email_send_failed` | 503 | `POST /api/account/email/request-code` when the SMTP server refused or could not be reached (the code is not issued; retry later) |
 | `internal_error` | 500 | unexpected; logged with request id |
 
 ## 2. Endpoint catalogue
@@ -144,7 +145,7 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 **6 `PUT /api/account`** — `{display_name?: string|null, email?: string|null}` → `{user}`; changing `email` clears `email_verified_at` and disables `email_enabled`. 409 `email_taken`.
 **7 `POST /api/account/password`** — `{current_password, new_password}` → 204; all other sessions deleted. 401 `invalid_credentials`, 400 `weak_password`.
 **8 `DELETE /api/account`** — `{password}` → 204 (cascade deletes every row of the user). A private word (`is_public=0`) created by this user is deleted only when **no other user's `user_words` row references it** (checked after the cascade, inside the same transaction); otherwise it is kept with `created_by_user_id=NULL` (the remaining holders still see it through the visibility rule). 401, 409 `last_admin`.
-**9 `POST /api/account/email/request-code`** → `202 {sent: true, expires_in_s: 900}` (3/h per user; 409 `smtp_unconfigured` if no SMTP; 400 if no e-mail on the account).
+**9 `POST /api/account/email/request-code`** → `202 {sent: true, expires_in_s: 900}` (3/h per user; 409 `smtp_unconfigured` if no SMTP; 400 if no e-mail on the account; 503 `email_send_failed` when the SMTP server refused or could not be reached — no code is issued).
 **10 `POST /api/account/email/verify`** — `{code: "123456"}` → `{user}` (`email_verified` true). 400 `invalid_code` (5 attempts per code).
 **11 `GET /api/account/export?format=csv|json`** → file `word-dance-export-YYYYMMDD.csv|json`. CSV: one row per `user_words` row with columns `word, phonetic, translation, state, origin, note, times_added, added_at, mastered_at, ease, interval_days, repetitions, lapses, due_at`. JSON: `{"version": 1, "exported_at": "…Z", "username": "…", "words": [ {the same 14 fields} ], "review_logs": [ {created_at, word, action, context, prev_state, new_state, prev_interval, new_interval} ] }` — `review_logs` holds the last 365 days (tens of thousands of rows for an active user, several MB). **Only `words` is re-importable**: the client sends `JSON.stringify({version, words})` to endpoint 75 and the server ignores a `review_logs` key if present, so a faithful round trip of a real export never hits the 1 MB body cap (≤ 2,000 bank rows ≈ 500 KB). The CSV export has no history and round-trips as is.
 

@@ -1,9 +1,10 @@
 """``wd`` command-line entry point (Phase 0, frozen contract — TASKS.md P0 step 4, DEPLOY §9).
 
 Implements ``serve``, ``migrate [--dry-run]`` and ``version`` itself, then calls ``register_cli(sub)``
-on every module of :data:`CLI_MODULES`. A module that does not exist yet (or has no ``register_cli``)
-gets a stub for each command it owns (:data:`COMMAND_OWNERS`, the bracketed list of DEPLOY §9) that
-prints "not implemented" and exits 2.
+on every module of :data:`CLI_MODULES`. Each module must exist and must register every command it owns
+(:data:`COMMAND_OWNERS`, the bracketed list of DEPLOY §9); since the work packages were integrated
+(TASKS post-step 1) a missing module or command is a packaging error and raises instead of getting the
+Phase-0 "not implemented" stub.
 
 Contract for ``register_cli(sub: argparse._SubParsersAction) -> None``: add sub-parsers with
 ``p.set_defaults(func=handler)`` where ``handler(args) -> int | None`` returns the exit code.
@@ -19,7 +20,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
 from . import __version__, db
 from .config import ConfigError, Settings, ensure_dirs
@@ -40,7 +41,7 @@ CLI_MODULES: tuple[str, ...] = (
     "wd.diag",
 )
 
-# command → owning module (DEPLOY §9); used only to create "not implemented" stubs for absent modules
+# module → the commands it owns (DEPLOY §9); build_parser() verifies every one of them was registered
 COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.seed": ("import-seed",),
     "wd.security": ("create-admin", "set-password", "promote", "demote", "invite"),
@@ -151,14 +152,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stub(command: str, module: str) -> Callable[[argparse.Namespace], int]:
-    def run(args: argparse.Namespace) -> int:
-        print(f"wd {command}: not implemented (module {module} is not available yet)", file=sys.stderr)
-        return 2
-
-    return run
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wd", description="word-Dance server CLI")
     parser.add_argument("--version", action="version", version=f"wd {__version__}")
@@ -174,31 +167,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_version)
 
     for module in CLI_MODULES:
-        register = None
-        try:
-            mod = importlib.import_module(module)
-            register = getattr(mod, "register_cli", None)
-        except ModuleNotFoundError as e:
-            name = e.name or ""
-            if not (name == module or module.startswith(name + ".")):
-                raise  # the module exists but one of its imports is broken: surface it
-        if register is None:
-            for command in COMMAND_OWNERS.get(module, ()):
-                if command in sub.choices:
-                    continue
-                p = sub.add_parser(command, help=f"(not implemented yet — {module})", add_help=False)
-                p.set_defaults(func=_stub(command, module), _stub=True)  # main() lets a stub swallow any arguments
-        else:
-            register(sub)
+        mod = importlib.import_module(module)
+        register = getattr(mod, "register_cli", None)
+        if not callable(register):
+            raise RuntimeError(f"{module} has no register_cli(sub); it owns the commands {', '.join(COMMAND_OWNERS.get(module, ()))}")
+        register(sub)
+        missing = [c for c in COMMAND_OWNERS.get(module, ()) if c not in sub.choices]
+        if missing:
+            raise RuntimeError(f"{module}.register_cli did not register its command(s): {', '.join(missing)}")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv_if_present()
     parser = build_parser()
-    args, unknown = parser.parse_known_args(list(argv) if argv is not None else None)
-    if unknown and not getattr(args, "_stub", False):
-        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    args = parser.parse_args(list(argv) if argv is not None else None)
     func = getattr(args, "func", None)
     if func is None:  # pragma: no cover - argparse enforces a sub-command
         parser.print_help()

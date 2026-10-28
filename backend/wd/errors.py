@@ -62,6 +62,7 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "rate_limited": (429, "操作过于频繁，请稍后再试"),
     "internal_error": (500, "服务器内部错误"),
     "ai_disabled": (503, "AI 功能当前不可用"),
+    "email_send_failed": (503, "邮件发送失败，请稍后重试"),
 }
 
 _STATUS_TO_CODE = {

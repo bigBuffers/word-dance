@@ -1,29 +1,18 @@
 """After ``registry.load_handlers()``, every value of the ``jobs.type`` CHECK list in ``0001_init.sql`` has a handler.
 
-The Phase-0 ``ModuleNotFoundError`` tolerance of ``load_handlers`` must no longer hide a missing module: the five WP5
-handler modules are asserted unconditionally; a handler module of another work package that is not yet merged into this
-checkout makes the completeness assertion skip with the module named (never pass silently)."""
+Since the work packages were integrated (TASKS post-step 1) ``load_handlers`` has no missing-module tolerance left:
+every handler module is imported unconditionally and the completeness assertion never skips."""
 
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import re
 import sys
 from pathlib import Path
 
 import pytest
 
-
-def _drop_editable_finder() -> None:
-    """The shared venv's editable install maps ``wd`` to the main checkout; its finder would import children missing
-    from this worktree from there. Keep the completeness check about THIS checkout."""
-    sys.meta_path[:] = [f for f in sys.meta_path if "editable" not in (getattr(f, "__module__", "") + type(f).__name__).lower()]
-
-
-_drop_editable_finder()
-
-from wd.jobs import registry  # noqa: E402
+from wd.jobs import registry
 
 MIGRATION = Path(registry.__file__).resolve().parents[1] / "migrations" / "0001_init.sql"
 OWNERS: dict[str, str] = {
@@ -68,8 +57,7 @@ def test_owner_map_covers_the_check_list_and_handler_modules():
 
 
 def test_wp5_handlers_are_registered_after_load_handlers():
-    skipped = registry.load_handlers()
-    assert not any(m.startswith("wd.ai.") for m in skipped), skipped
+    registry.load_handlers()
     registered = registry.registered_types()
     assert set(WP5_TYPES) <= registered, set(WP5_TYPES) - registered
     for t in WP5_TYPES:
@@ -78,21 +66,18 @@ def test_wp5_handlers_are_registered_after_load_handlers():
 
 
 def test_every_jobs_type_check_value_has_a_handler():
-    skipped = registry.load_handlers()
+    registry.load_handlers()
     missing = check_list_types() - registry.registered_types()
-    unmerged = sorted(OWNERS[t] for t in missing if importlib.util.find_spec(OWNERS[t]) is None)
-    if unmerged:
-        assert set(unmerged) <= set(skipped)
-        pytest.skip(f"handler modules of other work packages not merged into this checkout yet: {', '.join(unmerged)}")
     assert missing == set(), missing
-    assert skipped == []
+    for t, module in OWNERS.items():
+        handler = registry.get_handler(t)
+        assert callable(handler) and handler.__module__ == module, (t, handler)
 
 
 def test_a_present_module_that_registers_nothing_is_a_failure(monkeypatch):
     """A module that exists but forgets its @register must surface as a missing handler, never be skipped."""
     registry.reset()
     monkeypatch.setattr(registry, "HANDLER_MODULES", ("wd.ai.budget",))  # exists, registers no handler
-    assert registry.load_handlers() == []
+    registry.load_handlers()
     assert registry.registered_types() == set()
-    for module in registry.HANDLER_MODULES:
-        importlib.import_module(module)
+    assert check_list_types() - registry.registered_types() == check_list_types()

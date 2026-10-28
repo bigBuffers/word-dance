@@ -6,10 +6,10 @@ Handlers are registered with the :func:`register` decorator::
     def handle(ctx: JobContext, jobs: list[Job]) -> None: ...
 
 Decorators only run on import, so :func:`load_handlers` imports the fixed :data:`HANDLER_MODULES`
-tuple; it tolerates a *missing module* (``ModuleNotFoundError`` for that module or one of its parent
-packages) ONLY while a work package has not landed yet (the Phase-0 window — WP5's
-``test_registry_complete.py`` later asserts every ``jobs.type`` has a handler). Any other
-``ImportError`` (a module that exists but fails to import) propagates.
+tuple. Every entry exists since the work packages were integrated (TASKS post-step 1), so a module that
+cannot be imported — missing or broken — propagates its ``ImportError``: the Phase-0 tolerance for
+not-yet-landed modules is gone, and ``test_registry_complete.py`` asserts that every ``jobs.type`` CHECK
+value has a handler afterwards.
 """
 
 from __future__ import annotations
@@ -105,24 +105,14 @@ def registered_types() -> set[str]:
     return set(_HANDLERS)
 
 
-def _module_missing(exc: ModuleNotFoundError, module: str) -> bool:
-    name = exc.name or ""
-    return name == module or module.startswith(name + ".")
+def load_handlers() -> None:
+    """Import every :data:`HANDLER_MODULES` entry so their ``@register`` decorators run.
 
-
-def load_handlers() -> list[str]:
-    """Import every :data:`HANDLER_MODULES` entry; returns the modules that were skipped because they do not exist yet."""
-    skipped: list[str] = []
+    Called from the ``main.py`` lifespan, ``queue.run_once`` and ``wd worker-once``. An import failure of any
+    kind propagates — a missing handler module is a packaging error, never something to run without.
+    """
     for module in HANDLER_MODULES:
-        try:
-            importlib.import_module(module)
-        except ModuleNotFoundError as e:
-            if _module_missing(e, module):
-                log.warning("handler module %s is not available yet; its job type has no handler", module)
-                skipped.append(module)
-                continue
-            raise
-    return skipped
+        importlib.import_module(module)
 
 
 def reset() -> None:
