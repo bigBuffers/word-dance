@@ -51,7 +51,7 @@ define need
 @test -x "$(1)" || { echo "make: $(1) not found — $(2)" >&2; exit 2; }
 endef
 
-.PHONY: help setup dev build test check smoke seed install backup clean
+.PHONY: help setup dev build test check check-contract smoke seed install backup clean
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-9s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -74,12 +74,17 @@ dev: ## Backend (uvicorn --reload :8000, fake claude, open registration) + Vite 
 build: ## Build the production SPA into frontend/dist (served by the backend)
 	cd frontend && $(NPM) run build
 
-test: ## pytest + tsc + vitest + vite build
+test: ## pytest + contract audit + tsc + vitest + vite build
 	$(call need,$(PT),run 'make setup' first)
 	$(PYENV) $(PT) -q backend/tests
+	$(PYENV) $(PY) scripts/check_contract.py -q
 	cd frontend && $(NPM) run typecheck && $(NPM) test && $(NPM) run build
 
 check: test ## Alias of `make test`
+
+check-contract: ## schemas.py ↔ types.ts field-by-field audit (scripts/check_contract.py)
+	$(call need,$(PY),run 'make setup' first)
+	$(PYENV) $(PY) scripts/check_contract.py
 
 smoke: ## End-to-end smoke run against a throwaway instance with the fake claude (scripts/smoke.py: temp data dir, port 8010, mocked providers)
 	$(call need,$(PY),run 'make setup' first)
