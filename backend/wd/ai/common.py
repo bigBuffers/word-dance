@@ -58,6 +58,16 @@ def clean_text(value: Any, *, max_len: int | None = None) -> str | None:
     return s
 
 
+def clean_phonetic(value: Any, *, max_len: int | None = 60) -> str | None:
+    """``clean_text`` plus the IPA delimiters stripped: Claude writes ``/ˌdʒiː diː ˈpiː/`` or ``[ˈæpl]`` while the seed
+    (and the UI, which wraps phonetics in slashes itself) store the bare transcription."""
+    s = clean_text(value, max_len=max_len)
+    if s is None:
+        return None
+    s = s.strip().strip("/[]").strip()
+    return s or None
+
+
 def has_cjk(text: str | None) -> bool:
     return bool(text) and CJK_RE.search(text) is not None
 

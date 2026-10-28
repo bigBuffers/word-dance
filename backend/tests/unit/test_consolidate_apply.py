@@ -189,7 +189,8 @@ def test_fill_data_and_difficulty_tags_auto_apply_to_non_seed_words_only(seeded,
     run_id, _, summary = run_apply(seeded, alice, result)
     assert summary.auto_applied == 2  # fill on the provisional word + the apple difficulty tag; ubiquitous already got 5 from the fill
     w = words.word_row(seeded, prov)
-    assert (w["phonetic"], w["pos"], w["translation"], w["definition"], w["difficulty"], w["source"]) == ("/juːˈbɪkwɪtəs/", "adj.", "adj. 无处不在的", "seeming to be everywhere", 5, "claude")
+    # the IPA slashes Claude writes are stripped: the seed stores bare transcriptions and the UI adds the slashes
+    assert (w["phonetic"], w["pos"], w["translation"], w["definition"], w["difficulty"], w["source"]) == ("juːˈbɪkwɪtəs", "adj.", "adj. 无处不在的", "seeming to be everywhere", 5, "claude")
     a = words.word_row(seeded, apple)
     assert a["difficulty"] == 1 and a["phonetic"] != fill["phonetic"]  # seed fields never overwritten
     rows = suggestions(seeded, alice)

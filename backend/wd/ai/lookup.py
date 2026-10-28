@@ -244,7 +244,7 @@ def fill_fields(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping
     definition = _text(item, "definition_en")
     if not word.get("definition") and definition:
         sets["definition"] = definition
-    phonetic = _text(item, "phonetic", 60)
+    phonetic = common.clean_phonetic(item.get("phonetic"), max_len=60) or ""
     if not word.get("phonetic") and phonetic:
         sets["phonetic"] = phonetic
     pos = _text(item, "pos", 40)
@@ -276,6 +276,7 @@ def _flag_invalid(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mappi
         "UPDATE words SET is_valid_english = 0, is_public = 0, safe_for_sharing = ?, content_state = 'failed', updated_at = ? WHERE id = ?",
         (safe, now, wid),
     )
+    note = note.rstrip("。．.；;，, ")  # Claude's note_zh usually ends with 。 — never produce 「…。；是否改为…」
     msg = MSG_INVALID + (f"：{note}" if note else "")
     suggested: dict[str, Any] | None = None
     correction = _text(item, "suggested_correction", 48)

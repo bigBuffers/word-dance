@@ -212,7 +212,10 @@ def _fill_data(conn: sqlite3.Connection, uw: Mapping[str, Any], fill: Mapping[st
     for key, column in FILL_COLUMNS.items():
         if word.get(column):
             continue
-        value = common.clean_text(fill.get(key), max_len=FILL_LIMITS[key])
+        if key == "phonetic":
+            value = common.clean_phonetic(fill.get(key), max_len=FILL_LIMITS[key])
+        else:
+            value = common.clean_text(fill.get(key), max_len=FILL_LIMITS[key])
         if not value:
             continue
         if key == "meaning_zh" and not common.has_cjk(value):
