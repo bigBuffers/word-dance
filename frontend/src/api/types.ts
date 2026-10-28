@@ -156,7 +156,7 @@ export interface TodayResponse {
 }
 export interface GradeResponse {
   item: { item_id: number; result: string | null; skip_count: number; requeue_at: string | null };   // result null + requeue_at set = intermediate grade: the item stays ungraded and is graded again later (endpoint 45)
-  mine: UserWord | null; next_due_zh: string;                 // '10 分钟后' | '明天' | 'N 天后' | '约 N 个月后' | '已掌握' | '已跳过' (thresholds in §9.1)
+  mine: UserWord | null; next_due_zh: string;                 // '10 分钟后' | '明天' | '今天' | 'N 天后' | '约 N 个月后' | '已掌握' | '已跳过' | '已认识' (thresholds in §9.1)
   mastery_suggested: boolean; today: TodayCounts; duplicate: boolean;
   study_item: StudyItem | null;                               // the kind='new' card appended when a screen item was graded unfamiliar in-batch
 }

@@ -100,7 +100,7 @@ def local_date(now_utc: datetime, tz: str) -> date ; def day_start(d: date, tz: 
 
 # WP1  wd/services/words.py
 def normalise_input(text: str) -> Normalised | Invalid          # Normalised(lemma, display, kind, tokens) ; Invalid(reason_zh)
-def resolve(conn, key: str, display: str, kind: str, user_id: int) -> Resolution   # via exact|form|ambiguous|ecdict|provisional ; word_id ; candidates ; lemma_note_zh ; created   (THE signature; DESIGN §5.2 uses it)
+def resolve(conn, key: str, display: str, kind: str, user_id: int, *, now: str | None = None) -> Resolution   # via exact|form|ambiguous|ecdict|provisional ; word_id ; candidates ; lemma_note_zh ; created   (THE signature; DESIGN §5.2 uses it; the keyword-only `now` (app clock for created rows and the lookup debounce, default system clock) was added at integration)
 def word_brief(conn, row, user_id: int) -> dict ; def word_detail(conn, word_id: int, user_id: int) -> dict   # word_detail fills word.confusables (API.md §9.1) and content_deferred_until
 def validate_headword(proposed: str, input_lemma: str, conn) -> Normalised | None   # CLAUDE_INTEGRATION §6.5 rule (THE signature; §6.5/§6.6 call it with (proposed, input_lemma, conn))
 def confusables_for(conn, user_id: int, lemma: str) -> list[str]                  # shared by word_detail (WP1) and today_response (WP4)

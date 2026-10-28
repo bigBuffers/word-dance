@@ -35,11 +35,11 @@
 ```bash
 make setup   # 创建 .venv，安装后端依赖并以可编辑方式安装 wd 包，frontend 执行 npm ci
 make dev     # scripts/dev.sh：后端 uvicorn --reload :8000（数据目录 ./.dev-data，开放注册）+ 前端 Vite :5173（代理 /api 与 /media）
-make test    # pytest + tsc + vitest + vite build
+make test    # pytest + 契约审计（scripts/check_contract.py：schemas.py ↔ types.ts 逐字段比对）+ tsc + vitest + vite build
 make smoke   # scripts/smoke.py：在临时数据目录、端口 8010 上启动一次性实例，用假 claude 与模拟图片源走完整个产品流程
 ```
 
-打开 <http://localhost:5173>，注册的第一个账号即为管理员。`make help` 列出全部目标（`build`、`smoke`、`seed`、`install`、`backup`、`check`、`clean`）。
+打开 <http://localhost:5173>，注册的第一个账号即为管理员。`make help` 列出全部目标（`build`、`smoke`、`seed`、`install`、`backup`、`check`、`check-contract`、`clean`）。
 
 ## 部署（生产，Ubuntu 24.04）
 

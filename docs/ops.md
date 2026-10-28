@@ -166,3 +166,62 @@ Real-Claude acceptance (≤ $0.20 total) and the delivery checks are manual: see
 by `UMask=0077` in the units, `os.umask(0o077)` in `wd serve` and an explicit chmod in `wd migrate`/`wd backup`/`wd
 restore`. Check with `ls -la /home/sqin/word-dance-data` (expect `drwx------`) and `stat -c %a
 /home/sqin/word-dance-data/.env` (expect `600`). `git clean -fdx` in the checkout can never touch the data directory.
+
+## 10. Known issues and deferred items (integration hand-over)
+
+State at the end of TASKS post-steps 1–3 (late imports replaced, contract audit clean, `make test` + `make smoke` +
+the P0 "migrate twice" and WP1 full-seed acceptance green). Left open deliberately:
+
+**Manual acceptance still to run (post-steps 4–7, docs/qa.md)**
+
+* Real-box deployment (`deploy/install.sh`, `systemctl is-active word-dance`, LAN `WD_PUBLIC_URL`, idempotent
+  second run, `fetch_ecdict.sh` download, restore drill, data-dir permissions) — needs sudo/systemd; qa.md §A.
+* Real-Claude acceptance (≤ $0.20: `wd claude-check`, three lookups incl. `recieve`/`GDP`, one 10-word prewarm) —
+  spends money, so it was not run by the integrator; everything was verified against `backend/tests/fake_claude.py`.
+  qa.md §C.
+* Browser checklists `docs/qa-frontend.md` (WP7) and `docs/qa-study.md` (WP8) at 360 px / 1280 px; delivery check
+  (qa.md §D) and the zh-CN copy pass (§E, post-step 7).
+
+**Observed at integration**
+
+* The one real provider run (`WD_IMAGE_PROVIDERS=wikimedia,openverse wd fetch-image abandon`) got **HTTP 503 from the
+  Wikimedia Commons API** for every request from this box's egress IP (`216.228.127.131`) — a plain `curl` with a browser
+  User-Agent received the same `503` / `retry-after: 52` HTML page, so it is not our request shape or UA. The quota layer
+  recorded the Retry-After cooldown as designed and the chain fell through to **Openverse**, which delivered
+  「"Abandoned Mansion, Beirut" by craigfinlay is licensed under CC BY 2.0」 (https://www.flickr.com/photos/71284091@N00/3180066090,
+  800×536 JPEG, attribution stored). Re-run the command from the production box to confirm Commons answers from there.
+* Pixabay / Pexels parsers are verified only against inline fixtures modelled on the public API docs (both providers
+  are optional, keyed and off by default).
+* `wd images-prune` has no worker-lease refusal: safe next to the live service, but it could race a fetch for a word
+  that becomes studied in the same second.
+* Every pytest run prints one `StarletteDeprecationWarning` from `fastapi/testclient.py` (httpx with
+  `starlette.testclient` is deprecated) — harmless until the pins move.
+
+**Behaviour notes (by design, recorded so nobody hunts for a bug)**
+
+* A provisional (unknown) word keeps `display`/`kind` from `normalise_input` until `lookup_word` fills them — typing
+  ` Abandoned ` for a string outside the seed gives display `Abandoned`, kind `proper_noun` until the lookup runs.
+  Backend `normalise_input` and frontend `normalizeInput.ts` agree on the lemma; the server stays authoritative for the
+  preview display.
+* A `lookup_word` merge records `W.lemma → L` as an `alt` word form while the merged-away row keeps its lemma
+  (`merged_into_word_id`), so the headword-guard invariant on a live database carries `AND w.merged_into_word_id IS
+  NULL` (DESIGN §3.2).
+* `POST /api/admin/jobs/run-once` answers 403 `forbidden` unless `WD_DEV=1`; the admin page shows the button only in
+  dev mode.
+* The register throttle (5/h per IP) also applies to the test client's IP: a test that registers more than five users
+  on one app must advance the frozen clock or insert users directly.
+* Onboarding screening card: Space reveals the translation through a window keydown handler; a focused button may
+  additionally activate on keyup in some browsers (keys 1/2/S are unaffected).
+
+**Deferred clean-ups (no behaviour change)**
+
+* Frontend: WP8's date helpers live in `utils/srsPreview.ts` next to WP7's `utils/date.ts`; content polling is
+  inlined in the study pages instead of `hooks/usePolling.ts`. Copy-pass candidates without their own `zh.ts` key:
+  queued test e-mail toast (reuses 测试成功), validated add result shows 已识别 (spec 已校验), 重置进度 confirmation
+  text, duplicate-line hint in the add-words preview, admin table headers (DTO field names), heat-strip tooltip,
+  `i/n` card counter, 推荐词 认识 toast, WaitingPanel label.
+* Tests: the full-seed acceptance (`backend/tests/unit/test_seed.py` + the `@full_seed` vocab test) is skipped by
+  `make test`; run it after `wd import-seed` into a scratch data dir with
+  `WD_FULL_SEED_DB=<that DB> PYTHONPATH=backend .venv/bin/pytest -q backend/tests -m full_seed`.
+* Dev environment: always run the suite with `PYTHONPATH=backend` (what `make test` does). The venv's editable install
+  maps `wd` to the main checkout, so a git worktree run without that variable imports the main checkout's modules.

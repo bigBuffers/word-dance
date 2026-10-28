@@ -166,13 +166,13 @@ def _confidence(value: Any) -> float:
     return max(0.0, min(1.0, round(c, 3)))
 
 
-def _resolve_target(conn: sqlite3.Connection, norm: words.Normalised, user_id: int) -> dict[str, Any] | None:
+def _resolve_target(conn: sqlite3.Connection, norm: words.Normalised, user_id: int, *, now: str | None = None) -> dict[str, Any] | None:
     """The ``words`` row for a validated target: existing headword, else created through the DESIGN §5.2 chain."""
     row = words.word_by_lemma(conn, norm.lemma)
     if row is not None:
         final, _ = words.follow_merge(conn, row)
         return final
-    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id)
+    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id, now=now)
     if res.ambiguous or res.word_id is None:
         return None
     return words.word_row(conn, int(res.word_id))
@@ -382,7 +382,7 @@ def apply(conn: sqlite3.Connection, user_id: int, run_id: int, batch: Mapping[in
                     )
                     summary.auto_applied += 1
                     continue
-            target = _resolve_target(conn, norm, user_id)
+            target = _resolve_target(conn, norm, user_id, now=now)
             if target is None or int(target["id"]) == int(current["id"]):
                 summary.downgraded.append(int(uw["uw_id"]))
                 continue

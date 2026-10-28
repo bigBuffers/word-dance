@@ -162,13 +162,12 @@ def test_bulk_add_statuses_over_http(client: TestClient, settings, alice, frozen
     prov = res["ubiquitous"]["word"]["id"]
     job = qrow(settings, "SELECT * FROM jobs WHERE type = 'lookup_word'")
     assert job["dedupe_key"] == f"lookup:{prov}" and job["priority"] == 10
-    # the WP1 resolver debounces on the system clock (its frozen signature carries no clock): run_after ≈ real now + 20 s
-    from datetime import datetime, timezone
+    # the resolver debounces on the app clock passed through bank.add_one (frozen in tests): run_after == now + 20 s
+    from datetime import timedelta
 
     from wd.clock import parse_iso
 
-    delay = (parse_iso(job["run_after"]) - datetime.now(timezone.utc)).total_seconds()
-    assert 10 <= delay <= 25
+    assert parse_iso(job["run_after"]) == frozen_clock.now_utc() + timedelta(seconds=20)
     assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND payload_json LIKE ?", (f'%"word_id":{prov}%',)) == 0
     assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'") == 2  # abandon (mark) + child
     assert client.get("/api/bank").json()["counts"]["new"] == 3

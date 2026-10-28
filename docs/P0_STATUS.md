@@ -203,7 +203,9 @@ ratified items into the design documents in the "contract change" commit.
 27. DESIGN §9 says the 关于 page renders `ATTRIBUTION.md`, while FRONTEND lists fixed contents for that section and API.md
     has no route for the file; root `ATTRIBUTION.md` currently describes the page as a summary. Decide in WP7/WP9 (a static
     route would be a backend contract change). External policy URLs in `ATTRIBUTION.md` were written from general knowledge,
-    not fetched.
+    not fetched. **Resolved at integration (post-steps)**: the 关于与数据来源 section renders the fixed FRONTEND §5.8 lines
+    (`zh.settings.sources`), `ATTRIBUTION.md` stays the repository-level document linked from the README, DESIGN §9 was
+    reworded accordingly and no static route was added.
 
 ## 4. Changes made by the verifier
 

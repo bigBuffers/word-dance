@@ -708,16 +708,19 @@ def _create_provisional(conn: sqlite3.Connection, key: str, display: str, kind: 
     return _resolution_for("provisional", row, created=True, job_id=job_id)
 
 
-def resolve(conn: sqlite3.Connection, key: str, display: str, kind: str, user_id: int) -> Resolution:
+def resolve(conn: sqlite3.Connection, key: str, display: str, kind: str, user_id: int, *, now: str | None = None) -> Resolution:
     """DESIGN §5.2 lemma resolution, first hit wins: **exact** (``words.lemma``, following merges) → **form**
     (``word_forms``; one lemma → ``lemma_note_zh``, several → ``via='ambiguous'`` with candidates, nothing created) →
     **ecdict** (only while ``WD_ECDICT_DB_PATH`` is set) → **provisional** (private ``words`` row created by ``user_id``
     plus one debounced ``lookup_word`` job). ``key``/``display``/``kind`` come from :func:`normalise_input`.
+
+    ``now`` (ISO, keyword-only; added at integration on top of the TASKS §I signature) is the app clock used for the
+    created rows and the lookup debounce (``run_after = now + 20 s``); it defaults to the system clock.
     """
     key = normalise_lemma(key) or ""
     if not key:
         raise ValueError("resolve(): key must be a normalised, non-empty lemma")
-    now = now_iso()
+    now = now or now_iso()
     row = word_by_lemma(conn, key)
     if row is not None:
         final, redirected = follow_merge(conn, row)

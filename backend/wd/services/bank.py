@@ -914,7 +914,7 @@ def add_one(
         assert isinstance(norm, words.Invalid)
         return AddResult(input=text, status="invalid", error=norm.reason_zh)
     assert isinstance(norm, words.Normalised)
-    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id)
+    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id, now=now)
     if res.ambiguous:
         return AddResult(input=text, status="ambiguous", candidates=res.candidates)
     assert res.word_id is not None
@@ -1057,7 +1057,7 @@ def import_row(conn: sqlite3.Connection, user_id: int, raw: Mapping[str, Any], *
         assert isinstance(norm, words.Invalid)
         return AddResult(input=text, status="invalid", error=norm.reason_zh)
     assert isinstance(norm, words.Normalised)
-    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id)
+    res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id, now=now)
     if res.ambiguous:
         return AddResult(input=text, status="ambiguous", candidates=res.candidates)
     assert res.word_id is not None
