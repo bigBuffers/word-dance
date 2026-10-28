@@ -90,7 +90,9 @@ if [ -n "$PROXY" ]; then
 elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$DATA/.env"; then
   # no proxy and no public URL yet → the LAN URL, so e-mail buttons / webhook `url` fields have a target (DESIGN §6.5); the CSRF check
   # also accepts the Host-derived origin (API.md §1), so reaching the site by hostname keeps working
-  LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  # the address of the default route — `hostname -I` lists bridge addresses (docker0 / lxdbr0, often link-down) first
+  LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i+1); exit}}')
+  [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$DATA/.env"); PORT=${PORT:-8000}
   [ -n "$LAN_IP" ] && run sed -i "s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"http://$LAN_IP:$PORT\"|" "$DATA/.env"
 fi
@@ -156,7 +158,7 @@ log "health"
 for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health"; echo
 if [ -n "${WD_PUBLIC_URL:-}" ]; then echo "word-Dance is running at $WD_PUBLIC_URL";
-else echo "word-Dance is running at http://$(hostname -I | awk '{print $1}'):${WD_PORT:-8000}  (bind ${WD_HOST:-0.0.0.0})"; fi
+else echo "word-Dance is running at http://${LAN_IP:-$(hostname -I | awk '{print $1}')}:${WD_PORT:-8000}  (bind ${WD_HOST:-0.0.0.0})"; fi
 echo "registration mode: ${WD_REGISTRATION_MODE:-invite} — the first account registered becomes admin; afterwards create invite codes with: $REPO/.venv/bin/wd invite --uses 5 --days 7"
 ```
 

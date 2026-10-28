@@ -279,6 +279,10 @@ def test_install_sh_dry_run_would_fill_lan_public_url(tmp_path):
     sed_lines = [l for l in cp.stdout.splitlines() if l.startswith("+ sed -i") and "WD_PUBLIC_URL" in l]
     if _sh(["bash", "-c", "hostname -I 2>/dev/null | awk '{print $1}'"]).stdout.strip():
         assert len(sed_lines) == 1 and re.search(r'WD_PUBLIC_URL=\\?"http://[0-9.]+:8000\\?"', sed_lines[0]), sed_lines
+        # the default-route address wins over bridge addresses (docker0 / lxdbr0) that `hostname -I` lists first
+        route_ip = _sh(["bash", "-c", "ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == \"src\") {print $(i+1); exit}}'"]).stdout.strip()
+        if route_ip:
+            assert f"http://{route_ip}:8000" in sed_lines[0], (route_ip, sed_lines)
     assert (data / ".env").read_text(encoding="utf-8") == ENV_EXAMPLE.read_text(encoding="utf-8")  # dry run: unchanged
 
 
