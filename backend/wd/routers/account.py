@@ -135,7 +135,7 @@ def request_email_code(request: Request, user: dict[str, Any] = Depends(current_
         mailer.send(email, EMAIL_CODE_SUBJECT, text)
     except MailerError as e:
         log.warning("verification e-mail failed: %s", e, extra={"event": "email_code_failed", "user_id": user["id"]})
-        raise ApiError("email_send_failed", status=503, message_zh="邮件发送失败，请稍后重试") from e
+        raise ApiError("email_send_failed") from e
     return {"sent": True, "expires_in_s": security.EMAIL_CODE_TTL_S}
 
 

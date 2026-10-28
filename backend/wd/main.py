@@ -5,10 +5,9 @@ SPA fallback, ``/assets`` immutable), one pure-ASGI middleware (``X-Request-Id``
 ``Cache-Control: no-store`` on ``/api``, body limit ``WD_MAX_BODY_BYTES``, the API.md §1 CSRF rule, one JSON
 log line per request) and the lifespan:
 
-    migrate → seed import when kv.seed_version ≠ sha256(WD_SEED_PATH) (wd.seed late import; warn-and-continue
-    while WP1 has not landed or the file is missing) → kv.public_url_guess → registry.load_handlers() →
-    take kv.worker_lease and start worker/scheduler threads when WD_WORKER_ENABLED (late imports; skipped
-    while the classes do not exist yet).
+    migrate (with the pre-migrate snapshot hook) → seed import when kv.seed_version ≠ sha256(WD_SEED_PATH)
+    (warn-and-continue when the file is missing) → kv.public_url_guess → registry.load_handlers() → take
+    kv.worker_lease and start the Claude worker(s), the I/O worker and the scheduler when WD_WORKER_ENABLED.
 
 It refuses to run under more than one uvicorn worker (the single-process invariant, DESIGN §0.2).
 """
@@ -24,7 +23,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
@@ -39,6 +38,8 @@ from .deps import csrf_violation
 from .errors import ApiError, error_response, install_handlers
 from .jobs import lease, queue, registry
 from .jobs.registry import JobContext
+from .jobs.scheduler import Scheduler
+from .jobs.worker import ClaudeWorker, IoWorker
 from .logging_setup import configure_logging
 from .routers import (
     account,
@@ -58,6 +59,7 @@ from .routers import (
     vocab,
     words,
 )
+from .seed import import_seed
 
 log = logging.getLogger("wd.main")
 http_log = logging.getLogger("wd.http")
@@ -94,11 +96,12 @@ SECURITY_HEADERS: dict[str, str] = {
 }
 HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
-# (module, class, role) — constructed as Cls(ctx) and driven through start()/stop()/join() (interfaces.BackgroundThread)
-THREAD_CLASSES: tuple[tuple[str, str, str], ...] = (
-    ("wd.jobs.worker", "ClaudeWorker", "claude"),
-    ("wd.jobs.worker", "IoWorker", "io"),
-    ("wd.jobs.scheduler", "Scheduler", "scheduler"),
+# (class, role) — constructed as Cls(ctx) and driven through start()/stop()/join() (interfaces.BackgroundThread);
+# `claude` is started WD_AI_CONCURRENCY times, the others once
+THREAD_CLASSES: tuple[tuple[type, str], ...] = (
+    (ClaudeWorker, "claude"),
+    (IoWorker, "io"),
+    (Scheduler, "scheduler"),
 )
 THREAD_JOIN_SECONDS = 250.0  # < systemd TimeoutStopSec=300 (an in-flight claude call may take up to 240 s)
 
@@ -265,29 +268,10 @@ def seed_check(conn, cfg: Settings) -> None:
     digest = sha256_file(path)
     if db.kv_get(conn, "seed_version") == digest:
         return
-    try:
-        from .seed import import_seed  # type: ignore[import-not-found]  # WP1
-    except ModuleNotFoundError as e:
-        if e.name == "wd.seed":
-            log.warning("wd.seed is not available yet; seed %s not imported", path.name)
-            return
-        raise
     log.info("seed version changed; importing %s", path, extra={"event": "seed_import"})
     import_seed(conn, str(path))
     if db.kv_get(conn, "seed_version") != digest:  # the importer records it (WP1); be defensive
         db.kv_set(conn, "seed_version", digest)
-
-
-def _late_class(module: str, name: str):
-    import importlib
-
-    try:
-        mod = importlib.import_module(module)
-    except ModuleNotFoundError as e:
-        if e.name == module or module.startswith((e.name or "") + "."):
-            return None
-        raise
-    return getattr(mod, name, None)
 
 
 def start_background(app: FastAPI, conn) -> None:
@@ -313,18 +297,14 @@ def start_background(app: FastAPI, conn) -> None:
     keeper.start()
     threads.append(keeper)
     ctx = JobContext(db=connect, cfg=cfg, clock=clock, enqueue=queue.enqueue, log=logging.getLogger("wd.jobs"), worker_id="main", boot_id=boot_id)
-    for module, cls_name, role in THREAD_CLASSES:
-        cls = _late_class(module, cls_name)
-        if cls is None:
-            log.info("%s.%s is not available yet; not started", module, cls_name)
-            continue
+    for cls, role in THREAD_CLASSES:
         count = cfg.ai_concurrency if role == "claude" else 1
         for i in range(count):
             worker_id = "scheduler" if role == "scheduler" else f"{role}-{i + 1}"
             thread = cls(ctx.for_worker(worker_id))
             thread.start()
             threads.append(thread)
-            log.info("started %s (%s)", cls_name, worker_id, extra={"worker": worker_id})
+            log.info("started %s (%s)", cls.__name__, worker_id, extra={"worker": worker_id})
     app.state.threads = threads
 
 

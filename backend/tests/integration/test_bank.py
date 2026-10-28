@@ -7,14 +7,13 @@ import csv
 import io
 import json
 import secrets
-import sys
-import types
 
 import pytest
 from fastapi.testclient import TestClient
 
 from wd import db
 from wd.deps import hash_token
+from wd.services import batches
 
 FAR = "2030-01-01T00:00:00Z"
 TZ = "Asia/Shanghai"
@@ -90,8 +89,8 @@ def export_json(settings, user_id: int, *, review_logs: int = 0) -> dict:
 
 
 def install_fake_batches(monkeypatch) -> list:
+    """Records the ``batches.append_to_today`` calls the bank makes (a minimal stand-in for WP4's implementation)."""
     calls: list = []
-    fake = types.ModuleType("wd.services.batches")
 
     def append_to_today(conn, user_id, word_id, kind, now):
         calls.append((user_id, word_id, kind))
@@ -101,8 +100,7 @@ def install_fake_batches(monkeypatch) -> list:
         pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM push_items WHERE batch_id = ?", (batch[0],)).fetchone()[0]
         return int(conn.execute("INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, ?, ?)", (batch[0], word_id, kind, pos)).lastrowid)
 
-    fake.append_to_today = append_to_today
-    monkeypatch.setitem(sys.modules, "wd.services.batches", fake)
+    monkeypatch.setattr(batches, "append_to_today", append_to_today)
     return calls
 
 

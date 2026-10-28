@@ -5,7 +5,7 @@
 * ``settings`` / ``conn`` (migrated DB) / ``frozen_clock`` / ``app`` / ``client`` (TestClient running the
   lifespan, ``X-WD-Request: 1`` preset) / ``raw_client`` (no preset header);
 * ``login`` — register-or-login helper through the WP2 auth endpoints;
-* ``seeded`` — the 60-record mini seed imported with ``wd.seed.import_seed`` (skips while WP1 is absent);
+* ``seeded`` — the 60-record mini seed imported with ``wd.seed.import_seed``;
 * ``mock_http`` — ``httpx.MockTransport`` for api.openverse.org / commons.wikimedia.org / thumb.wikimedia.org /
   upload.wikimedia.org / live.staticflickr.com (probe fixtures + a Pillow-generated 640×400 JPEG; query strings
   ignored; matches on the ``Host`` header first so DNS-pinned IP URLs still hit); installed as the default
@@ -194,13 +194,9 @@ def login(client: TestClient) -> Callable[..., dict[str, Any]]:
 
 @pytest.fixture
 def seeded(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """The mini seed imported through WP1's ``wd.seed.import_seed``; skipped while that module does not exist."""
-    try:
-        from wd.seed import import_seed  # type: ignore[import-not-found]
-    except ModuleNotFoundError as e:
-        if e.name == "wd.seed":
-            pytest.skip("wd.seed (WP1) is not available yet")
-        raise
+    """The mini seed imported through WP1's ``wd.seed.import_seed``."""
+    from wd.seed import import_seed
+
     import_seed(conn, str(MINI_SEED))
     return conn
 

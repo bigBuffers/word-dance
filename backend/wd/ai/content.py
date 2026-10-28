@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .. import db
+from ..images.select import is_blocked
 from ..interfaces import Job
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
@@ -53,18 +54,10 @@ ALT_MAX = 60
 PREFIX_MIN = 4
 ATTENTION_FALLBACK_ZH = "未识别为英文单词"
 
-# DESIGN §9 image blocklist (the images package has the same list; used here when it is importable)
-_BLOCKLIST_RE = re.compile(
-    r"\b(map|diagram|logo|flag|coat of arms|chart|graph|screenshot|poster|cover|scan|text|document|nude|nudity|sex|porn|gore|blood|weapon|gun|corpse)\b",
-    re.IGNORECASE,
-)
-
 
 def _is_blocked(keyword: str) -> bool:
-    fn = bank.late_import("wd.images.select", "is_blocked")
-    if fn is not None:
-        return bool(fn(keyword))
-    return _BLOCKLIST_RE.search(keyword) is not None
+    """DESIGN §9 image blocklist — the one list in ``images.select`` (also applied to Claude's ``image_keywords``)."""
+    return is_blocked(keyword)
 
 
 # ---------------------------------------------------------------------------------------- prompt

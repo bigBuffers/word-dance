@@ -160,13 +160,10 @@ def test_kv_helpers(conn):
     assert db.kv_get(conn, "k") is None
 
 
-def test_backup_pre_hook_is_none_while_wp9_is_absent():
-    try:
-        import wd.backup  # type: ignore[import-not-found]  # noqa: F401
-    except ModuleNotFoundError:
-        assert db.backup_pre_hook() is None
-    else:  # pragma: no cover - after WP9 lands
-        assert callable(db.backup_pre_hook())
+def test_backup_pre_hook_is_the_pre_migrate_snapshot():
+    from wd.backup import snapshot_before_migrate
+
+    assert db.backup_pre_hook() is snapshot_before_migrate
 
 
 def test_schema_file_is_byte_identical_to_docs_copy_when_present():

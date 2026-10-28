@@ -8,7 +8,6 @@ import io
 import json
 import os
 import stat
-import sys
 import zlib
 from dataclasses import replace
 
@@ -16,16 +15,7 @@ import httpx
 import pytest
 from PIL import Image
 
-
-def _drop_editable_finder() -> None:
-    """The shared venv's editable install maps ``wd`` to the main checkout; its finder would import immediate
-    children missing from this worktree (``wd.seed``, ``wd.backup`` …) from there. Keep this run self-contained."""
-    sys.meta_path[:] = [f for f in sys.meta_path if "editable" not in (getattr(f, "__module__", "") + getattr(f, "__name__", type(f).__name__)).lower()]
-
-
-_drop_editable_finder()
-
-from wd import cli, db  # noqa: E402
+from wd import cli, db
 from wd.images import activate_svg, handler as image_handler, image_meta, photo_mix, quota, reject_active_image, request_refresh, service, store
 from wd.images.sanitize_svg import SvgRejected
 from wd.jobs import queue, registry, worker

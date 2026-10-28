@@ -2,8 +2,8 @@
 
 Route order follows API.md §1: ``POST /api/words/batch-mark`` is registered before the dynamic routes, and
 ``GET /api/words/{id_or_lemma}`` never matches a path with a ``/``. Every route applies the §1 visibility rule
-(404 ``word_not_found`` for an invisible word). Late imports: ``wd.ai.budget.can_spend`` (WP5 — skipped while
-absent) and ``wd.images.reject_active_image`` (WP6 — a minimal local fallback until it lands).
+(404 ``word_not_found`` for an invisible word). The explicit content request checks the Claude budget through
+``wd.ai.budget.can_spend`` (WP5); the image report / 换一张 go through ``wd.images`` (WP6).
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
-from .. import db, schemas
+from .. import db, images, schemas
+from ..ai import budget
 from ..clock import Clock, to_iso
 from ..config import Settings
 from ..deps import current_user, get_clock, get_db, get_settings, visible_word_sql
@@ -255,27 +256,6 @@ def mark(
 
 
 # ----------------------------------------------------------------------------------------- report (28)
-def _image_exclude(conn: sqlite3.Connection, word_id: int) -> list[str]:
-    out: list[str] = []
-    for ref, sha in conn.execute("SELECT provider_ref, sha256 FROM word_images WHERE word_id = ? AND status IN ('active','rejected') ORDER BY id", (int(word_id),)):
-        for v in (ref, sha):
-            if v and str(v) not in out:
-                out.append(str(v))
-    return out
-
-
-def _reject_active_image_fallback(conn: sqlite3.Connection, word: dict[str, Any], now: str) -> int | None:
-    """Until WP6's ``images.reject_active_image`` exists: mark the active image rejected and enqueue a replacement."""
-    wid = int(word["id"])
-    image_id = word.get("active_image_id")
-    if image_id is None:
-        return None
-    exclude = _image_exclude(conn, wid)
-    conn.execute("UPDATE word_images SET status = 'rejected' WHERE id = ? AND status = 'active'", (int(image_id),))
-    conn.execute("UPDATE words SET active_image_id = NULL, image_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
-    return queue.enqueue(conn, "fetch_image", {"word_id": wid, "exclude": exclude}, dedupe_key=f"image:{wid}", priority=FETCH_IMAGE_PRIORITY_USER, now=now)
-
-
 @router.post("/api/words/{word_id}/report", status_code=201, response_model=schemas.ReportCreatedResponse)
 def report(
     word_id: int,
@@ -296,11 +276,8 @@ def report(
         )
         report_id = int(cur.lastrowid)
         if body.target == "image" and word.get("active_image_id") is not None:
-            fn = bank.late_import("wd.images", "reject_active_image")
-            if fn is not None:
-                fn(conn, wid, reason=body.reason)
-            else:
-                _reject_active_image_fallback(conn, word, now)
+            # WP6: active image → rejected, system_events('image_rejected'), fetch_image with it excluded
+            images.reject_active_image(conn, wid, reason=body.reason, priority=FETCH_IMAGE_PRIORITY_USER, now=now)
     return {"id": report_id}
 
 
@@ -317,11 +294,11 @@ def image_refresh(
     wid = int(word["id"])
     now = _now(clock)
     bank.check_daily_quota(conn, f"refresh:user:{uid}", bank.IMAGE_REFRESH_DAILY_CAP, now=now)
-    with db.tx(conn):
-        exclude = _image_exclude(conn, wid)
-        job_id = queue.enqueue(conn, "fetch_image", {"word_id": wid, "exclude": exclude}, dedupe_key=f"image:{wid}", priority=FETCH_IMAGE_PRIORITY_USER, now=now)
-        conn.execute("UPDATE words SET image_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
-    return {"job_id": job_id, "image_state": "queued"}
+    # WP6: the current image stays active until a replacement lands; it and every rejected one are excluded
+    job_id = images.request_refresh(conn, wid, priority=FETCH_IMAGE_PRIORITY_USER, now=now)
+    if job_id is None:
+        raise ApiError("word_not_found")
+    return {"job_id": int(job_id), "image_state": "queued"}
 
 
 # ---------------------------------------------------------------------------------- content request (30)
@@ -347,11 +324,9 @@ def content_request(
     if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
         raise ApiError("ai_disabled")
     bank.check_daily_quota(conn, f"content_req:user:{uid}", bank.CONTENT_REQUESTS_DAILY_CAP, now=now)
-    can_spend = bank.late_import("wd.ai.budget", "can_spend")
-    if can_spend is not None:
-        ok, resumes_at = can_spend(conn, "content", 1, CONTENT_REQUEST_PRIORITY, now)
-        if not ok:
-            raise ApiError("budget_exhausted", details={"resumes_at": resumes_at})
+    ok, resumes_at = budget.can_spend(conn, "content", 1, CONTENT_REQUEST_PRIORITY, now)
+    if not ok:
+        raise ApiError("budget_exhausted", details={"resumes_at": resumes_at})
     with db.tx(conn):
         job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=CONTENT_REQUEST_PRIORITY, now=now)
         conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))

@@ -6,8 +6,8 @@
   weekly) → ``kv.backup.last = {file, at, bytes}`` (shown as ``AdminHealth.last_backup``). An integrity failure
   records ``system_events('backup_failed')``, leaves no file behind and exits non-zero.
 * :func:`snapshot_before_migrate` — the ``pre_hook`` that ``cli.py``'s ``migrate`` (and the ``main.py`` lifespan)
-  late-import: writes ``backups/pre-migrate-<from>-to-<to>.db.gz`` through the same pipeline before the first
-  pending migration file runs. A fresh database (``from_version == 0``) has nothing to protect and is skipped.
+  pass through ``db.backup_pre_hook()``: writes ``backups/pre-migrate-<from>-to-<to>.db.gz`` through the same
+  pipeline before the first pending migration file runs. A fresh database (``from_version == 0``) has nothing to protect and is skipped.
 * ``wd restore <file.db.gz> [--yes]``: refuses while the service runs (``kv.worker_lease`` live or
   ``systemctl is-active word-dance.service``), verifies the archive first (gunzip → ``integrity_check``), then moves
   the current database to ``word-dance.db.bak-<ts>``, removes stale ``-wal``/``-shm`` files, puts the verified copy in

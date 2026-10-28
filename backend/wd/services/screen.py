@@ -4,7 +4,7 @@ Contracts: API.md 31/32 (``GET /api/screen/next``, ``POST /api/screen/verdict``)
 ``stage_distance`` from the 主攻阶段, then frequency), DESIGN §4 (verdict → state machine through
 :func:`wd.services.bank.apply_action`), DESIGN §6.3 (an in-batch ``unfamiliar`` keeps the ``screen`` push row and —
 while the day's new-word quota has room — appends a second ``kind='new'`` row through WP4's
-``batches.append_to_today`` (late import; ``added_to_today:false`` until WP4 lands)).
+``batches.append_to_today``; ``added_to_today:false`` when there is no batch today or the word is already in it).
 
 :func:`study_item_dict` builds the API.md ``StudyItem`` for a ``push_items`` row from the WP1 word helpers so the
 ``ScreenResponse.study_item`` (and WP4's ``GradeResponse.study_item``) need nothing beyond this package.

@@ -2,8 +2,8 @@
 
 ``PUT /api/settings`` merges the partial body into the stored row and validates the *merged* result
 (``current_stage ∈ stages``, webhook URL policy, e-mail prerequisites), then recomputes ``next_push_at``.
-``POST /api/settings/webhook/test`` calls WP4's ``delivery.webhook.send_test_webhook`` through a late import
-(503 until it lands); ``POST /api/settings/email/test`` enqueues ``send_email {"user_id", "test": true}``.
+``POST /api/settings/webhook/test`` calls WP4's ``delivery.webhook.send_test_webhook`` synchronously;
+``POST /api/settings/email/test`` enqueues ``send_email {"user_id", "test": true}``.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from .. import db, security
 from ..clock import to_iso
+from ..delivery import webhook as webhook_delivery
 from ..deps import current_user, get_db
 from ..errors import ApiError
 from ..jobs import queue
@@ -64,7 +65,6 @@ CURATED_TIMEZONES: tuple[str, ...] = (
 )
 _NOT_ZONES = frozenset({"Factory", "localtime"})
 
-WEBHOOK_TEST_UNAVAILABLE_ZH = "Webhook 测试功能尚未就绪"
 SCALAR_COLUMNS = ("timezone", "push_time", "daily_new_count", "daily_screen_count", "max_reviews", "zh_examples", "accent", "webhook_format")
 
 
@@ -133,28 +133,15 @@ def timezones(all_zones: bool = Query(False, alias="all"), user: dict[str, Any] 
     return {"items": [z for z in CURATED_TIMEZONES if z in available]}
 
 
-def _send_test_webhook():
-    """WP4's ``delivery.webhook.send_test_webhook`` or None while the module does not exist yet."""
-    try:
-        from ..delivery.webhook import send_test_webhook  # type: ignore[import-not-found]
-    except ModuleNotFoundError as e:
-        if e.name == "wd.delivery.webhook":
-            return None
-        raise
-    return send_test_webhook
-
-
 @router.post("/api/settings/webhook/test", response_model=WebhookTestResponse)
 def test_webhook(request: Request, user: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)):
+    """API.md 17: one synchronous test send through WP4's ``delivery.webhook.send_test_webhook(settings_row)``."""
     now = request.app.state.clock.now_utc()
     row = security.load_settings_row(conn, int(user["id"]))
     if row is None or not int(row["webhook_enabled"]) or not row["webhook_url"]:
         raise ApiError("webhook_unconfigured")
-    send = _send_test_webhook()
-    if send is None:
-        raise ApiError("service_unavailable", status=503, message_zh=WEBHOOK_TEST_UNAVAILABLE_ZH)
     security.rate_limit(conn, f"webhook_test:user:{user['id']}", limit=security.TEST_SEND_LIMIT, window_s=security.TEST_SEND_WINDOW_S, now=now)
-    result = send(row)
+    result = webhook_delivery.send_test_webhook(row)
     return {"ok": bool(result.get("ok")), "http_status": result.get("http_status"), "error": result.get("error")}
 
 

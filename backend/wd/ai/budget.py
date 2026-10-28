@@ -136,7 +136,7 @@ def set_paused_until(conn: sqlite3.Connection, until: str | None, *, now: str | 
 def spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, now: str | None = None) -> float:
     """``SUM(cost_usd)`` of today's (``WD_TZ``) calls + ``SUM(reserved_usd)`` of the calls still running.
 
-    ``cfg`` defaults to the environment (WP4's ``maintenance.prefetch`` reads this through a late import).
+    ``cfg`` defaults to the environment (WP4's ``maintenance.prefetch`` passes its own ``Settings``).
     """
     cfg = cfg or Settings.from_env()
     now = now or now_iso()

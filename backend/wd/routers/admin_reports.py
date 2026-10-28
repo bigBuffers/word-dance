@@ -21,54 +21,9 @@ from ..errors import ApiError
 from ..images import reject_active_image
 from ..jobs import queue
 from ..schemas import AdminReportsQuery, Page, Report, ReportResolveRequest
+from ..services.words import word_brief
 
 router = APIRouter()
-
-STAGE_COLUMNS = (("zk", "stage_zk"), ("gk", "stage_gk"), ("cet4", "stage_cet4"), ("cet6", "stage_cet6"))
-
-
-def _first_line(text: str | None, limit: int = 60) -> str:
-    if not text:
-        return ""
-    for line in str(text).splitlines():
-        if line.strip():
-            return line.strip()[:limit]
-    return ""
-
-
-def _local_word_brief(row: sqlite3.Row, my_state: str | None) -> dict[str, Any]:
-    """``WordBrief`` straight from a ``words`` row (used until WP1's ``services.words.word_brief`` is importable)."""
-    return {
-        "id": int(row["id"]),
-        "lemma": row["lemma"],
-        "display": row["display"],
-        "kind": row["kind"],
-        "phonetic": row["phonetic"],
-        "translation_short": _first_line(row["translation"]),
-        "stages": [stage for stage, col in STAGE_COLUMNS if row[col]],
-        "stage_min": row["stage_min"],
-        "cet6_star": bool(row["cet6_star"]),
-        "frq": row["frq"],
-        "collins": row["collins"],
-        "oxford": None if row["oxford"] is None else bool(row["oxford"]),
-        "difficulty": row["difficulty"],
-        "is_public": bool(row["is_public"]),
-        "is_valid_english": None if row["is_valid_english"] is None else bool(row["is_valid_english"]),
-        "my_state": my_state,
-        "content_state": row["content_state"],
-        "image_state": row["image_state"],
-    }
-
-
-def word_brief(conn: sqlite3.Connection, row: sqlite3.Row, user_id: int) -> dict[str, Any]:
-    try:
-        from ..services.words import word_brief as wp1_word_brief  # type: ignore[import-not-found]  # WP1
-    except ModuleNotFoundError as e:
-        if e.name != "wd.services.words":
-            raise
-        state_row = conn.execute("SELECT state FROM user_words WHERE user_id = ? AND word_id = ?", (int(user_id), int(row["id"]))).fetchone()
-        return _local_word_brief(row, None if state_row is None else state_row["state"])
-    return wp1_word_brief(conn, row, user_id)
 
 
 def _report_dto(conn: sqlite3.Connection, report_row: sqlite3.Row, admin: dict[str, Any]) -> dict[str, Any]:

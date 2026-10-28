@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
 from wd import db, security
+from wd.delivery import webhook
 from wd.delivery.mailer import RecordingMailer
 from wd.routers.settings import CURATED_TIMEZONES
 
@@ -170,31 +169,20 @@ def test_webhook_test_endpoint(client: TestClient, alice, frozen_clock, monkeypa
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 409 and error(r)["code"] == "webhook_unconfigured"
     assert client.put("/api/settings", json={"webhook_enabled": True, "webhook_url": HOOK, "webhook_format": "feishu"}).status_code == 200
-    try:
-        import wd.delivery.webhook  # type: ignore[import-not-found]  # noqa: F401
-
-        wp4_present = True
-    except ModuleNotFoundError:
-        wp4_present = False
-    if not wp4_present:
-        r = client.post("/api/settings/webhook/test")
-        assert r.status_code == 503 and error(r)["code"] == "service_unavailable" and error(r)["message"]
     calls: list[dict] = []
-    fake = types.ModuleType("wd.delivery.webhook")
 
     def send_test_webhook(row):
         calls.append(dict(row))
         return {"ok": True, "http_status": 200, "error": None}
 
-    fake.send_test_webhook = send_test_webhook  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wd.delivery.webhook", fake)
+    monkeypatch.setattr(webhook, "send_test_webhook", send_test_webhook)  # WP4's sender; test_delivery exercises the real one
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 200 and r.json() == {"ok": True, "http_status": 200, "error": None}, r.text
     assert len(calls) == 1 and calls[0]["webhook_url"] == HOOK and calls[0]["webhook_format"] == "feishu" and calls[0]["user_id"] == alice["id"]
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 429 and error(r)["code"] == "rate_limited" and r.headers["Retry-After"] == "600"  # 1 per 10 min
     frozen_clock.advance(minutes=10)
-    fake.send_test_webhook = lambda row: {"ok": False, "http_status": 500, "error": "boom"}  # type: ignore[attr-defined]
+    monkeypatch.setattr(webhook, "send_test_webhook", lambda row: {"ok": False, "http_status": 500, "error": "boom"})
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 200 and r.json() == {"ok": False, "http_status": 500, "error": "boom"}
 

@@ -6,8 +6,8 @@ Contracts: DESIGN §4 (state machine table, action → ``review_logs.action`` ma
 :func:`add_custom_words`, :func:`import_rows`).
 
 Every function takes an open ``sqlite3.Connection`` (``row_factory = sqlite3.Row``) and composes with a caller's
-transaction through ``db.maybe_tx``. Other work packages are reached only through late imports (:func:`late_import`):
-WP4's ``batches.append_to_today`` (``study_today`` extras) — until it lands ``added_to_today`` is simply ``False``.
+transaction through ``db.maybe_tx``. WP4's ``batches.append_to_today`` (``study_today`` extras, in-batch screen
+verdicts) is imported inside :func:`_append_to_today` because ``batches`` imports this module.
 
 This module also hosts the small helpers the WP3 routers share: query-model parsing, the per-user daily quotas kept in
 ``auth_throttle``, the user's timezone / settings row and the AI kill-switch check.
@@ -16,7 +16,6 @@ This module also hosts the small helpers the WP3 routers share: query-model pars
 from __future__ import annotations
 
 import csv
-import importlib
 import io
 import json
 import logging
@@ -24,7 +23,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ValidationError
 
@@ -128,23 +127,6 @@ _RESTORE_KEYS: tuple[str, ...] = (  # what mark:restore writes back (DESIGN §4)
 
 
 # ------------------------------------------------------------------------------------------ small helpers
-def late_import(module: str, attr: str) -> Callable[..., Any] | None:
-    """``module.attr`` when the module exists (TASKS late-import convention), else None.
-
-    Only a *missing* module (``ModuleNotFoundError`` for it or a parent package) is tolerated; a module that exists
-    but fails to import propagates, exactly like ``registry.load_handlers``.
-    """
-    try:
-        mod = importlib.import_module(module)
-    except ModuleNotFoundError as e:
-        name = e.name or ""
-        if name == module or module.startswith(name + "."):
-            return None
-        raise
-    fn = getattr(mod, attr, None)
-    return fn if callable(fn) else None
-
-
 def coerce_now(now: datetime | str | None) -> tuple[datetime, str]:
     """``(aware UTC datetime, ISO string)`` from a datetime, an ISO string or None (system clock)."""
     if now is None:
@@ -899,12 +881,12 @@ def split_tokens(text: str) -> list[str]:
 
 
 def _append_to_today(conn: sqlite3.Connection, user_id: int, word_id: int, kind: str, now: str) -> int | None:
-    """WP4's ``batches.append_to_today`` through a late import; None (``added_to_today:false``) while it is absent."""
-    fn = late_import("wd.services.batches", "append_to_today")
-    if fn is None:
-        return None
+    """WP4's ``batches.append_to_today`` — the new ``push_items`` row id, or None (``added_to_today:false``) when there
+    is no batch today / the word is already in it. Imported here because ``batches`` imports this module."""
+    from . import batches
+
     try:
-        result = fn(conn, int(user_id), int(word_id), kind, now)
+        result = batches.append_to_today(conn, int(user_id), int(word_id), kind, now)
     except ApiError:
         raise
     except Exception:  # noqa: BLE001 - a batch problem must never fail the add itself
@@ -1188,7 +1170,6 @@ __all__ = [
     "enqueue_content_if_needed",
     "expire_open_suggestions",
     "import_rows",
-    "late_import",
     "latest_transition_log",
     "local_date_str",
     "my_row",

@@ -4,20 +4,11 @@ template card with the visibility rule and its cache headers."""
 from __future__ import annotations
 
 import secrets
-import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
-
-def _drop_editable_finder() -> None:
-    """See test_images.py: keep this worktree's test run independent of the main checkout's modules."""
-    sys.meta_path[:] = [f for f in sys.meta_path if "editable" not in (getattr(f, "__module__", "") + getattr(f, "__name__", type(f).__name__)).lower()]
-
-
-_drop_editable_finder()
-
-from wd import db  # noqa: E402
+from wd import db
 from wd.deps import hash_token
 from wd.images import store
 

@@ -2,8 +2,8 @@
 
 One word per call. The job is enqueued by WP6's ``fetch_image`` only for studied words at priority < 90; the
 budget reservation applies the SVG daily sub-cap (``WD_AI_SVG_DAILY_BUDGET_USD``, counted inside the daily cap).
-A returned SVG goes through WP6's ``images.activate_svg`` (defusedxml parse + allow-lists + re-serialisation, late
-import); a rejected SVG leaves ``image_state='failed'`` so the template card keeps being served and is never retried
+A returned SVG goes through WP6's ``images.activate_svg`` (defusedxml parse + allow-lists + re-serialisation); a
+rejected SVG leaves ``image_state='failed'`` so the template card keeps being served and is never retried
 automatically.
 """
 
@@ -14,10 +14,11 @@ import sqlite3
 from typing import Any, Mapping
 
 from .. import db
+from ..images import activate_svg
 from ..interfaces import Job
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
-from ..services import bank, words
+from ..services import words
 from . import common, runner
 from .content import dictionary_hint
 
@@ -94,10 +95,6 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
             if cfg.ai_svg_daily_budget_usd <= 0:
                 _skip(conn, job, wid, "svg_budget_disabled", now=now)
                 continue
-            activate = bank.late_import("wd.images", "activate_svg")
-            if activate is None:
-                _skip(conn, job, wid, "images_module_missing", now=now)
-                continue
             result = common.claude_call(
                 ctx,
                 conn,
@@ -121,7 +118,7 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
             try:
                 if not isinstance(svg, str) or not svg.strip():
                     raise ValueError("response carries no svg string")
-                image_id = activate(conn, cfg, wid, svg, alt, now=now)
+                image_id = activate_svg(conn, cfg, wid, svg, alt, now=now)
             except ValueError as e:  # images.sanitize_svg.SvgRejected is a ValueError
                 mark_failed(conn, wid, now=now)
                 queue.finish(conn, job.id, {"rejected": str(e)[:300], "cost_usd": round(result.cost_usd, 6)}, now=now)

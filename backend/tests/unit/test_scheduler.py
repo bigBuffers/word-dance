@@ -9,12 +9,11 @@ import argparse
 import dataclasses
 import logging
 import sqlite3
-import sys
 import time as _time
-import types
 from datetime import datetime, timedelta, timezone
 
 from wd import db
+from wd.ai import budget
 from wd.jobs import lease, queue, scheduler
 from wd.jobs.registry import JobContext
 from wd.services import bank, batches
@@ -236,10 +235,8 @@ class FakeBudget:
         self.calls: list[str] = []
 
     def install(self, monkeypatch) -> "FakeBudget":
-        mod = types.ModuleType("wd.ai.budget")
-        mod.spent_today = self.spent_today  # type: ignore[attr-defined]
-        mod.ai_enabled = self.ai_enabled  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "wd.ai.budget", mod)
+        monkeypatch.setattr(budget, "spent_today", self.spent_today)
+        monkeypatch.setattr(budget, "ai_enabled", self.ai_enabled)
         return self
 
     def spent_today(self, conn, cfg=None, now=None):  # the real wd.ai.budget.spent_today signature (WP5)
@@ -298,13 +295,10 @@ def test_prefetch_caps_at_50_per_user(settings, seeded, monkeypatch):
     assert uid  # silence unused warning
 
 
-def test_prefetch_skips_when_spend_is_high_ai_paused_or_module_missing(settings, seeded, monkeypatch):
+def test_prefetch_skips_when_spend_is_high_or_ai_paused(settings, seeded, monkeypatch):
     conn = seeded
     uid = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_screen_count=5)
     t = datetime(2026, 10, 14, 19, 30, tzinfo=UTC)
-    # WP5 absent → skipped
-    monkeypatch.setitem(sys.modules, "wd.ai.budget", None)
-    assert scheduler.prefetch(conn, t, cfg=settings) == 0 and conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
     # ≥ 50 % of the daily cap → skipped
     FakeBudget(spent=1.5).install(monkeypatch)
     assert scheduler.prefetch(conn, t, cfg=settings) == 0
@@ -324,12 +318,9 @@ def test_prefetch_skips_when_spend_is_high_ai_paused_or_module_missing(settings,
 
 
 def test_prefetch_against_the_real_budget_module(settings, seeded):
-    """Integration seam: the late import meets WP5's real ``spent_today(conn, cfg=None, now=None)`` (no FakeBudget)."""
-    import importlib
-
+    """Integration seam: prefetch meets WP5's real ``spent_today(conn, cfg=None, now=None)`` (no FakeBudget)."""
     conn = seeded
-    budget = importlib.import_module("wd.ai.budget")
-    assert budget.spent_today.__module__ == "wd.ai.budget"  # the real module, not a stub left over from another test
+    assert budget.spent_today.__module__ == "wd.ai.budget"  # the real function, not a fake left over from another test
     uid = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_screen_count=5)
     t = datetime(2026, 10, 14, 19, 30, tzinfo=UTC)  # 03:30 Asia/Shanghai (WD_TZ) on 2026-10-15
     cap = float(settings.ai_daily_budget_usd)

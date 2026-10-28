@@ -1,4 +1,4 @@
-"""Image service functions used by the word routes (WP3, late import) and the admin endpoints (TASKS §I, WP6).
+"""Image service functions used by the word routes (WP3) and the admin endpoints (TASKS §I, WP6).
 
 * :func:`image_meta` — the API.md ``ImageMeta`` for a word; falls back to the template card (never None).
 * :func:`reject_active_image` — report flow (API.md 28): active image → ``rejected``, ``fetch_image`` enqueued with

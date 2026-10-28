@@ -342,8 +342,8 @@ def test_send_test_webhook_ok_and_server_errors_retry(settings, seeded, connect,
     assert webhook.send_test_webhook({"webhook_url": "https://hooks.example.com/x", "webhook_format": "unknown"})["ok"] is True  # falls back to generic
 
 
-def test_webhook_test_route_uses_the_late_import(client, settings, monkeypatch):
-    """WP2's POST /api/settings/webhook/test reaches delivery.webhook.send_test_webhook once WP4 exists."""
+def test_webhook_test_route_reaches_send_test_webhook(client, settings, monkeypatch):
+    """WP2's POST /api/settings/webhook/test posts through the real delivery.webhook.send_test_webhook (WP4)."""
     import secrets
 
     from wd.deps import hash_token

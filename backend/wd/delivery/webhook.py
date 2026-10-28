@@ -6,7 +6,7 @@ Formats (payload shapes): ``generic`` ``{type, date, title, body, counts, words:
 (``url: null`` when no public URL is known) · ``wecom`` ``{"msgtype":"text","text":{"content":…}}`` · ``feishu``
 ``{"msg_type":"text","content":{"text":…}}`` · ``serverchan`` ``{"title":…,"desp":…}`` · ``bark`` ``{"title":…,"body":…,"url":…}``
 (``url`` omitted when unknown). :func:`send_test_webhook` is called synchronously by ``POST /api/settings/webhook/test``
-(WP2, late import).
+(WP2's settings router).
 """
 
 from __future__ import annotations

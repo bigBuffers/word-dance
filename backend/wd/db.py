@@ -227,15 +227,15 @@ def run_migrations(
     return result
 
 
-def backup_pre_hook() -> PreHook | None:
-    """Late-import ``wd.backup.snapshot_before_migrate`` (WP9); None with a warning while it does not exist."""
-    try:
-        from .backup import snapshot_before_migrate  # type: ignore[import-not-found]
-    except ModuleNotFoundError as e:
-        if e.name in ("wd.backup",):
-            log.warning("wd.backup is not available yet; migrating without a pre-migrate snapshot")
-            return None
-        raise
+def backup_pre_hook() -> PreHook:
+    """``wd.backup.snapshot_before_migrate`` — the pre-migrate snapshot hook for :func:`run_migrations`.
+
+    Imported here rather than at module level because ``wd.backup`` imports this module (DEPLOY §5: the hook
+    writes ``backups/pre-migrate-<from>-to-<to>.db.gz`` through the same VACUUM INTO → integrity_check → gzip
+    pipeline as ``wd backup``).
+    """
+    from .backup import snapshot_before_migrate
+
     return snapshot_before_migrate
 
 

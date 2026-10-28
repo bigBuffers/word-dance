@@ -2,10 +2,10 @@
 
 Public surface for the other packages (TASKS §I):
 
-* :func:`reject_active_image` — ``POST /api/words/{id}/report {target:'image'}`` (WP3, late import)
+* :func:`reject_active_image` — ``POST /api/words/{id}/report {target:'image'}`` (WP3's word routes, admin reports)
 * :func:`image_meta` — ``ImageMeta`` with the template-card fallback (WP3 / WP4; never None)
 * :func:`render_card` — the template SVG (media route 53)
-* :func:`activate_svg` / :func:`clean_svg` — used by the ``generate_svg`` handler (WP5, late import)
+* :func:`activate_svg` / :func:`clean_svg` — used by the ``generate_svg`` handler (WP5)
 * :func:`request_refresh` (换一张, API.md 29) · :func:`admin_refetch` (API.md 69) · :func:`word_is_studied`
 * :func:`photo_mix` (``AdminOverview.words.with_photo/with_claude_svg/card_only``) and ``quota.status`` for the admin overview
 """

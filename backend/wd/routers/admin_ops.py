@@ -1,8 +1,8 @@
 """Admin operations (WP5) — API.md endpoints 54–55, 60–69, 72–74.
 
 Overview and health numbers come straight from the tables (``jobs``, ``ai_calls``, ``words``, ``word_images``,
-``kv``), the queue/AI actions go through ``wd.jobs.queue`` / ``wd.ai.*``; WP6 (``wd.images``) and WP4
-(``wd.services.batches``) are reached through late imports with the documented fallbacks.
+``kv``); the queue/AI actions go through ``wd.jobs.queue`` / ``wd.ai.*``, the image tiles / provider quotas /
+refetch through ``wd.images`` (WP6) and the manual push through ``wd.services.batches.push_now`` (WP4).
 """
 
 from __future__ import annotations
@@ -15,15 +15,16 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from .. import db, schemas
+from .. import db, images, schemas
 from ..ai import budget, ledger, prewarm, probe
 from ..clock import Clock, local_date, parse_iso, to_iso
 from ..config import Settings
 from ..deps import get_clock, get_db, get_settings, require_admin
 from ..errors import ApiError
+from ..images import quota as image_quota
 from ..jobs import lease, queue
 from ..jobs.registry import JobContext
-from ..services import bank
+from ..services import bank, batches
 
 router = APIRouter()
 
@@ -61,23 +62,11 @@ def _scheduler_alive(request: Request, conn: sqlite3.Connection, cfg: Settings, 
 
 
 def _photo_mix(conn: sqlite3.Connection) -> dict[str, int]:
-    fn = bank.late_import("wd.images", "photo_mix")
-    if fn is not None:
-        return fn(conn)
-    row = conn.execute(
-        "SELECT SUM(CASE WHEN wi.provider IN ('wikimedia','openverse','pixabay','pexels') THEN 1 ELSE 0 END), "
-        "       SUM(CASE WHEN wi.provider = 'claude_svg' THEN 1 ELSE 0 END), "
-        "       SUM(CASE WHEN wi.id IS NULL AND w.content_state = 'ready' THEN 1 ELSE 0 END) "
-        "FROM words w LEFT JOIN word_images wi ON wi.id = w.active_image_id AND wi.status = 'active'"
-    ).fetchone()
-    return {"with_photo": int(row[0] or 0), "with_claude_svg": int(row[1] or 0), "card_only": int(row[2] or 0)}
+    return images.photo_mix(conn)
 
 
 def _provider_status(conn: sqlite3.Connection, cfg: Settings, now: str) -> list[dict[str, Any]]:
-    fn = bank.late_import("wd.images.quota", "status")
-    if fn is None:
-        return []
-    return [dict(r) for r in fn(conn, cfg, now)]
+    return [dict(r) for r in image_quota.status(conn, cfg, now)]
 
 
 def _event_dto(row: sqlite3.Row) -> dict[str, Any]:
@@ -413,21 +402,10 @@ def refetch_image(
     now = _now(clock)
     word = _word_or_404(conn, word_id)
     wid = int(word["id"])
-    fn = bank.late_import("wd.images", "admin_refetch")
-    if fn is not None:
-        job_id = fn(conn, wid, provider=body.provider, query=body.query, priority=REFETCH_PRIORITY, now=now)
-        if job_id is None:
-            raise ApiError("word_not_found")
-        return {"job_id": int(job_id)}
-    payload: dict[str, Any] = {"word_id": wid}
-    if body.provider:
-        payload["provider"] = body.provider
-    if body.query:
-        payload["query"] = body.query.strip()
-    with db.tx(conn):
-        job_id = queue.enqueue(conn, "fetch_image", payload, dedupe_key=f"image:{wid}", priority=REFETCH_PRIORITY, now=now)
-        conn.execute("UPDATE words SET image_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
-    return {"job_id": job_id}
+    job_id = images.admin_refetch(conn, wid, provider=body.provider, query=body.query, priority=REFETCH_PRIORITY, now=now)
+    if job_id is None:
+        raise ApiError("word_not_found")
+    return {"job_id": int(job_id)}
 
 
 # ----------------------------------------------------------------------------------- 72–74 misc
@@ -459,9 +437,6 @@ def push_run(
     if user is None:
         raise ApiError("not_found")
     # WP4's helper (also behind `wd push-now`): build today's batch if missing, publish once, enqueue the deliveries
-    # the user enabled (dedupe email:<id> / webhook:<id>, statuses → 'queued'); late import until the final integration.
-    push_now = bank.late_import("wd.services.batches", "push_now")
-    if push_now is None:
-        raise ApiError("ai_disabled", message_zh="每日推送模块尚未安装")
-    batch_id, status = push_now(conn, int(body.user_id), now_dt, trigger="admin")
+    # the user enabled (dedupe email:<id> / webhook:<id>, statuses → 'queued').
+    batch_id, status = batches.push_now(conn, int(body.user_id), now_dt, trigger="admin")
     return {"batch_id": int(batch_id), "status": str(status)}

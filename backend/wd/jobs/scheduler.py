@@ -15,14 +15,12 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
 * ``kv.last_tick_at``; a ``downtime`` event with ``{"from","to"}`` when the gap since the last tick exceeds 10 min.
 
-``prefetch`` reads ``wd.ai.budget.spent_today(conn, cfg, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` through a
-late import (WP5) and simply skips while that module does not exist.
+``prefetch`` reads ``wd.ai.budget.spent_today(conn, cfg, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` (WP5).
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import logging
 import shutil
@@ -36,6 +34,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping, Sequence
 
 from .. import db
+from ..ai import budget
 from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, to_iso, zone
 from ..services import bank, batches
 from . import lease, queue
@@ -212,16 +211,6 @@ def _bank_needs_consolidation(conn: sqlite3.Connection, user_id: int) -> bool:
 
 
 # --------------------------------------------------------------------------------------- maintenance
-def _budget_module() -> Any | None:
-    """``wd.ai.budget`` (WP5) when it exists; None while it has not landed (TASKS late-import convention)."""
-    try:
-        return importlib.import_module("wd.ai.budget")
-    except ModuleNotFoundError as e:
-        if (e.name or "") in ("wd.ai.budget", "wd.ai"):
-            return None
-        raise
-
-
 def prefetch(conn: sqlite3.Connection, now: datetime | str | None, *, cfg: Any = None) -> int:
     """DESIGN §6.4 ``maintenance.prefetch``: ≤ 50 priority-30 ``generate_content`` jobs per active push-enabled user
     for the words ``preview_selection(tomorrow)`` would pick, skipped entirely when AI is off/paused or
@@ -231,15 +220,9 @@ def prefetch(conn: sqlite3.Connection, now: datetime | str | None, *, cfg: Any =
         from ..config import get_settings
 
         cfg = get_settings()
-    budget = _budget_module()
-    if budget is None:
-        log.info("prefetch skipped: wd.ai.budget is not available yet")
+    if not budget.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now_s) is not None:
         return 0
-    ai_enabled = getattr(budget, "ai_enabled", None)
-    enabled = bool(ai_enabled(conn, cfg)) if callable(ai_enabled) else bank.ai_enabled(conn, cfg)
-    if not enabled or bank.ai_paused_until(conn, now_s) is not None:
-        return 0
-    spent = float(budget.spent_today(conn, cfg, now_s))  # WP5 signature: spent_today(conn, cfg=None, now=None)
+    spent = float(budget.spent_today(conn, cfg, now_s))
     cap = float(getattr(cfg, "ai_daily_budget_usd", 0.0) or 0.0)
     if spent >= PREFETCH_SPEND_SHARE * cap:
         log.info("prefetch skipped: spent %.3f of %.2f today", spent, cap, extra={"event": "prefetch_skipped"})

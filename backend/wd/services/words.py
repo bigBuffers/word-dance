@@ -7,14 +7,13 @@ by :func:`word_brief`, :func:`word_detail`, :func:`user_word_dict`), API.md §9.
 CLAUDE_INTEGRATION §6.5 (:func:`validate_headword`, :func:`suffix_rule_maps`).
 
 Every function takes an open ``sqlite3.Connection`` (``row_factory = sqlite3.Row``, see ``wd.db.connect``) and
-composes with a caller's transaction through ``db.maybe_tx``. Nothing here imports another work package at module
-import time: WP6's ``image_meta`` is looked up lazily with a card fallback, and the ECDICT step goes through
-:mod:`wd.services.ecdict` (which answers None while ``WD_ECDICT_DB_PATH`` is unset).
+composes with a caller's transaction through ``db.maybe_tx``. The ``ImageMeta`` of a word comes from WP6's
+``images.image_meta`` (with the template card as the fallback for any image-layer failure), and the ECDICT step goes
+through :mod:`wd.services.ecdict` (which answers None while ``WD_ECDICT_DB_PATH`` is unset).
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import re
@@ -22,9 +21,9 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping
+from typing import Any, ClassVar, Iterable, Literal, Mapping
 
-from .. import db
+from .. import db, images
 from ..clock import now_iso, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
@@ -457,52 +456,16 @@ def card_image_meta(word_id: int) -> dict[str, Any]:
     }
 
 
-def _late_image_meta() -> Callable[[sqlite3.Connection, int], dict[str, Any]] | None:
-    """WP6's ``wd.images.image_meta`` when it exists (late import — TASKS WP3/WP4 convention)."""
-    try:
-        mod = importlib.import_module("wd.images")
-    except ModuleNotFoundError:
-        return None
-    fn = getattr(mod, "image_meta", None)
-    return fn if callable(fn) else None
-
-
 def image_meta_for(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
-    """``ImageMeta`` of the active image, through WP6 when present, else from ``word_images`` directly, else the card."""
-    fn = _late_image_meta()
-    if fn is not None:
-        try:
-            meta = fn(conn, int(word_id))
-            if isinstance(meta, dict):
-                return meta
-        except Exception:  # noqa: BLE001 - the card is the documented fallback for any image-layer problem
-            log.exception("images.image_meta failed for word %s; serving the card", word_id)
-    row = conn.execute(
-        "SELECT wi.* FROM words w JOIN word_images wi ON wi.id = w.active_image_id WHERE w.id = ? AND wi.status = 'active'",
-        (int(word_id),),
-    ).fetchone()
-    if row is None:
-        return card_image_meta(word_id)
-    r = _as_dict(row)
-    return {
-        "id": int(r["id"]),
-        "url": f"/media/images/{r['file_path']}",
-        "kind": "svg" if r["provider"] == "claude_svg" else "photo",
-        "provider": r["provider"],
-        "mime": r["mime"],
-        "width": r.get("width"),
-        "height": r.get("height"),
-        "alt_zh": r.get("alt_zh"),
-        "attribution": {
-            "title": r.get("title"),
-            "creator": r.get("creator"),
-            "creator_url": r.get("creator_url"),
-            "license": r.get("license") or "",
-            "license_url": r.get("license_url"),
-            "landing_url": r.get("landing_url"),
-            "text": r.get("attribution_text") or "",
-        },
-    }
+    """``ImageMeta`` of the word's active photo / Claude SVG through WP6's ``images.image_meta`` (itself falling back to
+    the card when nothing is active); the card is also served when the image layer fails (API.md §9.1: never null)."""
+    try:
+        meta = images.image_meta(conn, int(word_id))
+        if isinstance(meta, dict):
+            return meta
+    except Exception:  # noqa: BLE001 - the card is the documented fallback for any image-layer problem
+        log.exception("images.image_meta failed for word %s; serving the card", word_id)
+    return card_image_meta(word_id)
 
 
 def history_for(conn: sqlite3.Connection, user_id: int, word_id: int, limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:

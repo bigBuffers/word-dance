@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import json
 import secrets
-import sys
-import types
 
 import pytest
 from fastapi.testclient import TestClient
 
-from wd import db
+from wd import db, images
+from wd.ai import budget
 from wd.deps import hash_token
 
 FAR = "2030-01-01T00:00:00Z"
@@ -259,7 +258,8 @@ def test_report_content_and_image(client: TestClient, settings, alice):
     run(settings, "UPDATE words SET active_image_id = ?, image_state = 'ready' WHERE id = ?", (iid, w))
     r = client.post(f"/api/words/{w}/report", json={"target": "image", "reason": "irrelevant_image"})
     assert r.status_code == 201
-    assert q1(settings, "SELECT status FROM word_images WHERE id = ?", (iid,)) == "rejected"  # WP6 absent → local fallback
+    assert q1(settings, "SELECT status FROM word_images WHERE id = ?", (iid,)) == "rejected"  # WP6's reject_active_image
+    assert q1(settings, "SELECT COUNT(*) FROM system_events WHERE kind = 'image_rejected'") == 1
     job = qrow(settings, "SELECT * FROM jobs WHERE type = 'fetch_image'")
     assert job["priority"] == 10 and job["dedupe_key"] == f"image:{w}" and json.loads(job["payload_json"]) == {"word_id": w, "exclude": ["ov-1", "sha-1"]}
     assert qrow(settings, "SELECT * FROM words WHERE id = ?", (w,))["image_state"] == "queued"
@@ -267,16 +267,14 @@ def test_report_content_and_image(client: TestClient, settings, alice):
     assert client.post(f"/api/words/{w}/report", json={"target": "content", "reason": "other", "note": "x" * 301}).status_code == 400
 
 
-def test_report_uses_wp6_when_present(client: TestClient, settings, alice, monkeypatch):
+def test_report_delegates_the_image_change_to_wp6(client: TestClient, settings, alice, monkeypatch):
     w = word_id(settings, "apple")
     iid = run(settings, "INSERT INTO word_images(word_id, provider, provider_ref, file_path, file_bytes, sha256, mime) VALUES (?, 'openverse', 'ov-1', 'ab/abcd.jpg', 10, 'sha-1', 'image/jpeg')", (w,))
     run(settings, "UPDATE words SET active_image_id = ?, image_state = 'ready' WHERE id = ?", (iid, w))
     seen = []
-    fake = types.ModuleType("wd.images")
-    fake.reject_active_image = lambda conn, word_id, *, reason: seen.append((word_id, reason)) or 7
-    monkeypatch.setitem(sys.modules, "wd.images", fake)
+    monkeypatch.setattr(images, "reject_active_image", lambda conn, word_id, *, reason, priority=10, now=None: seen.append((word_id, reason, priority)) or 7)
     assert client.post(f"/api/words/{w}/report", json={"target": "image", "reason": "inappropriate_image"}).status_code == 201
-    assert seen == [(w, "inappropriate_image")]
+    assert seen == [(w, "inappropriate_image", 10)]
     assert q1(settings, "SELECT status FROM word_images WHERE id = ?", (iid,)) == "active"  # WP6 owns the change
 
 
@@ -323,15 +321,17 @@ def test_content_request_flow(client: TestClient, settings, alice, monkeypatch):
     assert r.status_code == 409 and r.json()["error"]["code"] == "invalid_transition"
     # budget (WP5) says no → 409 budget_exhausted
     w2 = word_id(settings, "bank")
-    fake_pkg = types.ModuleType("wd.ai")
-    fake_pkg.__path__ = []  # a package, so "wd.ai.budget" resolves
-    fake = types.ModuleType("wd.ai.budget")
-    fake.can_spend = lambda conn, kind, word_count, priority, now: (False, "2026-10-14T16:05:00Z")
-    monkeypatch.setitem(sys.modules, "wd.ai", fake_pkg)
-    monkeypatch.setitem(sys.modules, "wd.ai.budget", fake)
+    seen: list[tuple] = []
+
+    def refuse(conn, kind, word_count, priority, now):
+        seen.append((kind, word_count, priority, now))
+        return False, "2026-10-14T16:05:00Z"
+
+    monkeypatch.setattr(budget, "can_spend", refuse)
     r = client.post(f"/api/words/{w2}/content/request")
     assert r.status_code == 409 and r.json()["error"]["code"] == "budget_exhausted" and r.json()["error"]["details"]["resumes_at"] == "2026-10-14T16:05:00Z"
-    fake.can_spend = lambda conn, kind, word_count, priority, now: (True, None)
+    assert seen == [("content", 1, 10, "2026-10-14T00:00:00Z")]  # the frozen clock as an ISO string (WP5 accepts str | datetime)
+    monkeypatch.setattr(budget, "can_spend", lambda conn, kind, word_count, priority, now: (True, None))
     assert client.post(f"/api/words/{w2}/content/request").status_code == 202
     # kill switch → 503
     w3 = word_id(settings, "glass")

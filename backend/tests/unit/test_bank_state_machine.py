@@ -490,30 +490,26 @@ def test_bulk_add_dedupes_within_the_request_and_caps_tokens(seeded, user):
 
 
 def test_study_today_uses_append_to_today_only_for_validated_words(seeded, user, monkeypatch):
-    import sys
-    import types
+    from wd.services import batches
 
     calls: list[tuple] = []
-    fake = types.ModuleType("wd.services.batches")
 
     def append_to_today(conn, user_id, word_id, kind, now):
         calls.append((user_id, word_id, kind))
         return 4242
 
-    fake.append_to_today = append_to_today
-    monkeypatch.setitem(sys.modules, "wd.services.batches", fake)
+    monkeypatch.setattr(batches, "append_to_today", append_to_today)
     results = bank.add_custom_words(seeded, user, "abandon, ubiquitous", None, True, NOW, TZ)
     assert [r.status for r in results] == ["added", "pending_ai"]
     assert results[0].added_to_today is True and results[1].added_to_today is False
     assert calls == [(user, wid(seeded, "abandon"), "extra")]
 
 
-def test_study_today_without_wp4_is_false(seeded, user, monkeypatch):
-    import sys
-
-    monkeypatch.setitem(sys.modules, "wd.services.batches", None)  # import raises ModuleNotFoundError
+def test_study_today_without_a_batch_today_is_false(seeded, user):
+    """The real WP4 append_to_today: no push batch for the user today → nothing appended, added_to_today false."""
     results = bank.add_custom_words(seeded, user, "abandon", None, True, NOW, TZ)
     assert results[0].status == "added" and results[0].added_to_today is False
+    assert seeded.execute("SELECT COUNT(*) FROM push_items").fetchone()[0] == 0
 
 
 # -------------------------------------------------------------------------------------------- import

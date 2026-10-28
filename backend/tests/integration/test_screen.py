@@ -4,8 +4,6 @@ services.screen.apply_verdict with a local stand-in for WP4's batches.append_to_
 from __future__ import annotations
 
 import secrets
-import sys
-import types
 import uuid
 
 import pytest
@@ -13,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from wd import db
 from wd.deps import hash_token
+from wd.services import batches
 
 FAR = "2030-01-01T00:00:00Z"
 TZ = "Asia/Shanghai"
@@ -90,7 +89,6 @@ def install_fake_batches(monkeypatch) -> list:
     """A stand-in for WP4's ``batches.append_to_today``: appends a row of ``kind`` at the end of today's batch unless a
     review/new/extra row for the word exists (TASKS §I contract)."""
     calls: list = []
-    fake = types.ModuleType("wd.services.batches")
 
     def append_to_today(conn, user_id, word_id, kind, now):
         calls.append((user_id, word_id, kind))
@@ -109,8 +107,7 @@ def install_fake_batches(monkeypatch) -> list:
         )
         return int(cur.lastrowid)
 
-    fake.append_to_today = append_to_today
-    monkeypatch.setitem(sys.modules, "wd.services.batches", fake)
+    monkeypatch.setattr(batches, "append_to_today", append_to_today)
     return calls
 
 
@@ -301,8 +298,8 @@ def test_in_batch_unfamiliar_then_restore(client: TestClient, settings, alice, m
     assert q1(settings, "SELECT COUNT(*) FROM user_words WHERE user_id = ?", (alice,)) == 0
 
 
-def test_verdict_without_wp4_never_appends(client: TestClient, settings, alice, monkeypatch):
-    monkeypatch.setitem(sys.modules, "wd.services.batches", None)
-    run(settings, "INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'ready', 'manual')", (alice,))
+def test_verdict_without_a_batch_today_never_appends(client: TestClient, settings, alice):
+    """The real WP4 append_to_today with no batch for today → ``added_to_today:false`` and no ``study_item``."""
     r = verdict(client, word_id(settings, "absorption"), "unfamiliar")
     assert r["added_to_today"] is False and r["study_item"] is None and r["mine"]["state"] == "new"
+    assert q1(settings, "SELECT COUNT(*) FROM push_items") == 0
