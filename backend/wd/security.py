@@ -691,6 +691,11 @@ def cmd_create_admin(args: argparse.Namespace) -> int:
             return 0
         username = (args.username or cfg.admin_username or "").strip()
         if not username:
+            if args.if_none:
+                # unattended install.sh form without WD_ADMIN_USERNAME: not an error (DEPLOY §2) — the first
+                # account registered through the web becomes admin without an invite code (API.md endpoint 2)
+                print("no admin configured (WD_ADMIN_USERNAME unset): the first account registered on the site becomes admin")
+                return 0
             print("wd create-admin: --username (or WD_ADMIN_USERNAME) is required", file=sys.stderr)
             return 2
         if not USERNAME_RE.match(username):

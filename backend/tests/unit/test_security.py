@@ -307,8 +307,15 @@ def test_cli_refuses_unmigrated_db(settings, capsys):
 def test_cli_create_admin_set_password_promote_demote_invite(settings, monkeypatch: pytest.MonkeyPatch, capsys):
     assert cli.main(["migrate"]) == 0
     capsys.readouterr()
-    # non-interactive without a password source → exit 2
+    # install.sh's unattended form on a fresh DB without WD_ADMIN_USERNAME: a hint and exit 0 (install.sh runs
+    # under `set -e`; a non-zero status here would abort it before the systemd steps), no user created
+    monkeypatch.delenv("WD_ADMIN_USERNAME", raising=False)
     monkeypatch.delenv("WD_ADMIN_PASSWORD", raising=False)
+    assert cli.main(["create-admin", "--if-none"]) == 0
+    assert "first account registered" in capsys.readouterr().out
+    assert cli.main(["create-admin"]) == 2  # the explicit form still demands a username
+    assert "WD_ADMIN_USERNAME" in capsys.readouterr().err
+    # non-interactive without a password source → exit 2
     assert cli.main(["create-admin", "--username", "root1"]) == 2
     assert "WD_ADMIN_PASSWORD" in capsys.readouterr().err
     monkeypatch.setenv("ROOT_PW", "Correct-Horse-7")
