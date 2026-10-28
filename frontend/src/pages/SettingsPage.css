@@ -32,9 +32,14 @@
 
 .settings__row > label:first-child,
 .settings__row > span:first-child {
-  flex: 1 1 auto;
-  min-width: 0;
+  /* the label never shrinks or wraps character by character (360 px showed 「时\n区」); the control side gives way */
+  flex: 0 0 auto;
+  white-space: nowrap;
   font-weight: 500;
+}
+
+.settings__row > :not(:first-child) {
+  min-width: 0;
 }
 
 .settings__row input[type="number"],
@@ -56,7 +61,16 @@
   display: flex;
   gap: var(--space-2);
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings__inline select {
+  flex: 1 1 8em;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .settings__inline input {

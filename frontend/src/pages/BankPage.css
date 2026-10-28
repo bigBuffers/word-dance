@@ -104,6 +104,13 @@
   padding: var(--space-3) 0;
 }
 
+@media (max-width: 767.98px) {
+  /* the fixed FAB floats over the list: keep the last row's actions and the pager reachable beneath it */
+  .bank {
+    padding-bottom: calc(var(--tap) + var(--space-5));
+  }
+}
+
 @media (min-width: 768px) {
   .bank__fab {
     position: static;
