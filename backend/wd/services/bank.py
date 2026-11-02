@@ -29,7 +29,7 @@ from pydantic import BaseModel, ValidationError
 
 from .. import db
 from ..clock import UTC, day_start, local_date as clock_local_date, now_iso, parse_iso, to_iso
-from ..errors import ApiError
+from ..errors import ApiError, pydantic_error_zh
 from ..jobs import queue
 from . import stats_core, words
 
@@ -57,6 +57,7 @@ CONTENT_PRIORITY_BANK = 20
 MAX_ADD_TOKENS = 50
 MAX_NOTE_CHARS = 500
 CUSTOM_DAILY_CAP = 200  # custom adds per user per day (DESIGN §10); imports share it
+STUDY_TODAY_DAILY_CAP = 20  # `study_today` extras appended to today's batch per user per day (DESIGN §5.3)
 IMPORT_MAX_ROWS = 2000
 IMPORT_RESULT_ROWS = 200
 CONTENT_REQUESTS_DAILY_CAP = 60
@@ -258,7 +259,7 @@ def query_model(model_cls: type[BaseModel], params: Mapping[str, Any], *, int_fi
         fields: dict[str, str] = {}
         for err in e.errors():
             loc = ".".join(str(x) for x in err.get("loc", ())) or "query"
-            fields.setdefault(loc, str(err.get("msg", "invalid")))
+            fields.setdefault(loc, pydantic_error_zh(err))
         raise ApiError("validation_error", details={"fields": fields}) from None
 
 
@@ -450,6 +451,15 @@ def expire_open_suggestions(conn: sqlite3.Connection, user_word_id: int, now: st
         (now, int(user_word_id)),
     )
     return int(cur.rowcount)
+
+
+def clear_attention(conn: sqlite3.Connection, user_word_id: int, now: str) -> None:
+    """Reset the 待处理 columns of a row (API.md 36 ``keep`` / endpoint 37 / a repoint onto another word): they describe
+    the string the row carried, not the one it carries now."""
+    conn.execute(
+        "UPDATE user_words SET needs_attention = 0, attention_msg = NULL, suggested_word_id = NULL, updated_at = ? WHERE id = ?",
+        (now, int(user_word_id)),
+    )
 
 
 def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str) -> int | None:
@@ -948,14 +958,23 @@ def add_resolved(
         status = "pending_ai"
     else:
         status = "readded" if r.status == "readded" else "added"
-    via = "provisional" if (r.created and word.get("source") == "user" and word.get("is_valid_english") is None) else resolved_via
-    if via not in ("exact", "form", "ecdict", "provisional"):
-        via = "exact"
+    # `resolved_via` is the resolution's own `via` ('provisional' exactly when resolve() created the row); an exact hit
+    # on another holder's still-unvalidated word is 'exact' even though this user's bank row is new
+    via = resolved_via if resolved_via in ("exact", "form", "ecdict", "provisional") else "exact"
     message = (r.mine or {}).get("attention_msg") if r.mine else None
     out = AddResult(input=input_text, status=status, word=brief, mine=r.mine, resolved_via=via, lemma_note_zh=lemma_note_zh, message=message, word_id=r.word_id, created=r.created)
     if study_today and status in ("added", "readded") and word.get("is_valid_english") == 1:
-        out.added_to_today = _append_to_today(conn, user_id, r.word_id, "extra", now) is not None
+        key = study_today_key(user_id)
+        if quota_used(conn, key, now) < STUDY_TODAY_DAILY_CAP:  # DESIGN §5.3 cap 20/day; the word itself is added regardless
+            if _append_to_today(conn, user_id, r.word_id, "extra", now) is not None:
+                quota_consume(conn, key, 1, now)
+                out.added_to_today = True
     return out
+
+
+def study_today_key(user_id: int) -> str:
+    """``auth_throttle`` key counting the day's ``study_today`` appends (never ``push_items.kind='extra'`` rows: 再来一组 writes those too)."""
+    return f"study_today:user:{int(user_id)}"
 
 
 def add_custom_words(
@@ -1166,6 +1185,7 @@ __all__ = [
     "attention_count",
     "bank_counts",
     "check_daily_quota",
+    "clear_attention",
     "coerce_now",
     "enqueue_content_if_needed",
     "expire_open_suggestions",
@@ -1183,6 +1203,7 @@ __all__ = [
     "set_attention",
     "split_tokens",
     "srs_snapshot",
+    "study_today_key",
     "summarise",
     "today_batch",
     "update_note",

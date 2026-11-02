@@ -29,6 +29,11 @@ wd = ["migrations/*.sql", "ai/prompts/*.txt", "ai/schemas/*.json", "data/*.txt",
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # starlette 1.8 / fastapi 0.143 warn when TestClient runs on httpx instead of httpx2 (raised while conftest imports
+    # TestClient, so a `-W error` on the command line still aborts collection); drop once the pins move or httpx2 is added
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 markers = [
     "full_seed: needs the full 9,162-word seed (set WD_FULL_SEED_DB=<path to an imported DB>); skipped on the mini seed",
 ]

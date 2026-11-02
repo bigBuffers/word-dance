@@ -105,6 +105,22 @@ def test_body_limit(client: TestClient, settings):
     assert r.json()["error"]["code"] == "payload_too_large"
 
 
+def test_chunked_body_over_the_limit_is_413_too(client: TestClient, settings):
+    """No Content-Length (Transfer-Encoding: chunked): the limit trips inside FastAPI's body parser on a JSON endpoint and
+    must still answer 413 payload_too_large — not the 400 validation_error FastAPI wraps unknown exceptions into."""
+    big = b"x" * (settings.max_body_bytes + 1)
+    r = client.post("/api/auth/login", content=iter([big[:65536], big[65536:]]), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413, r.text
+    body = r.json()
+    assert body["error"]["code"] == "payload_too_large" and body["error"]["details"]["max_bytes"] == settings.max_body_bytes
+    assert "X-Request-Id" in r.headers
+    # a small chunked body is parsed normally (and a truncated one is still the usual 400)
+    r = client.post("/api/auth/login", content=iter([b'{"username": "al', b'ice", "password": "nope-nope-1"}']), headers={"Content-Type": "application/json"})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "invalid_credentials"
+    r = client.post("/api/auth/login", content=iter([b'{"username": "al']), headers={"Content-Type": "application/json"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+
+
 def test_validation_errors_are_400_envelopes(settings, frozen_clock):
     from fastapi import APIRouter
 
@@ -127,6 +143,35 @@ def test_validation_errors_are_400_envelopes(settings, frozen_clock):
         assert "extra" in body["error"]["details"]["fields"]
         r = c.post("/api/_test/validate", content="not json", headers={"Content-Type": "application/json"})
         assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+
+
+def test_validation_field_messages_are_chinese(client: TestClient):
+    """details.fields is shown verbatim by the register form: our validators' own zh text (no `Value error, ` prefix),
+    short zh phrases for pydantic's structural errors — never English."""
+    import re
+
+    english = re.compile(r"^[A-Za-z0-9 ,'.`_-]+$")
+    seen: dict[str, str] = {}
+    fields = client.post("/api/auth/register", json={"username": "a"}).json()["error"]["details"]["fields"]
+    assert fields == {"username": "用户名为 2–32 个字母、数字、下划线或汉字", "password": "必填"}
+    seen.update(fields)
+    fields = client.post("/api/auth/register", json={"username": 123, "password": "Passw0rd!xyz", "extra": 1}).json()["error"]["details"]["fields"]
+    assert fields == {"username": "类型无效", "extra": "未知字段"}
+    seen.update(fields)
+    fields = client.post("/api/auth/register", json={"username": "alice", "password": "Passw0rd!xyz", "email": "x" * 250 + "@example.com"}).json()["error"]["details"]["fields"]
+    assert fields == {"email": "邮箱格式无效"}
+    seen.update(fields)
+    assert client.post("/api/auth/register", json={"username": "alice", "password": "Passw0rd!xyz"}).status_code == 201
+    fields = client.get("/api/suggestions?status=bogus").json()["error"]["details"]["fields"]  # services.bank.query_model path
+    assert fields == {"status": "取值无效"}
+    seen.update(fields)
+    fields = client.get("/api/screen/next?count=0").json()["error"]["details"]["fields"]
+    assert fields == {"count": "超出允许范围"}
+    seen.update(fields)
+    fields = client.get("/api/screen/next?count=abc").json()["error"]["details"]["fields"]
+    assert fields == {"count": "类型无效"}
+    seen.update(fields)
+    assert not [v for v in seen.values() if english.match(v)], seen
 
 
 def test_spa_fallback_without_a_built_frontend(client: TestClient):
@@ -217,6 +262,47 @@ def test_second_instance_runs_without_workers_while_lease_is_live(settings, froz
         assert lease.read(conn)["instance"] == "other-host:1:deadbeef"  # untouched
     finally:
         conn.close()
+
+
+def test_restarted_instance_takes_over_once_the_stale_lease_expires(settings, frozen_clock):
+    """A crashed predecessor (SIGKILL/OOM) leaves a live lease for up to 90 s while systemd restarts the unit after 5 s: the
+    successor must keep retrying and take over — sweeping the dead boot's running jobs — instead of never pushing again."""
+    from dataclasses import replace
+
+    from wd.jobs import lease, queue
+    from wd.main import create_app
+
+    cfg = replace(settings, worker_enabled=True)
+    conn = db.connect(cfg.db_path)
+    db.run_migrations(conn)
+    assert lease.acquire(conn, "box:4242:deadbeef", frozen_clock.now_utc())  # expires_at = now + 90 s
+    job_id = queue.enqueue(conn, "generate_content", {"word_id": 1}, dedupe_key="content:1", run_after="2030-01-01T00:00:00Z")
+    with db.tx(conn):
+        conn.execute("UPDATE jobs SET status = 'running', locked_by = 'claude-1:deadbeef', locked_at = '2026-10-14T00:00:00Z' WHERE id = ?", (job_id,))
+    conn.close()
+    app = create_app(cfg, clock=frozen_clock, configure_logs=False)
+    with TestClient(app) as c:
+        waiter = app.state.lease_waiter
+        assert waiter is not None and waiter.is_alive() and waiter.name == "lease-waiter"
+        assert app.state.lease_instance is None and app.state.threads == []
+        assert waiter.try_acquire() is False  # the predecessor's lease is still live: keep waiting
+        frozen_clock.advance(seconds=91)
+        assert waiter.try_acquire() is True
+        assert app.state.lease_instance is not None
+        assert {"lease-keeper", "scheduler", "claude-1", "io-1"} <= {t.name for t in app.state.threads}
+        conn = db.connect(cfg.db_path)
+        try:
+            assert lease.read(conn)["instance"] == app.state.lease_instance
+            assert conn.execute("SELECT status, locked_by FROM jobs WHERE id = ?", (job_id,)).fetchone()[0] == "queued"  # the stale sweep ran
+        finally:
+            conn.close()
+        assert c.get("/api/health").status_code == 200
+    conn = db.connect(cfg.db_path)
+    try:
+        assert lease.read(conn) is None  # released on shutdown like a lease taken at startup
+    finally:
+        conn.close()
+    assert app.state.lease_waiter is None and app.state.threads == []
 
 
 def test_refuses_multiple_uvicorn_workers(settings, frozen_clock, monkeypatch):

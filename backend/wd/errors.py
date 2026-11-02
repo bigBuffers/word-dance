@@ -123,13 +123,67 @@ def error_response(code: str, status: int | None = None, message_zh: str | None 
     return ApiError(code, status, message_zh, details).to_response()
 
 
+# pydantic error ``type`` → the zh text shown in ``details.fields`` (RegisterPage prints these verbatim; the envelope is zh)
+_PYDANTIC_TYPE_ZH: dict[str, str] = {
+    "missing": "必填",
+    "extra_forbidden": "未知字段",
+    "literal_error": "取值无效",
+    "enum": "取值无效",
+    "string_type": "类型无效",
+    "int_type": "类型无效",
+    "float_type": "类型无效",
+    "bool_type": "类型无效",
+    "list_type": "类型无效",
+    "dict_type": "类型无效",
+    "int_parsing": "类型无效",
+    "int_from_float": "类型无效",
+    "float_parsing": "类型无效",
+    "bool_parsing": "类型无效",
+    "uuid_type": "类型无效",
+    "uuid_parsing": "类型无效",
+    "less_than": "超出允许范围",
+    "less_than_equal": "超出允许范围",
+    "greater_than": "超出允许范围",
+    "greater_than_equal": "超出允许范围",
+    "multiple_of": "超出允许范围",
+    "string_too_short": "长度不符合要求",
+    "string_too_long": "长度不符合要求",
+    "too_short": "长度不符合要求",
+    "too_long": "长度不符合要求",
+    "string_pattern_mismatch": "格式无效",
+    "json_invalid": "请求体格式无效",
+    "model_type": "请求体格式无效",
+    "model_attributes_type": "请求体格式无效",
+}
+_FIELD_INVALID_ZH = "字段无效"
+_VALUE_ERROR_PREFIXES = ("Value error, ", "Assertion failed, ")
+
+
+def pydantic_error_zh(err: Mapping[str, Any]) -> str:
+    """The zh message for one ``pydantic`` error dict (``RequestValidationError.errors()`` / ``ValidationError.errors()``).
+
+    A ``value_error`` carries the text our own validators raised (already zh) in ``ctx.error``; every other type maps to
+    a short zh phrase, so no English ever reaches ``details.fields``.
+    """
+    kind = str(err.get("type") or "")
+    if kind in ("value_error", "assertion_error"):
+        ctx = err.get("ctx") or {}
+        text = str(ctx.get("error") or "").strip() if isinstance(ctx, Mapping) else ""
+        if not text:
+            text = str(err.get("msg") or "")
+            for prefix in _VALUE_ERROR_PREFIXES:
+                if text.startswith(prefix):
+                    text = text[len(prefix) :]
+        return text.strip() or _FIELD_INVALID_ZH
+    return _PYDANTIC_TYPE_ZH.get(kind, _FIELD_INVALID_ZH)
+
+
 def _validation_fields(exc: RequestValidationError) -> dict[str, str]:
     fields: dict[str, str] = {}
     for err in exc.errors():
         loc = [str(x) for x in err.get("loc", ()) if x not in ("body", "query", "path", "header", "cookie")]
         key = ".".join(loc) if loc else "body"
-        msg = str(err.get("msg", "invalid"))
-        fields.setdefault(key, msg)
+        fields.setdefault(key, pydantic_error_zh(err))
     return fields
 
 

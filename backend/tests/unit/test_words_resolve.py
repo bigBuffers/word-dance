@@ -183,9 +183,27 @@ def test_provisional_insert_lost_race_behaves_like_exact(seeded, user, monkeypat
 
     monkeypatch.setattr(words, "word_by_lemma", racy)
     res = resolve_text(seeded, "zzqx", user)
-    assert res.via == "exact" and res.created is False and res.job_id is None
+    assert res.via == "exact" and res.created is False
     assert seeded.execute("SELECT COUNT(*) FROM words WHERE lemma='zzqx'").fetchone()[0] == 1
-    assert jobs(seeded) == []
+    js = jobs(seeded, "lookup_word")  # the racing insert came without a job: this holder enqueues the one lookup the word needs
+    assert len(js) == 1 and js[0]["id"] == res.job_id and js[0]["dedupe_key"] == f"lookup:{res.word_id}"
+
+
+def test_exact_hit_on_an_unvalidated_word_without_a_live_lookup_enqueues_one(seeded, user):
+    """The first holder's lookup job died: the next holder's add must not leave the shared provisional word with nothing
+    left to validate it (the new row would sit at 待校验 with no 重试 button)."""
+    first = resolve_text(seeded, "abandonned", user)
+    bob = make_user(seeded, "bob")
+    assert resolve_text(seeded, "abandonned", bob).job_id is None  # a live job: fold into it, nothing new
+    seeded.execute("UPDATE jobs SET status = 'dead' WHERE id = ?", (first.job_id,))
+    carol = make_user(seeded, "carol")
+    again = resolve_text(seeded, "abandonned", carol)
+    assert again.via == "exact" and again.created is False and again.word_id == first.word_id and again.is_valid_english is None
+    js = jobs(seeded, "lookup_word")
+    assert len(js) == 2 and js[1]["id"] == again.job_id and js[1]["status"] == "queued" and js[1]["dedupe_key"] == f"lookup:{first.word_id}"
+    assert resolve_text(seeded, "abandonned", user).job_id is None  # live again
+    assert resolve_text(seeded, "abandon", user).job_id is None  # a validated word never gets one
+    assert len(jobs(seeded, "lookup_word")) == 2
 
 
 def test_exact_hit_on_a_rejected_word_reports_is_valid_english_zero(seeded, user):

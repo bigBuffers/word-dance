@@ -19,22 +19,27 @@ import hashlib
 import logging
 import os
 import socket
+import sqlite3
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from starlette.datastructures import MutableHeaders
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import __version__, db
+from . import __version__, db, security
 from .clock import Clock, SystemClock
 from .config import Settings, ensure_dirs
 from .delivery.mailer import mailer_from_settings
-from .deps import csrf_violation
+from .deps import SESSION_COOKIE, csrf_violation
 from .errors import ApiError, error_response, install_handlers
 from .jobs import lease, queue, registry
 from .jobs.registry import JobContext
@@ -104,10 +109,31 @@ THREAD_CLASSES: tuple[tuple[type, str], ...] = (
     (Scheduler, "scheduler"),
 )
 THREAD_JOIN_SECONDS = 250.0  # < systemd TimeoutStopSec=300 (an in-flight claude call may take up to 240 s)
+LEASE_RETRY_SECONDS = float(lease.RENEW_SECONDS)  # how often a lease-less instance retries lease.acquire
 
 
-class BodyTooLarge(Exception):
-    pass
+class BodyTooLarge(StarletteHTTPException):
+    """Raised by the body-limit ``receive`` wrapper once a chunked body (no ``Content-Length``) exceeds ``WD_MAX_BODY_BYTES``.
+
+    An ``HTTPException`` on purpose: FastAPI's body parser re-raises those untouched and wraps any other exception into a
+    400 「请求参数无效」, so a plain ``Exception`` here never reached the 413 handler below; ``errors._http`` passes the
+    envelope in ``detail`` through at 413 ``payload_too_large`` exactly like the ``Content-Length`` pre-check.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(status_code=413, detail=ApiError("payload_too_large", details={"max_bytes": int(max_bytes)}).to_body())
+
+
+def session_cookie_header(scope: Scope, token: str, cfg: Settings) -> str:
+    """The exact ``Set-Cookie`` value login/register send (``security.set_session_cookie``), for the sliding re-issue."""
+    tmp = Response()
+    security.set_session_cookie(tmp, token, cfg, secure=security.cookie_secure(Request(scope), cfg))
+    return tmp.headers["set-cookie"]
+
+
+def _sets_session_cookie(message: Message) -> bool:
+    prefix = f"{SESSION_COOKIE}=".encode("latin-1")
+    return any(k.lower() == b"set-cookie" and v.lstrip().lower().startswith(prefix) for k, v in message.get("headers", []))
 
 
 class WdMiddleware:
@@ -145,6 +171,9 @@ class WdMiddleware:
                     h.setdefault("Strict-Transport-Security", HSTS_VALUE)
                 if is_api:
                     h["Cache-Control"] = "no-store"
+                token = state.get("reissue_session_token")  # deps.current_user slid the expiry: re-send the cookie
+                if token and not _sets_session_cookie(message):  # unless the route itself set/cleared it (logout, delete)
+                    h.append("Set-Cookie", session_cookie_header(scope, str(token), cfg))
             await send(message)
 
         async def respond(response) -> None:
@@ -169,12 +198,12 @@ class WdMiddleware:
                 if message["type"] == "http.request":
                     received += len(message.get("body", b""))
                     if received > cfg.max_body_bytes:
-                        raise BodyTooLarge()
+                        raise BodyTooLarge(cfg.max_body_bytes)
                 return message
 
             try:
                 await self.app(scope, receive_wrapper, send_wrapper)
-            except BodyTooLarge:
+            except BodyTooLarge:  # a consumer outside FastAPI's exception middleware read the body
                 if status_seen["status"] is None:
                     await respond(error_response("payload_too_large", details={"max_bytes": cfg.max_body_bytes}))
                 else:
@@ -274,16 +303,65 @@ def seed_check(conn, cfg: Settings) -> None:
         db.kv_set(conn, "seed_version", digest)
 
 
-def start_background(app: FastAPI, conn) -> None:
-    """Take the worker lease and start the lease keeper + worker/scheduler threads (those that exist)."""
+class LeaseWaiter(threading.Thread):
+    """Retries :func:`lease.acquire` every ``interval_s`` while another instance holds ``kv.worker_lease``.
+
+    A crashed ``wd serve`` (SIGKILL, OOM, power loss) cannot release its lease, which then outlives it by up to
+    ``lease.TTL_SECONDS`` (90 s) while systemd restarts the unit after 5 s — so the successor *always* meets a live lease.
+    Instead of giving up for good it waits here, serving requests meanwhile, and on success runs ``on_acquired`` once
+    (the stale-job sweep + worker/scheduler start) and exits. A genuinely live second instance just keeps waiting.
+    """
+
+    def __init__(
+        self,
+        connect: Callable[[], sqlite3.Connection],
+        instance: str,
+        now_utc: Callable[[], Any],
+        on_acquired: Callable[[], None],
+        interval_s: float | None = None,
+    ):
+        super().__init__(name="lease-waiter", daemon=True)
+        self._connect = connect
+        self._instance = instance
+        self._now = now_utc
+        self._on_acquired = on_acquired
+        self._interval = LEASE_RETRY_SECONDS if interval_s is None else interval_s
+        self._stop_event = threading.Event()  # not `_stop`: threading.Thread uses that name internally
+        self.acquired = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            if self.try_acquire():
+                return
+
+    def try_acquire(self) -> bool:
+        """One attempt (the loop body; tests call it directly after advancing the clock)."""
+        if self.acquired.is_set():
+            return True
+        try:
+            conn = self._connect()
+            try:
+                ok = lease.acquire(conn, self._instance, self._now())
+            finally:
+                conn.close()
+        except sqlite3.Error as e:  # transient; try again next round
+            log.warning("lease acquisition failed: %s", e)
+            return False
+        if not ok:
+            return False
+        self.acquired.set()
+        self._on_acquired()
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def _start_workers(app: FastAPI, conn, instance: str) -> None:
+    """The post-acquire half of :func:`start_background`: stale-job sweep, lease keeper, worker/scheduler threads."""
     cfg: Settings = app.state.settings
     clock: Clock = app.state.clock
     boot_id: str = app.state.boot_id
-    instance = f"{socket.gethostname()}:{os.getpid()}:{boot_id[:8]}"
-    if not lease.acquire(conn, instance, clock.now_utc()):
-        holder = lease.read(conn)
-        log.warning("another word-Dance instance holds the worker lease (%s); this process serves requests only", holder, extra={"event": "lease_busy"})
-        return
     app.state.lease_instance = instance
     swept = queue.requeue_stale(conn, boot_id, now=clock.now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"))
     if swept:
@@ -292,7 +370,7 @@ def start_background(app: FastAPI, conn) -> None:
     def connect():
         return db.connect(cfg.db_path)
 
-    threads: list[Any] = []
+    threads: list[Any] = list(getattr(app.state, "threads", []) or [])
     keeper = lease.LeaseKeeper(connect, instance, clock.now_utc)
     keeper.start()
     threads.append(keeper)
@@ -308,7 +386,50 @@ def start_background(app: FastAPI, conn) -> None:
     app.state.threads = threads
 
 
+def start_background(app: FastAPI, conn) -> None:
+    """Take the worker lease and start the lease keeper + worker/scheduler threads (those that exist).
+
+    When another instance holds the lease this process serves requests only — but keeps retrying through a
+    :class:`LeaseWaiter` (``app.state.lease_waiter``), so an auto-restarted service takes over within
+    ``lease.TTL_SECONDS + LEASE_RETRY_SECONDS`` of its predecessor's crash instead of never pushing again.
+    """
+    cfg: Settings = app.state.settings
+    clock: Clock = app.state.clock
+    boot_id: str = app.state.boot_id
+    instance = f"{socket.gethostname()}:{os.getpid()}:{boot_id[:8]}"
+    if lease.acquire(conn, instance, clock.now_utc()):
+        _start_workers(app, conn, instance)
+        return
+    holder = lease.read(conn)
+    log.warning(
+        "another word-Dance instance holds the worker lease (%s); this process serves requests only and retries every %d s",
+        holder,
+        int(LEASE_RETRY_SECONDS),
+        extra={"event": "lease_busy"},
+    )
+
+    def connect():
+        return db.connect(cfg.db_path)
+
+    def on_acquired() -> None:
+        c = connect()
+        try:
+            _start_workers(app, c, instance)
+        finally:
+            c.close()
+        log.info("took over the worker lease (previous holder %s)", holder, extra={"event": "lease_acquired"})
+
+    waiter = LeaseWaiter(connect, instance, clock.now_utc, on_acquired)
+    waiter.start()
+    app.state.lease_waiter = waiter
+
+
 def stop_background(app: FastAPI) -> None:
+    waiter = getattr(app.state, "lease_waiter", None)
+    if waiter is not None:  # first, so a takeover in flight finishes before the thread list is read
+        waiter.stop()
+        waiter.join(timeout=THREAD_JOIN_SECONDS)
+        app.state.lease_waiter = None
     threads: list[Any] = list(getattr(app.state, "threads", []) or [])
     for t in threads:
         stop = getattr(t, "stop", None)
@@ -403,7 +524,12 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None, 
     app.state.boot_id = uuid.uuid4().hex
     app.state.threads = []
     app.state.lease_instance = None
+    app.state.lease_waiter = None
     app.state.mailer = mailer_from_settings(cfg)
+    if cfg.smoke_mock_http:  # WD_SMOKE_MOCK_HTTP=1 (dev only): fixture-backed httpx transport, nothing leaves the box
+        from . import smoke_mock
+
+        smoke_mock.install_if_enabled(cfg)
     install_handlers(app)
     for module in ROUTERS:
         app.include_router(module.router)

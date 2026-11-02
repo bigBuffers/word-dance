@@ -223,10 +223,63 @@ def test_screen_page_unfamiliar_appends_to_today_when_a_batch_exists(client: Tes
     assert r["study_item"]["mine"]["state"] == "new" and r["study_item"]["result"] is None and r["study_item"]["image"]["kind"] == "card"
     assert calls == [(alice, w2, "new")]
     assert q1(settings, "SELECT COUNT(*) FROM push_items WHERE batch_id = ? AND word_id = ? AND kind = 'new'", (batch, w2)) == 1
-    # quota exhausted → no study row
+    # quota exhausted → no study row; `today` still carries today's counts so the page can say 「明天开始学」
     run(settings, "UPDATE user_settings SET daily_new_count = 1 WHERE user_id = ?", (alice,))
     r = verdict(client, word_id(settings, "ought to"), "unfamiliar")
     assert r["added_to_today"] is False and r["study_item"] is None and len(calls) == 1
+    assert r["today"]["new"] == 1 and r["today"]["total"] == 1
+
+
+def test_screen_page_verdict_carries_todays_counts_when_a_batch_exists(client: TestClient, settings, alice):
+    """ScreenResponse.today (API.md 32): null without a batch today (test_verdicts_on_the_screen_page), otherwise the
+    TodayCounts of today's batch — the 筛词 page picks 「已加入生词库，明天开始学」 from it when the word did not fit."""
+    run(settings, "UPDATE user_settings SET daily_new_count = 1 WHERE user_id = ?", (alice,))
+    run(settings, "INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'published', 'manual')", (alice,))
+    r1 = verdict(client, word_id(settings, "absorption"), "unfamiliar")  # the real batches.append_to_today
+    assert r1["added_to_today"] is True and r1["study_item"]["kind"] == "new" and r1["today"]["new"] == 1 and r1["today"]["total"] == 1
+    r2 = verdict(client, word_id(settings, "axe"), "unfamiliar")  # quota full → tomorrow
+    assert r2["added_to_today"] is False and r2["study_item"] is None and r2["today"]["new"] == 1 and r2["mine"]["state"] == "new"
+    r3 = verdict(client, word_id(settings, "ought to"), "known")
+    assert r3["mine"]["state"] == "known" and r3["today"]["new"] == 1
+    assert q1(settings, "SELECT COUNT(*) FROM push_items") == 1
+    # the stored duplicate replay carries the same counts
+    event = str(uuid.uuid4())
+    first = client.post("/api/screen/verdict", json={"client_event_id": event, "word_id": word_id(settings, "abandon"), "verdict": "unfamiliar"}).json()
+    again = client.post("/api/screen/verdict", json={"client_event_id": event, "word_id": word_id(settings, "abandon"), "verdict": "unfamiliar"}).json()
+    assert again["duplicate"] is True and again["today"] == first["today"] and first["today"]["new"] == 1
+
+
+def test_in_batch_verdict_on_yesterdays_batch_checks_todays_quota(client: TestClient, settings, alice):
+    """继续昨天的学习: a 推荐词 graded unfamiliar in yesterday's still-open batch is appended to TODAY's batch only while
+    today's new-word quota has room (the append always lands in today's batch) — never past daily_new_count."""
+    from wd.services import screen
+
+    run(settings, "UPDATE user_settings SET daily_new_count = 3 WHERE user_id = ?", (alice,))
+    w_yday, w_more = word_id(settings, "absorption"), word_id(settings, "ought to")
+    yday = run(settings, "INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-13', 'Asia/Shanghai', 'published', 'manual')", (alice,))
+    item = run(settings, "INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, 'screen', 0)", (yday, w_yday))
+    item_more = run(settings, "INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, 'screen', 1)", (yday, w_more))
+    today = run(settings, "INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'published', 'manual')", (alice,))
+    for pos, lemma in enumerate(("abandon", "axe", "base")):  # today's batch already holds 3/3 new words
+        wid = word_id(settings, lemma)
+        client.post(f"/api/words/{wid}/mark", json={"action": "unfamiliar", "context": "bank"})
+        uw = q1(settings, "SELECT id FROM user_words WHERE user_id = ? AND word_id = ?", (alice, wid))
+        run(settings, "INSERT INTO push_items(batch_id, word_id, user_word_id, kind, position) VALUES (?, ?, ?, 'new', ?)", (today, wid, uw, pos))
+    conn = db.connect(settings.db_path)
+    try:
+        r = screen.apply_verdict(conn, alice, w_yday, "unfamiliar", client_event_id=str(uuid.uuid4()), context="today", push_item_id=item, now="2026-10-14T12:00:00Z", tz=TZ)
+        assert r["mine"]["state"] == "new" and r["added_to_today"] is False and r["study_item"] is None
+        assert r["today"]["new"] == 3  # today's counts: the batch the word did not fit into
+        assert conn.execute("SELECT COUNT(*) FROM push_items WHERE batch_id = ? AND kind = 'new'", (today,)).fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM push_items WHERE batch_id = ?", (yday,)).fetchone()[0] == 2  # nothing appended to yesterday either
+        assert conn.execute("SELECT result FROM push_items WHERE id = ?", (item,)).fetchone()[0] == "unfamiliar"
+        # mirror: room in today's batch → the study row joins TODAY's batch, not yesterday's
+        conn.execute("UPDATE user_settings SET daily_new_count = 5 WHERE user_id = ?", (alice,))
+        r2 = screen.apply_verdict(conn, alice, w_more, "unfamiliar", client_event_id=str(uuid.uuid4()), context="today", push_item_id=item_more, now="2026-10-14T12:00:05Z", tz=TZ)
+        assert r2["added_to_today"] is True and r2["study_item"]["kind"] == "new" and r2["today"]["new"] == 4
+        assert conn.execute("SELECT batch_id FROM push_items WHERE id = ?", (r2["study_item"]["item_id"],)).fetchone()[0] == today
+    finally:
+        conn.close()
 
 
 def test_in_batch_verdicts_via_the_service(client: TestClient, settings, alice, monkeypatch):

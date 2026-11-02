@@ -510,6 +510,57 @@ def test_study_today_without_a_batch_today_is_false(seeded, user):
     results = bank.add_custom_words(seeded, user, "abandon", None, True, NOW, TZ)
     assert results[0].status == "added" and results[0].added_to_today is False
     assert seeded.execute("SELECT COUNT(*) FROM push_items").fetchone()[0] == 0
+    assert bank.quota_used(seeded, bank.study_today_key(user), "2026-10-14T08:00:00Z") == 0  # a failed append never counts
+
+
+def _single_words(conn, limit: int, offset: int = 0) -> list[str]:
+    rows = conn.execute(
+        "SELECT lemma FROM words WHERE is_public = 1 AND is_valid_english = 1 AND kind = 'word' AND lemma NOT LIKE '% %' ORDER BY lemma LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def test_study_today_is_capped_at_20_appends_per_day(seeded, user, monkeypatch):
+    """DESIGN §5.3: `study_today` extras are capped at 20/day per user — the words are still added, only the append stops
+    (再来一组 has its own 20-per-round clamp; a 50-token paste must not grow the day's batch unboundedly)."""
+    from wd.services import batches
+
+    calls: list[int] = []
+
+    def append_to_today(conn, user_id, word_id, kind, now):
+        calls.append(word_id)
+        return 1000 + len(calls)
+
+    monkeypatch.setattr(batches, "append_to_today", append_to_today)
+    lemmas = _single_words(seeded, 25)
+    assert len(lemmas) == 25
+    results = bank.add_custom_words(seeded, user, ", ".join(lemmas), None, True, NOW, TZ)
+    assert [r.status for r in results] == ["added"] * 25
+    assert [r.added_to_today for r in results] == [True] * 20 + [False] * 5 and len(calls) == 20
+    assert bank.quota_used(seeded, bank.study_today_key(user), "2026-10-14T08:00:00Z") == 20
+    # the same day: nothing more is appended (both endpoints 34 and 35 go through add_resolved)
+    results = bank.add_custom_words(seeded, user, ", ".join(_single_words(seeded, 3, 25)), None, True, NOW, TZ)
+    assert [r.added_to_today for r in results] == [False] * 3 and len(calls) == 20
+    (by_id,) = [bank.add_resolved(seeded, user, wid(seeded, lemma), input_text=lemma, note=None, study_today=True, now="2026-10-14T09:00:00Z", tz=TZ) for lemma in _single_words(seeded, 1, 28)]
+    assert by_id.status == "added" and by_id.added_to_today is False and len(calls) == 20
+    # a new day resets the cap
+    results = bank.add_custom_words(seeded, user, ", ".join(_single_words(seeded, 2, 29)), None, True, "2026-10-15T08:00:00Z", TZ)
+    assert [r.added_to_today for r in results] == [True, True] and len(calls) == 22
+    assert bank.quota_used(seeded, bank.study_today_key(user), "2026-10-15T08:00:00Z") == 2
+
+
+def test_exact_hit_on_another_users_provisional_word_is_pending_ai_via_exact(seeded, user):
+    """resolved_via mirrors the resolution ('provisional' only when resolve() created the row); a second holder re-enqueues
+    the lookup when the first holder's job died, so the shared word does not stay 待校验 for ever."""
+    bob = make_user(seeded, "bob")
+    (first,) = bank.add_custom_words(seeded, user, "zorblat", None, False, NOW, TZ)
+    assert (first.status, first.resolved_via, first.created) == ("pending_ai", "provisional", True)
+    seeded.execute("UPDATE jobs SET status = 'dead' WHERE type = 'lookup_word'")  # the first holder's lookup died
+    (second,) = bank.add_custom_words(seeded, bob, "zorblat", None, False, NOW, TZ)
+    assert (second.status, second.resolved_via, second.created) == ("pending_ai", "exact", True)  # the word existed; bob's row is new
+    assert second.mine is not None and second.mine["needs_attention"] is False
+    assert seeded.execute("SELECT COUNT(*) FROM jobs WHERE type = 'lookup_word' AND status = 'queued'").fetchone()[0] == 1
 
 
 # -------------------------------------------------------------------------------------------- import

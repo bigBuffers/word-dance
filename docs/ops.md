@@ -134,7 +134,7 @@ e-mail verification codes.
 | Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move `WD_DATA_DIR` (stop → `mv` → edit `.env` + unit `EnvironmentFile` path → `install.sh`) |
 | Service down for days | first tick builds **today's** batches only; `downtime` event; history shows 「服务器离线」 | nothing — missed days are not back-filled by design |
 | A job is `dead` | 管理 → 任务 (or `GET /api/admin/jobs?status=dead`) with `last_error` | fix the cause (auth, budget, provider), then 重试 / `POST /api/admin/jobs/requeue-dead`; nightly maintenance requeues dead content/lookup jobs once |
-| Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must |
+| Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must. A `lease_busy` right after a crash restart is normal: the service retries every 30 s and logs `lease_acquired` once the dead instance's 90-s lease expires |
 | Restore needed | — | §3 |
 | Flag tier fell back to 0 | `claude_probe_fallback` event | inspect the stderr excerpt in the event; upgrade the CLI or stay on tier 0 (fully functional) |
 | Reverse proxy / HTTPS wanted later | — | `deploy/install.sh --with-caddy words.example.com` (sets `WD_HOST=127.0.0.1`, `WD_PUBLIC_URL`, `WD_TRUST_PROXY=1`) |
@@ -194,8 +194,9 @@ the P0 "migrate twice" and WP1 full-seed acceptance green). Left open deliberate
   are optional, keyed and off by default).
 * `wd images-prune` has no worker-lease refusal: safe next to the live service, but it could race a fetch for a word
   that becomes studied in the same second.
-* Every pytest run prints one `StarletteDeprecationWarning` from `fastapi/testclient.py` (httpx with
-  `starlette.testclient` is deprecated) — harmless until the pins move.
+* starlette 1.8 / fastapi 0.143 emit a `StarletteDeprecationWarning` (httpx with `starlette.testclient` is deprecated)
+  while `conftest.py` imports `TestClient`; `backend/pyproject.toml` filters that message, so `pytest` ends without a
+  warnings summary. Drop the filter once the pins move (or `httpx2` is added).
 
 **Behaviour notes (by design, recorded so nobody hunts for a bug)**
 

@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import io
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -120,6 +118,16 @@ def test_env(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> dict[str, str]:
     return env
 
 
+@pytest.fixture(autouse=True)
+def _no_smoke_mock_leak() -> Iterator[None]:
+    """``create_app`` installs the process-wide ``wd.smoke_mock`` for a ``dev=True`` settings copy (the test env carries
+    ``WD_SMOKE_MOCK_HTTP=1`` like the smoke run); never let that outlive the test that built such an app."""
+    yield
+    from wd.smoke_mock import uninstall
+
+    uninstall()
+
+
 @pytest.fixture
 def settings(test_env: dict[str, str]):
     from wd.config import Settings, ensure_dirs
@@ -214,60 +222,19 @@ def fake_claude_env(test_env: dict[str, str]) -> Callable[[str], dict[str, str]]
 
 
 # --------------------------------------------------------------------------------- mock http
-_JPEG_CACHE: dict[str, bytes] = {}
-
-
 def sample_jpeg() -> bytes:
-    """A 640×400 JPEG generated with Pillow (cached per process)."""
-    if "jpeg" not in _JPEG_CACHE:
-        from PIL import Image, ImageDraw
+    """A 640×400 JPEG generated with Pillow (cached per process) — the smoke mock's, so fixture and smoke run agree."""
+    from wd.smoke_mock import sample_jpeg as _sample_jpeg
 
-        img = Image.new("RGB", (640, 400), (200, 60, 40))
-        draw = ImageDraw.Draw(img)
-        draw.ellipse((160, 60, 480, 340), fill=(240, 240, 220))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        _JPEG_CACHE["jpeg"] = buf.getvalue()
-    return _JPEG_CACHE["jpeg"]
-
-
-class MockHttp:
-    """Routes provider traffic to fixtures; records every request in ``calls``."""
-
-    IMAGE_HOSTS = ("thumb.wikimedia.org", "upload.wikimedia.org", "live.staticflickr.com")
-
-    def __init__(self) -> None:
-        self.calls: list[httpx.Request] = []
-        self.openverse = json.loads((FIXTURES_DIR / "openverse_search.json").read_text(encoding="utf-8"))
-        self.wikimedia = json.loads((FIXTURES_DIR / "wikimedia_search.json").read_text(encoding="utf-8"))
-        self.overrides: dict[str, Callable[[httpx.Request], httpx.Response]] = {}
-        self.transport = httpx.MockTransport(self.handle)
-
-    def host_of(self, request: httpx.Request) -> str:
-        host = request.headers.get("host") or request.url.host
-        return host.split(":")[0].lower()
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        self.calls.append(request)
-        host = self.host_of(request)
-        path = request.url.path  # query strings (?utm_source=…) are ignored on purpose
-        if host in self.overrides:
-            return self.overrides[host](request)
-        if host == "api.openverse.org" and path.startswith("/v1/images"):
-            return httpx.Response(200, json=self.openverse, headers={"x-ratelimit-limit-anon_burst": "20/min", "x-ratelimit-limit-anon_sustained": "200/day"})
-        if host == "commons.wikimedia.org" and path == "/w/api.php":
-            return httpx.Response(200, json=self.wikimedia)
-        if host in self.IMAGE_HOSTS:
-            return httpx.Response(200, content=sample_jpeg(), headers={"Content-Type": "image/jpeg"})
-        return httpx.Response(404, text=f"mock_http: no route for {host}{path}")
-
-    def calls_to(self, host: str) -> list[httpx.Request]:
-        return [r for r in self.calls if self.host_of(r) == host]
+    return _sample_jpeg()
 
 
 @pytest.fixture
-def mock_http(monkeypatch: pytest.MonkeyPatch) -> MockHttp:
-    mock = MockHttp()
+def mock_http(monkeypatch: pytest.MonkeyPatch):
+    """``wd.smoke_mock.MockHttp`` (the class ``WD_SMOKE_MOCK_HTTP=1`` installs process-wide) scoped to one test."""
+    from wd.smoke_mock import MockHttp
+
+    mock = MockHttp(FIXTURES_DIR)
     original_init = httpx.Client.__init__
 
     def patched_init(self, *args, **kwargs):
