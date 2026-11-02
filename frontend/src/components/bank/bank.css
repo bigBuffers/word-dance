@@ -182,7 +182,8 @@
 }
 
 .status-badge--added,
-.status-badge--readded {
+.status-badge--readded,
+.status-badge--validated {
   background: var(--good-soft);
   color: var(--good-ink);
 }

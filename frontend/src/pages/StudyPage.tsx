@@ -7,7 +7,9 @@
 // localStorage['wd.pendingGrades'], flushed on reload before refetching) and retry with backoff. A
 // final grade (`result !== null`) moves the item to `graded`; an intermediate one (`result:null` +
 // `requeue_at`) parks it for the 10-minute step and the same item is graded again later with a new
-// event. The only undo is the server `restore` (mastered's 8-s toast, screen card verdicts' 5-s toast).
+// event. The only undo is the server `restore` (mastered's 8-s toast, screen card verdicts' 5-s toast) —
+// except for a grade the server never acknowledged (still in `pending` after a transient failure), which
+// undo cancels locally instead, so a retried delivery cannot master a word the user undid.
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
@@ -27,10 +29,12 @@ import { useKeyboard } from '@/hooks/useKeyboard';
 import { readPref, removePref, useLocalPref, writePref } from '@/hooks/useLocalPref';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { speak } from '@/hooks/useSpeech';
+import { useTapLock } from '@/hooks/useTapLock';
 import { UNDO_LIST_MS, UNDO_MASTER_MS, useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
 import {
+  backoffMs,
   initialQueue,
   isComplete,
   isWaiting,
@@ -77,7 +81,11 @@ function isTransient(e: unknown): boolean {
   return e.status === 0 || e.status === 429 || e.status >= 500;
 }
 
-/** Sends the events left over from a previous page load (before the batch is fetched). */
+/**
+ * Sends the events left over from a previous page load (before the batch is fetched). A transient failure
+ * counts as a failed attempt (attempts + backoff, like the reducer's `fail`), so the leftover seeded into the
+ * queue is picked up by `selectDuePending` and retried in-session instead of staying parked until a reload.
+ */
 async function flushStoredPending(): Promise<GradeEvent[]> {
   const stored = readPref<StoredPending | null>(PENDING_GRADES_KEY, null);
   if (!stored || !Array.isArray(stored.events) || stored.events.length === 0) return [];
@@ -86,7 +94,10 @@ async function flushStoredPending(): Promise<GradeEvent[]> {
     try {
       await gradeItem(ev.item_id, gradeBody(ev));
     } catch (e) {
-      if (isTransient(e)) leftovers.push(ev);
+      if (isTransient(e)) {
+        const attempts = (ev.attempts ?? 0) + 1;
+        leftovers.push({ ...ev, attempts, next_attempt_at: new Date(Date.now() + backoffMs(attempts)).toISOString() });
+      }
     }
   }
   if (leftovers.length > 0) writePref(PENDING_GRADES_KEY, { batchId: stored.batchId, events: leftovers });
@@ -127,11 +138,14 @@ export default function StudyPage() {
   const [replayIndex, setReplayIndex] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const leftoverRef = useRef<GradeEvent[]>([]);
-  const inflight = useRef(new Set<string>());
+  /** In-flight delivery per `client_event_id` (first attempt or a retry). */
+  const deliveries = useRef(new Map<string, Promise<GradeResponse | null>>());
+  /** How the last attempt of an event ended — read by undo right after awaiting its in-flight delivery. */
+  const outcomes = useRef(new Map<string, 'acked' | 'pending' | 'dropped'>());
   const shownAt = useRef(Date.now());
   const unfamiliarRef = useRef<Map<number, WordBrief>>(new Map());
   const lastUndo = useRef<(() => Promise<void>) | null>(null);
-  const masterPromises = useRef<Map<number, Promise<GradeResponse | null>>>(new Map());
+  const tapLock = useTapLock();
 
   const { data, error, loading, reload, setData } = useApi<TodayResponse>(
     async (signal) => {
@@ -171,6 +185,7 @@ export default function StudyPage() {
   useEffect(() => {
     if (queue.pending.length === 0) removePref(PENDING_GRADES_KEY);
     else writePref<StoredPending>(PENDING_GRADES_KEY, { batchId: queue.batchId, events: queue.pending });
+    for (const id of outcomes.current.keys()) if (!queue.pending.some((p) => p.client_event_id === id)) outcomes.current.delete(id);
   }, [queue.pending, queue.batchId]);
 
   const currentId = selectCurrent(queue);
@@ -254,34 +269,44 @@ export default function StudyPage() {
   );
 
   const deliver = useCallback(
-    async (ev: GradeEvent): Promise<GradeResponse | null> => {
-      if (inflight.current.has(ev.client_event_id)) return null;
-      inflight.current.add(ev.client_event_id);
-      try {
-        const res = await gradeItem(ev.item_id, gradeBody(ev));
-        applyResponse(ev, res);
-        return res;
-      } catch (e) {
-        if (isApiError(e) && e.code === 'item_already_graded') {
-          dispatch({ type: 'drop', clientEventId: ev.client_event_id });
-          void reload();
+    (ev: GradeEvent): Promise<GradeResponse | null> => {
+      const running = deliveries.current.get(ev.client_event_id);
+      if (running) return running;
+      const id = ev.client_event_id;
+      const attempt = (async (): Promise<GradeResponse | null> => {
+        try {
+          const res = await gradeItem(ev.item_id, gradeBody(ev));
+          outcomes.current.set(id, 'acked');
+          applyResponse(ev, res);
+          return res;
+        } catch (e) {
+          if (isApiError(e) && e.code === 'item_already_graded') {
+            outcomes.current.set(id, 'acked');
+            dispatch({ type: 'drop', clientEventId: id });
+            void reload();
+            return null;
+          }
+          if (isApiError(e) && e.code === 'invalid_transition') {
+            outcomes.current.set(id, 'dropped');
+            dispatch({ type: 'drop', clientEventId: id });
+            dispatch({ type: 'remove', itemId: ev.item_id });
+            return null;
+          }
+          if (isTransient(e)) {
+            outcomes.current.set(id, 'pending');
+            dispatch({ type: 'fail', clientEventId: id, now: new Date().toISOString() });
+            return null;
+          }
+          outcomes.current.set(id, 'dropped');
+          dispatch({ type: 'drop', clientEventId: id });
+          toast.error(errorMessage(e));
           return null;
+        } finally {
+          deliveries.current.delete(id);
         }
-        if (isApiError(e) && e.code === 'invalid_transition') {
-          dispatch({ type: 'drop', clientEventId: ev.client_event_id });
-          dispatch({ type: 'remove', itemId: ev.item_id });
-          return null;
-        }
-        if (isTransient(e)) {
-          dispatch({ type: 'fail', clientEventId: ev.client_event_id, now: new Date().toISOString() });
-          return null;
-        }
-        dispatch({ type: 'drop', clientEventId: ev.client_event_id });
-        toast.error(errorMessage(e));
-        return null;
-      } finally {
-        inflight.current.delete(ev.client_event_id);
-      }
+      })();
+      deliveries.current.set(id, attempt);
+      return attempt;
     },
     [applyResponse, reload, toast],
   );
@@ -308,17 +333,32 @@ export default function StudyPage() {
         next_attempt_at: nowIso,
       };
       dispatch({ type: 'submit', event: ev, now: nowIso });
+      tapLock.arm();
       return deliver(ev).finally(() => submittingItems.current.delete(item.item_id));
     },
-    [deliver],
+    [deliver, tapLock],
   );
 
   // ---- user actions ----------------------------------------------------------------------------------
   const restoreItem = useCallback(
     async (item: StudyItem, extraItemId: number | null, successMessage: string) => {
       try {
-        await masterPromises.current.get(item.item_id)?.catch(() => null);
-        await markWord(item.word.id, { action: 'restore', context: 'today' });
+        // a grade of this card that the server has not acknowledged yet (first attempt in flight, or parked
+        // in `pending` after a transient failure): wait for the attempt under way, then decide
+        const unacked = queueRef.current.pending.find((p) => p.item_id === item.item_id);
+        if (unacked) {
+          await deliveries.current.get(unacked.client_event_id);
+          if ((outcomes.current.get(unacked.client_event_id) ?? 'pending') === 'pending') {
+            // never reached the server: nothing to restore there — cancel the event and re-open the card
+            dispatch({ type: 'drop', clientEventId: unacked.client_event_id });
+            dispatch({ type: 'restore', itemId: item.item_id });
+            patchItem(item.item_id, { result: null, requeue_at: null });
+            toast.success(successMessage);
+            return;
+          }
+        }
+        // the server puts the prior SRS snapshot back: keep its `mine` so the re-opened card previews from it
+        const r = await markWord(item.word.id, { action: 'restore', context: 'today' });
         dispatch({ type: 'restore', itemId: item.item_id });
         if (extraItemId !== null) {
           dispatch({ type: 'remove', itemId: extraItemId });
@@ -328,7 +368,7 @@ export default function StudyPage() {
             return next;
           });
         }
-        patchItem(item.item_id, { result: null, requeue_at: null });
+        patchItem(item.item_id, { mine: r.mine, result: null, requeue_at: null });
         toast.success(successMessage);
       } catch (e) {
         toast.error(errorMessage(e));
@@ -346,7 +386,7 @@ export default function StudyPage() {
         void promise.then((res) => {
           if (!res || res.duplicate) return;
           let extraId: number | null = null;
-          let message = `${item.word.display} · ${zh.study.known}`;
+          let message = zh.screen.markedKnown(item.word.display);
           if (verdict === 'unfamiliar') {
             unfamiliarRef.current.set(item.word.id, item.word);
             extraId = res.study_item?.item_id ?? null;
@@ -378,8 +418,7 @@ export default function StudyPage() {
 
   const master = useCallback(
     (item: StudyItem) => {
-      const promise = submit(item, 'master');
-      masterPromises.current.set(item.item_id, promise);
+      void submit(item, 'master');
       toast.toast(zh.study.mastered, {
         durationMs: UNDO_MASTER_MS,
         action: { label: zh.common.undo, onClick: () => restoreItem(item, null, zh.study.restored) },
@@ -402,6 +441,22 @@ export default function StudyPage() {
     },
     [submit],
   );
+
+  // Button taps on the card: a double tap lands on the card that advanced under the finger (screen cards show
+  // their verdict buttons at once, the header skip button is on every front), so taps right after a grade are dropped.
+  // The keyboard map below calls onGrade / onSkip / onMaster directly and is never locked.
+  const tapGrade = (item: StudyItem, grade: Grade | ScreenVerdict) => {
+    if (tapLock.locked()) return;
+    onGrade(item, grade);
+  };
+  const tapMaster = (item: StudyItem) => {
+    if (tapLock.locked()) return;
+    onMaster(item);
+  };
+  const tapSkip = (item: StudyItem) => {
+    if (tapLock.locked()) return;
+    onSkip(item);
+  };
 
   const requestContent = useCallback(
     async (item: StudyItem) => {
@@ -561,9 +616,7 @@ export default function StudyPage() {
           <Link to={routePaths.batch(batch.id)} className="study-page__exit">
             {zh.common.back}
           </Link>
-          <span className="study-page__progress muted">
-            {list.length > 0 ? `${Math.min(replayIndex + 1, list.length)}/${list.length}` : '0/0'}
-          </span>
+          <span className="study-page__progress muted">{zh.study.position(list.length > 0 ? Math.min(replayIndex + 1, list.length) : 0, list.length)}</span>
           <Link to={routePaths.today} className="study-page__exit">
             {zh.common.backToToday}
           </Link>
@@ -618,9 +671,7 @@ export default function StudyPage() {
         <div className="study-page__meter" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done} aria-label={zh.study.title}>
           <span className="study-page__meter-fill" style={{ width: total > 0 ? `${(done / total) * 100}%` : '0%' }} />
         </div>
-        <span className="study-page__progress muted">
-          {done}/{total}
-        </span>
+        <span className="study-page__progress muted">{zh.history.completed(done, total)}</span>
       </header>
 
       {showSyncBanner && (
@@ -637,9 +688,9 @@ export default function StudyPage() {
           item={current}
           revealed={queue.revealed}
           onReveal={() => dispatch({ type: 'reveal' })}
-          onGrade={(g) => onGrade(current, g)}
-          onMaster={() => onMaster(current)}
-          onSkip={() => onSkip(current)}
+          onGrade={(g) => tapGrade(current, g)}
+          onMaster={() => tapMaster(current)}
+          onSkip={() => tapSkip(current)}
           zhMode={settings?.zh_examples ?? 'tap'}
           showImage={settings?.show_images ?? true}
           preview={previewAll(snapshotOf(current.mine), { uwId: current.mine?.id ?? null, timeZone })}

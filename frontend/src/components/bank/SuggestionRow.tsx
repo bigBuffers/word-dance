@@ -65,7 +65,7 @@ export function SuggestionRow({ s, onAccept, onReject, onUndo, busy = false, now
         <div className="sugg__meta">
           {s.status === 'auto' && <span>{zh.suggestions.autoSection}</span>}
           {s.status === 'undone' && <span>{zh.suggestions.undone}</span>}
-          {showExpiry && <span>{zh.suggestions.expiresIn(days)}</span>}
+          {showExpiry && <span>{days === 0 ? zh.suggestions.expiresToday : zh.suggestions.expiresIn(days)}</span>}
           {typeof s.payload.confidence === 'number' && <span aria-hidden="true">{Math.round(s.payload.confidence * 100)}%</span>}
         </div>
       </div>

@@ -1,14 +1,15 @@
 // AddWordsPage — `/bank/add` (FRONTEND §5.6): textarea (paste many; `?prefill=` honoured), live preview per
 // line (client-side DESIGN §5.1 mirror first, then GET /api/lookup?q= debounced 300 ms, cached by lemma),
 // ambiguous candidate chips (→ POST /api/bank/add-word), note, study today, results with status badges; pending
-// rows poll through AttentionBadge until validated. Calls refreshCounters() after every add.
+// rows poll through AttentionBadge until validated, then show `bank.status.validated` (badge + header count follow). Lines the
+// client rejects carry the server's own reason strings (`zh.bank.invalidReason`). Calls refreshCounters() after every add.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { AddResult, LookupPreview, WordBrief, WordDetail } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
-import { AddStatusBadge, AddWordPreviewRow } from '@/components/bank/AddWordPreviewRow';
+import { AddStatusBadge, AddWordPreviewRow, type AddBadgeStatus } from '@/components/bank/AddWordPreviewRow';
 import { AttentionBadge, briefOf } from '@/components/bank/AttentionBadge';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
@@ -33,8 +34,16 @@ export function failedResult(input: string, error: string): AddResult {
   return { input, status: 'invalid', word: null, mine: null, resolved_via: null, lemma_note_zh: null, candidates: [], error, message: null, added_to_today: false };
 }
 
+/** A result row; `validated` is set once the AttentionBadge poll saw the AI check finish (FRONTEND §5.6). */
+export type ResultEntry = AddResult & { validated?: boolean };
+
+/** Badge status of a row: the server status, or `validated` after a pending-AI row resolved (exported for tests). */
+export function badgeStatus(r: ResultEntry): AddBadgeStatus {
+  return r.validated ? 'validated' : r.status;
+}
+
 interface ResultRowProps {
-  result: AddResult;
+  result: ResultEntry;
   studyToday: boolean;
   onPickCandidate: (word: WordBrief) => void;
   onEdit: (input: string) => void;
@@ -53,7 +62,7 @@ function ResultRow({ result, studyToday, onPickCandidate, onEdit, onReplace, onR
         <span className="result-row__input" lang="en">
           {word ? <Link to={routePaths.word(word.id)}>{word.display}</Link> : result.input}
         </span>
-        <AddStatusBadge status={result.status} />
+        <AddStatusBadge status={badgeStatus(result)} />
         {word && word.display.toLowerCase() !== result.input.trim().toLowerCase() && (
           <span className="result-row__detail" lang="en">
             ({result.input})
@@ -99,7 +108,7 @@ export default function AddWordsPage() {
   const [studyToday, setStudyToday] = useState(false);
   const [previews, setPreviews] = useState<Record<string, PreviewEntry>>({});
   const [chosen, setChosen] = useState<Record<string, WordBrief>>({});
-  const [results, setResults] = useState<AddResult[] | null>(null);
+  const [results, setResults] = useState<ResultEntry[] | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const aliveRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -146,8 +155,8 @@ export default function AddWordsPage() {
       return next;
     });
 
-  const replaceResult = (input: string, next: AddResult) => setResults((prev) => (prev ? prev.map((r) => (r.input === input ? next : r)) : prev));
-  const patchResult = (input: string, patch: Partial<AddResult>) => setResults((prev) => (prev ? prev.map((r) => (r.input === input ? { ...r, ...patch } : r)) : prev));
+  const replaceResult = (input: string, next: ResultEntry) => setResults((prev) => (prev ? prev.map((r) => (r.input === input ? next : r)) : prev));
+  const patchResult = (input: string, patch: Partial<ResultEntry>) => setResults((prev) => (prev ? prev.map((r) => (r.input === input ? { ...r, ...patch } : r)) : prev));
   const noteBody = () => (note.trim() ? { note: note.trim() } : {});
 
   const addChosen = async (input: string, word: WordBrief) => {
@@ -201,7 +210,7 @@ export default function AddWordsPage() {
     textareaRef.current?.focus();
   };
 
-  const resultActions = (result: AddResult) => ({
+  const resultActions = (result: ResultEntry) => ({
     onReplace: async () => {
       if (!result.word) return;
       try {
@@ -247,15 +256,17 @@ export default function AddWordsPage() {
       }
     },
     onUpdate: (detail: WordDetail) => {
-      patchResult(result.input, { word: briefOf(detail.word), mine: detail.mine });
+      // the poll resolved: a pending-AI row whose word now carries a verdict (valid, or flagged by the AttentionBadge) is validated
+      const validated = result.validated || (result.status === 'pending_ai' && detail.word.is_valid_english !== null);
+      patchResult(result.input, { word: briefOf(detail.word), mine: detail.mine, ...(validated ? { validated: true } : {}) });
       void refreshCounters();
     },
   });
 
   const summary = results
     ? {
-        added: results.filter((r) => r.status === 'added' || r.status === 'readded').length,
-        pending: results.filter((r) => r.status === 'pending_ai').length,
+        added: results.filter((r) => r.status === 'added' || r.status === 'readded' || r.validated).length,
+        pending: results.filter((r) => r.status === 'pending_ai' && !r.validated).length,
       }
     : null;
 
@@ -291,7 +302,7 @@ export default function AddWordsPage() {
                 input={line.raw}
                 preview={entry?.preview ?? null}
                 loading={entry?.status === 'loading'}
-                invalidMessage={!line.result.ok ? zh.errors.invalidWord : entry?.status === 'error' ? entry.message : null}
+                invalidMessage={!line.result.ok ? zh.bank.invalidReason[line.result.reason] : entry?.status === 'error' ? entry.message : null}
                 duplicate={line.duplicate}
                 chosenId={lemma ? (chosen[lemma]?.id ?? null) : null}
                 onPick={lemma ? (word) => pick(lemma, word) : undefined}

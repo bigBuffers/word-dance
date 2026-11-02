@@ -42,10 +42,16 @@
   min-width: 0;
 }
 
-.settings__row input[type="number"],
-.settings__row input[type="time"] {
+.settings__row input[type="number"] {
   width: 7em;
   text-align: right;
+}
+
+.settings__row input[type="time"] {
+  /* the browser sizes the control to its own locale format (~105px for 24-h, ~138px for "hh:mm AM/PM" + picker);
+     a fixed 7em clipped the AM/PM field so 19:18 read as "07:18" in 12-hour locales */
+  width: auto;
+  flex: none;
 }
 
 .settings__row select {

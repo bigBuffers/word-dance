@@ -1,7 +1,36 @@
-// Pure helpers of the vocabulary browser (optimistic state, toast copy, undo eligibility — FRONTEND 5.5 / API.md 26).
-import { describe, expect, it } from 'vitest';
+// Pure helpers of the vocabulary browser (optimistic state, toast copy, undo eligibility — FRONTEND 5.5 / API.md 26)
+// plus the accessible names of the filter controls.
+import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { describe, expect, it, vi } from 'vitest';
 import { zh } from '@/i18n/zh';
-import { markToast, markUndoable, optimisticState } from './VocabPage';
+import VocabPage, { markToast, markUndoable, optimisticState } from './VocabPage';
+
+vi.mock('@/api/endpoints', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/endpoints')>()),
+  getVocab: vi.fn(async () => ({ items: [], page: 1, page_size: 50, total: 0 })),
+  getVocabLetters: vi.fn(async () => ({ items: [] })),
+}));
+
+describe('filter controls', () => {
+  it('the status and sort selects are named after their purpose, not their current option', async () => {
+    render(
+      <MemoryRouter>
+        <VocabPage />
+      </MemoryRouter>,
+    );
+    const status = (await screen.findByRole('combobox', { name: zh.common.status })) as HTMLSelectElement;
+    const sort = screen.getByRole('combobox', { name: zh.common.sort }) as HTMLSelectElement;
+    fireEvent.change(status, { target: { value: 'unfamiliar' } });
+    fireEvent.change(sort, { target: { value: 'alpha' } });
+    expect(status.value).toBe('unfamiliar');
+    expect(sort.value).toBe('alpha');
+    expect(screen.getByRole('combobox', { name: zh.common.status })).toBe(status);
+    expect(screen.getByRole('combobox', { name: zh.common.sort })).toBe(sort);
+    expect(screen.queryByRole('combobox', { name: zh.vocab.status.all })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: zh.vocab.sort.freq })).toBeNull();
+  });
+});
 
 describe('optimisticState', () => {
   it('mirrors the DESIGN 4 transitions', () => {

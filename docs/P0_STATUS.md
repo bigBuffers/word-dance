@@ -158,9 +158,10 @@ ratified items into the design documents in the "contract change" commit.
 ### Frontend (`frontend/`)
 
 16. **`zh.ts` = FRONTEND §8 plus three keys** (`common.backToToday`, `word.speak`, `word.speechUnsupported`, see §2) that
-    §2/§4/§6.3 of FRONTEND require but §8 lacks — to be ratified in FRONTEND §8 by the contract-change commit. §8 has no copy
-    for a learning word that is due now/overdue/today (StateBadge omits the due suffix then) and none for `WordKind`
-    (`phrase/abbreviation/proper_noun`; no WordKind badge is rendered). Candidates for the post-step-7 copy pass.
+    §2/§4/§6.3 of FRONTEND require but §8 lacks — to be ratified in FRONTEND §8 by the contract-change commit. §8 had no copy
+    for a learning word that is due now/overdue/today (StateBadge omitted the due suffix then; `study.nextDue.today` /
+    `overdue` were added and ratified by the fix(frontend) commit) and has none for `WordKind`
+    (`phrase/abbreviation/proper_noun`; no WordKind badge is rendered, so no key is needed).
 17. **`components/layout/AppLayout.tsx` (+ `.css`) is a P0 stub in WP7's directory** because frozen `routes.tsx` mounts
     `<AppLayout/>` as the layout route of every authenticated page. WP7 replaces the file keeping the export name `AppLayout`
     and the inner `<Suspense>`, sets `--tabbar-h` on phones so toasts clear the TabBar, and may hide the shell on `/study`.

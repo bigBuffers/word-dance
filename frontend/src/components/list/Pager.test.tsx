@@ -62,4 +62,40 @@ describe('usePagedList', () => {
     await waitFor(() => expect(result.current.items.map((i) => i.id)).toEqual([10, 11]));
     expect(fetcher).toHaveBeenCalledTimes(4);
   });
+
+  it('reload() after load-more refetches every loaded page and keeps the accumulated rows (undo / replace on a phone)', async () => {
+    const fetcher = vi.fn((page: number) => Promise.resolve(pageOf(page)));
+    const { result } = renderHook(() => usePagedList<{ id: number }, Page<{ id: number }>>(fetcher, []));
+    await waitFor(() => expect(result.current.items).toHaveLength(2));
+    act(() => result.current.goTo(2, 'append'));
+    await waitFor(() => expect(result.current.items).toHaveLength(4));
+    act(() => result.current.goTo(3, 'append'));
+    await waitFor(() => expect(result.current.items.map((i) => i.id)).toEqual([10, 11, 20, 21, 30, 31]));
+    expect(fetcher.mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
+
+    let settled = false;
+    act(() => {
+      void result.current.reload().then(() => {
+        settled = true;
+      });
+    });
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(settled).toBe(true));
+    expect(fetcher.mock.calls.slice(3).map((c) => c[0]).sort()).toEqual([1, 2, 3]);
+    expect(result.current.items.map((i) => i.id)).toEqual([10, 11, 20, 21, 30, 31]);
+    expect(result.current.page).toBe(3);
+    expect(result.current.total).toBe(6);
+
+    // a replace narrows the loaded range back to one page, so a later reload fetches just that page
+    act(() => result.current.goTo(2, 'replace'));
+    await waitFor(() => expect(result.current.items.map((i) => i.id)).toEqual([20, 21]));
+    const before = fetcher.mock.calls.length;
+    act(() => {
+      void result.current.reload();
+    });
+    await waitFor(() => expect(fetcher.mock.calls.length).toBe(before + 1));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(fetcher.mock.calls.slice(before).map((c) => c[0])).toEqual([2]);
+    expect(result.current.items.map((i) => i.id)).toEqual([20, 21]);
+  });
 });

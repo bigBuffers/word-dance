@@ -39,7 +39,7 @@ function item(over: Partial<StudyItem> = {}): StudyItem {
       image_state: 'none',
       definition: 'to leave somebody or something',
       translation: 'v. give up; desert\nn. wild abandon',
-      pos: 'v',
+      pos: 'n:4/v:96',
       forms: ['abandoned', 'abandoning', 'abandons'],
       confusables: ['abundant'],
     },
@@ -132,6 +132,25 @@ describe('StudyCard', () => {
     expect(screen.getByText('abandon ship')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'abundant' }).getAttribute('href')).toBe('/words/abundant');
     expect(screen.getByText(new RegExp(zh.study.nextLabel))).toBeTruthy();
+    // a never-graded card says "not reviewed yet" instead of a zeroth review with a zero-day interval
+    expect(screen.queryByText(zh.study.srsLine(0, 0), { exact: false })).toBeNull();
+    expect(screen.getByText(zh.study.srsNew, { exact: false })).toBeTruthy();
+    // ECDICT's pos ratio is rendered as readable shares, dominant class first
+    expect(screen.getByText('v. 96% · n. 4%')).toBeTruthy();
+    expect(screen.queryByText('n:4/v:96')).toBeNull();
+  });
+
+  it('shows the SRS line once the card has been reviewed and the position counter in the header', () => {
+    const mine = item().mine!;
+    renderCard({
+      revealed: true,
+      position: 12,
+      total: 41,
+      item: item({ kind: 'review', mine: { ...mine, state: 'learning', srs: { ...mine.srs, repetitions: 3, interval_days: 8 } } }),
+    });
+    expect(screen.getByText(zh.study.srsLine(3, 8), { exact: false })).toBeTruthy();
+    expect(screen.queryByText(zh.study.srsNew, { exact: false })).toBeNull();
+    expect(screen.getByText(zh.study.position(12, 41))).toBeTruthy();
   });
 
   it('shows the hint cloze on the front and calls onMaster / onSkip', () => {

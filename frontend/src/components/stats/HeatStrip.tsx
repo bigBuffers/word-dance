@@ -1,5 +1,5 @@
 // HeatStrip — 12 weeks × 7 days of study activity (FRONTEND §4): 5 intensity levels, a ring on days
-// whose goal was met, tooltip "<date> · total(32)" (`title` + `aria-label`). Weeks are columns
+// whose goal was met, tooltip "<date> · history.gradedCount(32)" (`title` + `aria-label`, FRONTEND §4). Weeks are columns
 // (Monday first); the window is the 12 full weeks ending with the week of `today`.
 import { zh } from '@/i18n/zh';
 import { addDays, formatMonthDay, localDateOf, parseLocalDate } from '@/utils/srsPreview';
@@ -63,7 +63,7 @@ export function buildHeatCells(days: readonly HeatDay[], today: string, weeks = 
 }
 
 export function heatTooltip(cell: Pick<HeatCell, 'date' | 'graded'>): string {
-  return `${formatMonthDay(cell.date)} · ${zh.common.total(cell.graded)}`;
+  return `${formatMonthDay(cell.date)} · ${zh.history.gradedCount(cell.graded)}`;
 }
 
 export function HeatStrip({ days, today, timeZone, weeks = 12, className }: HeatStripProps) {

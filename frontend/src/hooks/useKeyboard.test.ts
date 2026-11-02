@@ -50,4 +50,31 @@ describe('useKeyboard', () => {
     expect(fn).toHaveBeenCalledTimes(1);
     input.remove();
   });
+
+  it('yields Space to a focused button or summary (native activation) but still handles other keys there', () => {
+    const reveal = vi.fn();
+    const skip = vi.fn();
+    renderHook(() => useKeyboard({ Space: reveal, s: skip }));
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    const onButton = press(' ', { target: button });
+    expect(reveal).not.toHaveBeenCalled();
+    expect(onButton.defaultPrevented).toBe(false);
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    details.appendChild(summary);
+    document.body.appendChild(details);
+    const onSummary = press(' ', { target: summary });
+    expect(reveal).not.toHaveBeenCalled();
+    expect(onSummary.defaultPrevented).toBe(false);
+    // letters and digits never activate a button, so they keep working from a focused one
+    const onButtonS = press('s', { target: button });
+    expect(skip).toHaveBeenCalledTimes(1);
+    expect(onButtonS.defaultPrevented).toBe(true);
+    const plain = press(' ');
+    expect(reveal).toHaveBeenCalledTimes(1);
+    expect(plain.defaultPrevented).toBe(true);
+    button.remove();
+    details.remove();
+  });
 });

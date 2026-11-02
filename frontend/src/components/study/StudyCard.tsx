@@ -18,6 +18,7 @@ import type { Accent } from '@/hooks/useSpeech';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
 import { cloze, containsForm } from '@/utils/highlight';
+import { formatPos } from '@/utils/pos';
 import { formatMonthDay } from '@/utils/srsPreview';
 import { ExampleList } from './ExampleList';
 import { WordImage } from './WordImage';
@@ -140,7 +141,8 @@ export function StudyCard({
   const meaning = content?.meaning_zh?.trim() || word.translation?.trim() || word.translation_short;
   const dictLines = splitLines(word.translation);
   const suggested = mine?.srs.mastery_suggested === true;
-  const counter = position !== undefined && total !== undefined ? `${position}/${total}` : null;
+  const counter = position !== undefined && total !== undefined ? zh.study.position(position, total) : null;
+  const pos = formatPos(word.pos);
   const showBack = readOnly || revealed;
   const result = resultLabel(item.result);
 
@@ -325,9 +327,9 @@ export function StudyCard({
         {(dictLines.length > 0 || word.definition) && (
           <details className="study-card__dict">
             <summary>{zh.study.dictionary}</summary>
-            {word.pos && (
+            {pos && (
               <p className="study-card__dict-pos muted" lang="en">
-                {word.pos}
+                {pos}
               </p>
             )}
             {dictLines.length > 0 && (
@@ -346,7 +348,7 @@ export function StudyCard({
         )}
         {mine && (
           <p className="study-card__srs muted">
-            {zh.study.srsLine(mine.srs.repetitions, mine.srs.interval_days)}
+            {mine.srs.repetitions > 0 ? zh.study.srsLine(mine.srs.repetitions, mine.srs.interval_days) : zh.study.srsNew}
             {mine.times_added > 1 && <span className="study-card__chip-inline"> · {zh.study.addedTimes(mine.times_added)}</span>}
             {mine.mastered_at && <span className="study-card__chip-inline"> · {zh.study.lastMastered(formatMonthDay(mine.mastered_at))}</span>}
           </p>

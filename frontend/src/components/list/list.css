@@ -200,7 +200,9 @@
   height: 18px;
 }
 
-.searchbox__input {
+/* `input[type="search"]` (0,1,1) in global.css would otherwise beat a bare class (0,1,0) and keep its 12px
+   padding under the 18px icon; the compound selector restores the searchbox look everywhere it is used. */
+input[type="search"].searchbox__input {
   padding-left: 38px;
   padding-right: 40px;
   border-radius: var(--radius);

@@ -26,6 +26,7 @@ export interface PagedList<T, R extends Page<T>> {
   goTo: (page: number, mode: PagerMode) => void;
   /** Back to page 1 with a fresh list (call when a filter changes). */
   reset: () => void;
+  /** Refetches every loaded page (`fromPage … page` after load-more), so the accumulated rows stay intact. */
   reload: () => Promise<void>;
   /** Patch rows in place (optimistic updates). */
   setItems: Dispatch<SetStateAction<T[]>>;
@@ -35,12 +36,26 @@ export interface PagedList<T, R extends Page<T>> {
  * Pagination state shared by the vocab / bank / admin lists: fetches `fetcher(page)` through `useApi`
  * and either replaces or appends the rows depending on the Pager mode. Filter changes belong in
  * `deps`; call `reset()` alongside them so the list restarts at page 1.
+ *
+ * After one or more `'append'` loads the list holds pages `fromPage … page`; a `reload()` (undo, replace,
+ * stale-row recovery) then refetches that whole range and replaces the rows, instead of collapsing the
+ * list to the last page only.
  */
 export function usePagedList<T, R extends Page<T>>(fetcher: (page: number, signal: AbortSignal) => Promise<R>, deps: DependencyList): PagedList<T, R> {
   const [page, setPage] = useState(1);
+  const [fromPage, setFromPage] = useState(1);
   const [items, setItems] = useState<T[]>([]);
   const appendRef = useRef(false);
-  const { data, error, loading, reload } = useApi((signal) => fetcher(page, signal), [...deps, page]);
+  const { data, error, loading, reload } = useApi(
+    async (signal) => {
+      // an append fetches just the new page; every other run (first load, replace, reload) fetches the loaded range
+      if (appendRef.current || fromPage >= page) return fetcher(page, signal);
+      const pages = await Promise.all(Array.from({ length: page - fromPage + 1 }, (_, i) => fetcher(fromPage + i, signal)));
+      const last = pages[pages.length - 1] as R;
+      return { ...last, items: pages.flatMap((p) => p.items) } as R;
+    },
+    [...deps, page, fromPage],
+  );
 
   useEffect(() => {
     if (!data) return;
@@ -52,12 +67,16 @@ export function usePagedList<T, R extends Page<T>>(fetcher: (page: number, signa
   const goTo = useCallback((next: number, mode: PagerMode) => {
     appendRef.current = mode === 'append';
     setPage(next);
-    if (mode === 'replace' && typeof window !== 'undefined') window.scrollTo({ top: 0 });
+    if (mode === 'replace') {
+      setFromPage(next);
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0 });
+    }
   }, []);
 
   const reset = useCallback(() => {
     appendRef.current = false;
     setPage(1);
+    setFromPage(1);
   }, []);
 
   return { items, total: data?.total ?? 0, page, loading, error, data, goTo, reset, reload, setItems };

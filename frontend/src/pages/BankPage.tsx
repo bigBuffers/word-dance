@@ -318,7 +318,7 @@ export default function BankPage() {
       <div className="bank__controls">
         <SearchBox value={q} onChange={onSearch} placeholder={zh.vocab.searchPlaceholder} />
         <div className="bank__filters">
-          <select aria-label={zh.bank.sort.added} value={sort} onChange={(e) => onSort(e.target.value as BankSort)}>
+          <select aria-label={zh.common.sort} value={sort} onChange={(e) => onSort(e.target.value as BankSort)}>
             {SORTS.map((s) => (
               <option key={s} value={s}>
                 {zh.bank.sort[s]}
@@ -396,8 +396,8 @@ export default function BankPage() {
 
       <ConfirmDialog
         open={confirm !== null}
-        title={confirm?.action === 'reset' ? zh.word.reset : zh.study.master}
-        message={confirm?.action === 'reset' ? (confirm?.item.display ?? '') : zh.study.masterConfirm}
+        title={confirm?.action === 'reset' ? `${zh.word.reset} · ${confirm.item.display}` : zh.study.master}
+        message={confirm?.action === 'reset' ? zh.word.resetConfirm : zh.study.masterConfirm}
         danger={confirm?.action === 'reset'}
         onCancel={() => setConfirm(null)}
         onConfirm={() => {

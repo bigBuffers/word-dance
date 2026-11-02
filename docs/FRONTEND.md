@@ -82,7 +82,7 @@ Navigation: phone (< 768 px) bottom tab bar 今日 · 词库 · 生词库 · 记
 | `study/WordImage` | `image: ImageMeta, showImages, onRefresh?, onFlag?` | fixed 16:10 box, `<img loading="lazy">`, skeleton while loading, attribution caption `图片：{title} · {creator} · {license} ↗` (card: 「系统生成卡片」, claude_svg: 「AI 生成示意图」), overflow menu 换一张 / 不合适 |
 | `word/SpeakButton` | `text, lang` | `useSpeech()` wrapper; disabled with tooltip 当前浏览器不支持语音 when `speechSynthesis` is absent |
 | `word/StageChips` | `stages: Stage[], stageMin` | 初中 / 高中 / 四级 / 六级 chips; `cet6_star` adds ★ |
-| `word/StateBadge` | `state: UserState \| null, srs?` | 待学 / 学习中 · 3 天后 / 已掌握 / 已认识 / 已移除 / 未标记 |
+| `word/StateBadge` | `state: UserState \| null, srs?` | 待学 / 学习中 · 3 天后 (· 今天 / · 已到期 when the review is due) / 已掌握 / 已认识 / 已移除 / 未标记 |
 | `bank/AttentionBadge` | `mine: UserWord, word: WordBrief, onKeep(), onRetry(), onEdit(), onRemove(), onReplace()` | state machine (API.md §9.1 / SCHEMA `needs_attention`): `needs_attention && attention_msg` → ⚠ msg + buttons 修改 (`onEdit`: `mark remove` then `/bank/add?prefill=`) · 重试 (`onRetry`, only when `word.is_valid_english === null`; `PATCH {attention:'retry'}`) · 保留 (`onKeep`: `PATCH {attention:'keep'}`; label 仅收藏 when `is_valid_english === false`) · 删除 (`onRemove`) · 替换为 “X” (`onReplace`, when `suggested_word`); `needs_attention && !attention_msg` → 重新校验中 (spinner, polls `GET /api/words/{id}`); `!needs_attention && is_valid_english === null` → 待校验; `!needs_attention && is_valid_english === false` → 仅收藏 chip (muted, no buttons); after `onKeep`/`onRetry` the page calls `refreshCounters()` |
 | `list/WordRow` | `word: WordBrief, mine?, onMark(action), selectable?, selected?` | list row: display · phonetic · translation_short · chips · state badge · quick buttons 不熟悉 / 认识 (或 已在生词库 → sheet 已掌握 / 移除) · checkbox in bulk mode |
 | `list/LetterIndex` | `letters: {letter,count}[], active, onPick` | desktop sticky right rail; phone horizontal chips |
@@ -131,7 +131,7 @@ State `{batchId, order: itemId[], cursor, revealed, requeue: {itemId, at}[], pen
 
 ### 5.3 Today page (`/today`)
 
-Before a batch exists: 「今日词汇将于 08:00 推送」 + 立即生成 (`POST /api/today/build`) — the only build path besides the scheduler (再来一组 is disabled in this state: API 46 answers 409 `batch_not_ready` → toast `today.buildFirst`). While `building`: items are shown immediately and 再来一组 works; the header shows `today.pending(n)` 「N 个词的例句生成中」 **only while `counts.pending_content > 0`** (budget-deferred and AI-paused items are not counted, so the notice disappears when nothing is generating). When `previous_open_batch` is non-null a card 「继续昨天的学习（还剩 N 个）」 (`today.continueYesterday`) links to `/study?batch=<id>` — this is how a late session is finished after midnight (API.md 43/45); it is shown above today's CTA and also in the `status:'none'` state. After completion: 「今日完成 🎉 明早 08:00 见」 + 再来一组 + 去筛词 + 去词库. 顺延 note when `deferred_reviews > 0`.
+Before a batch exists: 「今日词汇将于 08:00 推送」 + 立即生成 (`POST /api/today/build`) — the only build path besides the scheduler (再来一组 is disabled in this state: API 46 answers 409 `batch_not_ready` → toast `today.buildFirst`). While `building`: items are shown immediately and 再来一组 works; the header shows `today.pending(n)` 「N 个词的例句生成中」 **only while `counts.pending_content > 0`** (budget-deferred and AI-paused items are not counted, so the notice disappears when nothing is generating). When `previous_open_batch` is non-null a card 「继续昨天的学习（还剩 N 个）」 (`today.continueYesterday`) links to `/study?batch=<id>` — this is how a late session is finished after midnight (API.md 43/45); it is shown above today's CTA and also in the `status:'none'` state. After completion: 「今日完成 🎉 明天 08:00 见」 (`today.seeYou` is time-neutral: push times run 00:00–23:59) + 再来一组 + 去筛词 + 去词库. 顺延 note when `deferred_reviews > 0`.
 
 ### 5.4 Screening (`/screen/:stage`, `/welcome` step 2, 推荐词 cards)
 
@@ -209,11 +209,12 @@ export const zh = {
   nav: { today: '今日', vocab: '词库', bank: '生词库', history: '记录', me: '我的', admin: '管理', about: '关于' },
   common: { save: '保存', saved: '已保存', cancel: '取消', confirm: '确定', back: '返回', retry: '重试', undo: '撤销', close: '关闭',
             loading: '加载中…', more: '更多', search: '搜索', all: '全部', none: '无', yes: '是', no: '否', delete: '删除', keep: '保留', undone: '已撤销',
-            copy: '复制', copied: '已复制', loadMore: '加载更多', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页` },
+            copy: '复制', copied: '已复制', loadMore: '加载更多', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页`,
+            backToToday: '回到今日', sort: '排序', status: '状态' },
   errors: { network: '网络开小差了，请稍后重试', unauthorized: '请先登录', forbidden: '没有权限', notFound: '找不到这个页面',
             rateLimited: '操作太频繁，请稍后再试', server: '服务器出了点问题，请稍后重试', csrf: '请求已过期，请刷新页面',
             invalidWord: '只能包含英文字母、空格、连字符、撇号和缩写点', tooManyWords: '一次最多添加 50 个词',
-            weakPassword: '密码至少 8 位，且不能与用户名相同或过于常见', usernameTaken: '用户名已被使用', emailTaken: '邮箱已被使用',
+            weakPassword: '密码至少 8 位，且不能与用户名相同或过于常见', usernameTaken: '用户名已被使用', emailTaken: '邮箱已被使用', invalidEmail: '邮箱格式无效',
             invalidCredentials: '用户名或密码不正确', accountLocked: (s: number) => `登录失败次数过多，请 ${Math.ceil(s / 60)} 分钟后再试`,
             registrationClosed: '当前不开放注册', invalidInvite: '邀请码无效或已过期', budgetExhausted: '今日 AI 额度已用完，例句将在明天补齐',
             aiDisabled: 'AI 功能暂时关闭', emailNotVerified: '请先验证邮箱', smtpUnconfigured: '服务器未配置邮件发送', webhookUnconfigured: '请先填写 Webhook 地址',
@@ -230,47 +231,53 @@ export const zh = {
   today: { title: '今日词汇', streak: (n: number) => `连续学习 ${n} 天`, counts: { review: '复习', new: '新词', screen: '推荐词', extra: '加练' },
            deferred: (n: number) => `另有 ${n} 个复习顺延到明天`, pending: (n: number) => `${n} 个词的例句生成中`,
            start: '开始学习', resume: '继续学习', notYet: (t: string) => `今日词汇将于 ${t} 推送`, buildNow: '立即生成',
-           done: '今日完成 🎉', seeYou: (t: string) => `明早 ${t} 见`, moreNew: '再来一组新词', moreScreen: '再筛一组推荐词', goScreen: '去筛词', goVocab: '去词库',
+           done: '今日完成 🎉', seeYou: (t: string) => `明天 ${t} 见`, moreNew: '再来一组新词', moreScreen: '再筛一组推荐词', goScreen: '去筛词', goVocab: '去词库',
            emptyBank: '生词库还是空的——去词库里挑几个不熟悉的词，或者直接筛词', suggestions: (n: number) => `整理建议 (${n})`, nothingMore: '今天没有更多可加练的词了',
            continueYesterday: (n: number) => `继续昨天的学习（还剩 ${n} 个）`, yesterdayBatch: '昨天的词汇', buildFirst: '请先生成今日词汇' },
   study: { title: '学习', reveal: '显示释义', hint: '提示', again: '不熟悉', hard: '模糊', good: '记住了', master: '已掌握', skip: '跳过', known: '认识', unfamiliar: '不熟悉',
            suggested: '建议', nextLabel: '下次', requeue: '10 分钟后再见', waiting: (n: number, m: number) => `还有 ${n} 个词将在 ${m} 分钟后复现`, reviewNow: '现在就复习',
            masterConfirm: '确定已掌握？该词将移出生词库，随时可在「已掌握」中恢复。', mastered: '已从生词库移除', restored: '已恢复到生词库',
            contentPending: '例句生成中…', contentFailed: '今天的例句暂时生成不了，先用词典释义学习', contentDeferred: '今日 AI 额度已用完，例句将在明天补齐', examples: '例句', collocations: '搭配', mnemonic: '记忆', confusable: '易混',
-           dictionary: '词典释义', srsLine: (n: number, d: number) => `第 ${n} 次复习 · 间隔 ${d} 天`, lastMastered: (d: string) => `上次掌握于 ${d}`, addedTimes: (n: number) => `第 ${n} 次加入`,
+           dictionary: '词典释义', srsLine: (n: number, d: number) => `第 ${n} 次复习 · 间隔 ${d} 天`, srsNew: '尚未复习', lastMastered: (d: string) => `上次掌握于 ${d}`, addedTimes: (n: number) => `第 ${n} 次加入`,
+           position: (i: number, n: number) => `第 ${i}/${n}`,
            kind: { review: '复习', new: '新词', screen: '推荐词', extra: '加练' }, pendingSync: (n: number) => `有 ${n} 个结果待同步`, zh: '译',
            summary: { title: '本次学习', unfamiliarWords: '还不熟悉的词', minutes: (m: number) => `用时 ${m} 分钟` },
-           nextDue: { tenMin: '10 分钟后', tomorrow: '明天', days: (d: number) => `${d} 天后`, months: (m: number) => `约 ${m} 个月后`, mastered: '已掌握', skipped: '已跳过' } },
-  screen: { title: '筛词', subtitle: '快速筛一筛，不熟悉的会进入生词库', remaining: (n: number) => `本阶段还剩 ${n} 个未筛`, another: '再筛 30 个', peek: '显示释义',
-            addedBank: '已加入生词库', addedToday: '已加入生词库，今天就学', addedTomorrow: '已加入生词库，明天开始学', allDone: '这个阶段的词都筛完了 🎉' },
+           nextDue: { tenMin: '10 分钟后', today: '今天', overdue: '已到期', tomorrow: '明天', days: (d: number) => `${d} 天后`, months: (m: number) => `约 ${m} 个月后`, mastered: '已掌握', skipped: '已跳过' } },
+  screen: { title: '筛词', subtitle: '快速筛一筛，不熟悉的会进入生词库', remaining: (n: number) => `本阶段还剩 ${n} 个未筛`, screenedCount: (n: number) => `本次已筛 ${n} 个`, another: '再筛 30 个', peek: '显示释义',
+            addedBank: '已加入生词库', addedToday: '已加入生词库，今天就学', addedTomorrow: '已加入生词库，明天开始学', markedKnown: (w: string) => `${w} · 已认识`, allDone: '这个阶段的词都筛完了 🎉' },
   vocab: { title: '词库', searchPlaceholder: '搜索英文或中文', status: { all: '全部', unmarked: '未标记', unfamiliar: '不熟悉', known: '已认识', mastered: '已掌握' },
            sort: { freq: '词频', alpha: '字母', difficulty: '难度' }, markUnfamiliar: '不熟悉', markKnown: '认识', inBank: '已在生词库', addedToBank: '已加入生词库',
            bulk: '批量选择', bulkUnfamiliar: '标记所选为不熟悉', bulkKnown: '标记所选为认识', selected: (n: number) => `已选 ${n} 个`,
            notFound: (q: string) => `没有找到“${q}”。想把它加入生词库？`, letters: '字母索引' },
   word: { title: '单词详情', forms: '词形', examTags: '考试标签', actions: '操作', reset: '重置进度', remove: '移除', changeImage: '换一张', flagImage: '不合适',
+          resetConfirm: '确定重置进度？该词的复习进度将归零并回到「待学」，学习记录保留。', removeConfirm: '确定移除？该词将从列表中移除，不计入已掌握，之后可在「已移除」中重新加入。',
           report: '反馈问题', reportReasons: { wrong_meaning: '释义有误', unnatural_example: '例句不地道', bad_translation: '翻译有误', irrelevant_image: '配图无关', inappropriate_image: '配图不合适', other: '其他' },
           reported: '已收到反馈，谢谢', changingImage: '正在换图…', imageSource: '图片', generatedCard: '系统生成卡片', aiImage: 'AI 生成示意图', history: '我的记录', redirected: (f: string) => `已从“${f}”跳转`,
-          generateExamples: '生成例句', examplesQueued: '例句生成中，稍后自动显示' },
+          generateExamples: '生成例句', examplesQueued: '例句生成中，稍后自动显示', speak: '发音', speechUnsupported: '当前浏览器不支持语音' },
   bank: { title: '生词库', tabs: { new: '待学', learning: '学习中', mastered: '已掌握', known: '已认识', removed: '已移除', attention: '待处理' },
           add: '添加生词', addMany: '粘贴多个词，用换行或逗号分隔', note: '备注（可选，比如在哪里遇到的）', studyToday: '今天就学', submit: '添加',
-          status: { added: '已添加', readded: '重新加入', exists: '已在生词库', pending_ai: '待 AI 校验', ambiguous: '需选择原形', invalid: '无效' },
-          preview: { exact: '已识别', form: (l: string, k: string) => `将归为原形 ${l}（${k}）`, ambiguous: '多个可能的原形，请选择', none: '词典中未找到，将由 AI 校验补全', inBank: '已在你的生词库中', invalid: '无效' },
+          status: { added: '已添加', readded: '重新加入', exists: '已在生词库', pending_ai: '待 AI 校验', ambiguous: '需选择原形', invalid: '无效', validated: '已校验' },
+          preview: { exact: '已识别', form: (l: string, k: string) => `将归为原形 ${l}（${k}）`, ambiguous: '多个可能的原形，请选择', none: '词典中未找到，将由 AI 校验补全', inBank: '已在你的生词库中', invalid: '无效',
+                     duplicate: '与上面的词重复，已忽略' },
+          invalidReason: { empty: '请输入单词', not_english: '请输入英文单词', charset: '只能包含英文字母、空格、连字符、撇号和缩写点', too_long: '太长了（最多 48 个字符）',
+                           too_many_tokens: '最多 4 个单词组成的短语', bad_token: '请输入有效的单词', dot_in_long_token: '缩写点只能用于缩写（如 a.m.、e.g.）', leading_punct: '不能以连字符或撇号开头' },
           formKinds: { p: '过去式', d: '过去分词', i: '现在分词', '3': '第三人称单数', s: '复数', r: '比较级', t: '最高级', alt: '变体' },
           pendingAi: '待校验', notRecognised: '未识别', replaceWith: (w: string) => `替换为“${w}”`, unresolved: '未能识别该词，请检查拼写', keep: '保留', edit: '修改',
           retry: '重试', retrying: '重新校验中', keepOnly: '仅收藏', keptOnly: '已保留，仅收藏不推送', unresolvedTemp: '暂时无法校验，请稍后重试或检查拼写',
           sort: { added: '加入时间', due: '到期', alpha: '字母', ease: '熟练度', times_added: '反复次数' }, counts: (n: number) => `共 ${n} 个`,
           empty: '还没有生词。在词库里点「不熟悉」，或直接添加。', dueIn: (s: string) => `${s}复习`, consolidateNow: '立即整理', consolidating: '正在整理…', consolidateQueued: '已安排整理，稍后查看整理建议' },
-  suggestions: { title: '整理建议', badge: (n: number) => `整理建议 (${n})`, empty: '暂无整理建议。每晚会自动整理你的生词库。', accept: '接受', reject: '保留', undo: '撤销', autoSection: '已自动整理', expiresIn: (d: number) => `${d} 天后过期`,
+  suggestions: { title: '整理建议', badge: (n: number) => `整理建议 (${n})`, empty: '暂无整理建议。每晚会自动整理你的生词库。', accept: '接受', reject: '保留', undo: '撤销', autoSection: '已自动整理', expiresIn: (d: number) => `${d} 天后过期`, expiresToday: '今天过期',
                  fix_spelling: (a: string, b: string) => `“${a}” 看起来是 “${b}” 的拼写错误。替换？`, lemmatize: (a: string, b: string) => `“${a}” 是 “${b}” 的变化形式，合并？`,
                  merge_duplicate: (a: string, b: string) => `“${a}” 与 “${b}” 是同一个词的不同拼写，合并？`, invalid_word: (a: string) => `“${a}” 似乎不是英文单词，删除？`,
                  split_phrase: (b: string) => `建议改学核心词 “${b}”`, fill_data: (a: string) => `已为 “${a}” 补全词典信息`, auto_lemmatize: (a: string, b: string) => `已自动将 “${a}” 归为 “${b}”`, undone: '已撤销' },
-  history: { title: '记录', heat: '最近 12 周', completed: (d: number, t: number) => `完成 ${d}/${t}`, offline: '服务器离线', stubborn: '反复遗忘', replay: '重新浏览', empty: '学习记录会在第一次学习后出现。',
+  history: { title: '记录', heat: '最近 12 周', completed: (d: number, t: number) => `完成 ${d}/${t}`, gradedCount: (n: number) => `学习 ${n} 个`, offline: '服务器离线', stubborn: '反复遗忘', replay: '重新浏览', empty: '学习记录会在第一次学习后出现。',
              longest: (n: number) => `最长连续 ${n} 天` },
   settings: { title: '我的', push: '推送设置', learn: '学习设置', account: '账号', about: '关于与数据来源', pushTime: '推送时间', timezone: '时区', detect: '自动检测', pushEnabled: '每日推送',
               dailyNew: '每日新词', dailyScreen: '每日推荐词', maxReviews: '每日最多复习', stages: '目标阶段', currentStage: '主攻阶段', nextPush: (t: string) => `下次推送：${t}`,
-              email: '邮件推送', emailVerify: '验证邮箱', emailCode: '请输入邮件中的 6 位验证码', emailSent: '验证码已发送', emailVerified: '邮箱已验证', emailTest: '发送测试邮件',
+              email: '邮件推送', emailVerify: '验证邮箱', emailCode: '请输入邮件中的 6 位验证码', emailSent: '验证码已发送', emailVerified: '邮箱已验证', emailTest: '发送测试邮件', emailTestQueued: '测试邮件已加入发送队列，请稍后查收',
               webhook: 'Webhook 推送', webhookUrl: 'Webhook 地址（https）', webhookFormat: '格式', formats: { generic: '通用 JSON', wecom: '企业微信机器人', feishu: '飞书机器人', serverchan: 'Server酱', bark: 'Bark' },
-              webhookTest: '发送测试', webhookOk: '测试成功', webhookFail: (e: string) => `测试失败：${e}`,
+              webhookTest: '发送测试', webhookOk: '测试成功', webhookFail: (e: string) => `测试失败：${e}`, webhookEnableFirst: '请先开启 Webhook 推送',
+              webhookFailHttp: (n: number) => `目标返回 HTTP ${n}，请检查地址或令牌`, webhookFailConnect: '无法连接到目标地址，请检查地址后重试',
               showImages: '显示配图', zhExamples: '例句译文', zhModes: { tap: '点按显示', always: '总是显示' }, autoPronounce: '自动发音', accent: '口音', accents: { 'en-US': '美音', 'en-GB': '英音' },
               displayName: '昵称', changePassword: '修改密码', currentPassword: '当前密码', newPassword: '新密码', export: '导出数据', exportCsv: 'CSV', exportJson: 'JSON',
               import: '导入数据', importHint: '选择之前导出的 CSV 或 JSON 文件', importDone: (n: number, m: number) => `已导入 ${n} 个，跳过 ${m} 个`,
@@ -280,7 +287,16 @@ export const zh = {
            spendToday: '今日花费', spendMonth: '本月花费', cap: '上限', queue: '队列', paused: '已暂停', pause: '暂停 AI', resume: '恢复 AI', probe: '探测 claude', probeOk: (t: number) => `探测成功（flag tier ${t}）`,
            prewarm: '预生成', invite: '生成邀请码', inviteOnce: '邀请码只显示一次，请立即复制', disable: '禁用', enable: '启用', makeAdmin: '设为管理员', resetPassword: '重置密码',
            images: { photo: '照片', svg: 'AI 示意图', card: '仅文字卡片', svgBudget: 'AI 示意图额度' },
-           retry: '重试', requeueDead: '重排所有失败任务', regenerate: '重新生成', refetchImage: '换图', dismiss: '忽略', lastTick: '上次调度', flagTier: 'CLI 加固级别' },
+           retry: '重试', requeueDead: '重排所有失败任务', regenerate: '重新生成', refetchImage: '换图', dismiss: '忽略', lastTick: '上次调度', flagTier: 'CLI 加固级别',
+           labels: { id: '编号', role: '角色', active: '状态', lastLogin: '最近登录', bankSize: '生词数', streak: '连续天数', maxUses: '次数上限', expiresInDays: '有效天数', note: '备注', uses: '已用',
+                     expiresAt: '到期时间', createdAt: '创建时间', createdBy: '创建者', type: '类型', status: '状态', priority: '优先级', attempts: '尝试', runAfter: '执行时间', lockedBy: '执行者',
+                     payload: '参数', lastError: '最近错误', kind: '种类', model: '模型', tier: '级别', words: '词数', cost: '费用', durationMs: '耗时(ms)', tokens: 'Token', startedAt: '开始时间',
+                     error: '错误', avgCostPerWord7d: '近 7 天每词均价', calls: '调用次数', ledger: 'AI 调用记录', health: '健康状态', db: '数据库', diskFree: '剩余磁盘', dataDir: '数据目录',
+                     threads: '线程', scheduler: '调度器', claudeWorker: 'Claude 线程', ioWorker: 'IO 线程', claudeBin: 'claude 可执行文件', seedVersion: '词库版本', migrations: '迁移版本',
+                     workerLease: '工作租约', lastBackup: '上次备份', providers: '图片来源配额', provider: '来源', perMinute: '每分钟', perDay: '每日', cooldownUntil: '冷却至',
+                     active7d: '7 日活跃', bankEntries: '生词条目', batchesToday: '今日批次', running: '运行中', dead: '失败', alive: '运行中', stopped: '已停止', enabled: '已启用', disabled: '已禁用',
+                     withContent: '有内容', total: '总数', userAdded: '用户添加', pendingValidation: '待校验', limit: '数量上限', maxBudgetUsd: '预算上限 (USD)', detail: '详情',
+                     word: '单词', user: '用户', target: '对象', key: '键', value: '值', source: '来源' } },
 } as const;
 ```
 

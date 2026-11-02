@@ -2,7 +2,9 @@
 // (junior-high student → zk · high-school student → zk+gk · university student → gk+cet4+cet6 · professional → cet4+cet6), main stage segmented, push time,
 // timezone (auto-detected) → POST /api/onboarding (state `screen`). Step 2: screening of up to 30 cards from
 // GET /api/screen/next?stage=auto&count=30 with known / unfamiliar / skip / peek, 5-s undo (server `restore`),
-// skip onboarding / finish → POST /api/onboarding/complete → /today.
+// skip onboarding / finish → POST /api/onboarding/complete → /today. Keys 1 / 2 / S / Space go through the
+// shared `useKeyboard` (drops auto-repeat, modifiers, form controls, open dialogs — FRONTEND §5.4) and the
+// verdict buttons through `useTapLock`, so one held key or one double tap judges exactly one card.
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
@@ -14,7 +16,9 @@ import { Segmented } from '@/components/ui/Segmented';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { STAGE_ORDER } from '@/components/word/StageChips';
 import { WordHeader } from '@/components/word/WordHeader';
+import { useKeyboard } from '@/hooks/useKeyboard';
 import { usePageTitle } from '@/hooks/usePageTitle';
+import { useTapLock } from '@/hooks/useTapLock';
 import { UNDO_LIST_MS, useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
@@ -126,6 +130,7 @@ export default function WelcomePage() {
   const [peek, setPeek] = useState(false);
   const [screened, setScreened] = useState(0);
   const [finishing, setFinishing] = useState(false);
+  const tapLock = useTapLock();
 
   const loadCards = useCallback(async () => {
     setLoadingCards(true);
@@ -168,20 +173,27 @@ export default function WelcomePage() {
       if (!card) return;
       const judged = card;
       setCards((prev) => prev.slice(1));
+      tapLock.arm();
       setPeek(false);
       setScreened((n) => n + 1);
       if (v !== 'skip') setRemaining((n) => Math.max(0, n - 1));
       try {
         const res = await endpoints.postScreenVerdict({ client_event_id: clientEventId(), word_id: judged.word.id, verdict: v, context: 'onboarding' });
         if (v === 'skip') return;
-        const message = v === 'unfamiliar' ? (res.added_to_today ? zh.screen.addedToday : zh.screen.addedBank) : zh.vocab.status.known;
+        const message = v === 'unfamiliar' ? (res.added_to_today ? zh.screen.addedToday : zh.screen.addedBank) : zh.screen.markedKnown(judged.word.display);
         toast.toast(message, { durationMs: UNDO_LIST_MS, action: { label: zh.common.undo, onClick: () => undo(judged) } });
       } catch (err) {
         toast.error(errorMessage(err));
       }
     },
-    [card, toast, undo],
+    [card, tapLock, toast, undo],
   );
+
+  /** Button / pointer verdicts: ignored for a moment after the previous verdict advanced the card (double tap). */
+  const tapVerdict = (v: ScreenVerdict) => {
+    if (tapLock.locked()) return;
+    void verdict(v);
+  };
 
   const finish = useCallback(async () => {
     if (finishing) return;
@@ -197,30 +209,17 @@ export default function WelcomePage() {
     }
   }, [finishing, user, applySession, navigate, toast]);
 
-  // keyboard: 1 known · 2 unfamiliar · S skip · Space peek (FRONTEND §5.4)
-  useEffect(() => {
-    if (step !== 2) return;
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
-      if (e.metaKey || e.ctrlKey || e.altKey || !card) return;
-      if (e.key === '1') {
-        e.preventDefault();
-        void verdict('known');
-      } else if (e.key === '2') {
-        e.preventDefault();
-        void verdict('unfamiliar');
-      } else if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        void verdict('skip');
-      } else if (e.key === ' ') {
-        e.preventDefault();
-        setPeek(true);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [step, card, verdict]);
+  // keyboard: 1 known · 2 unfamiliar · S skip · Space peek (FRONTEND §5.4) — the hook reads the latest
+  // handlers through a ref and ignores `event.repeat`, so a held key cannot run through the deck
+  useKeyboard(
+    {
+      '1': () => void verdict('known'),
+      '2': () => void verdict('unfamiliar'),
+      s: () => void verdict('skip'),
+      Space: () => setPeek(true),
+    },
+    { enabled: step === 2 && card !== undefined },
+  );
 
   if (step === 1) {
     return (
@@ -311,7 +310,7 @@ export default function WelcomePage() {
       <p className="welcome__lead">{zh.welcome.step2Hint}</p>
       <div className="welcome__progress" aria-live="polite">
         <span>{zh.screen.remaining(remaining)}</span>
-        <span>{screened > 0 ? zh.bank.counts(screened) : null}</span>
+        <span>{screened > 0 ? zh.screen.screenedCount(screened) : null}</span>
       </div>
       {loadingCards && cards.length === 0 ? (
         <div className="welcome-card" aria-busy="true">
@@ -333,13 +332,13 @@ export default function WelcomePage() {
             </div>
           </div>
           <div className="welcome__verdicts">
-            <Button variant="primary" tone="good" size="lg" onClick={() => void verdict('known')}>
+            <Button variant="primary" tone="good" size="lg" onClick={() => tapVerdict('known')}>
               {zh.study.known}
             </Button>
-            <Button variant="primary" tone="again" size="lg" onClick={() => void verdict('unfamiliar')}>
+            <Button variant="primary" tone="again" size="lg" onClick={() => tapVerdict('unfamiliar')}>
               {zh.study.unfamiliar}
             </Button>
-            <Button variant="ghost" onClick={() => void verdict('skip')}>
+            <Button variant="ghost" onClick={() => tapVerdict('skip')}>
               {zh.study.skip}
             </Button>
           </div>

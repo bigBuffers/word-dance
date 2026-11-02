@@ -1,7 +1,9 @@
 // i18n rules (FRONTEND §8, DESIGN §0.3) enforced in CI through `npm test` — the same rules as
 // scripts/check-copy.mjs (`npm run lint`), applied here through Vite's raw source globs.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ItemKind, ReportReason, Stage, UserState, WebhookFormat } from '@/api/types';
+import type { InvalidReason } from '@/utils/normalizeInput';
 import { zh } from './zh';
 
 // Built from code points so this file never contains the term it hunts for.
@@ -14,6 +16,19 @@ const allSources = import.meta.glob(['/src/**/*.ts', '/src/**/*.tsx', '/src/**/*
   import: 'default',
   eager: true,
 }) as Record<string, string>;
+// The binding copy of the zh.ts block lives in docs/FRONTEND.md §8 (repo root, outside the Vite root, hence node:fs;
+// vitest runs with the frontend package as cwd, and the file URL fallback covers a run from elsewhere).
+const frontendDoc = ((): string => {
+  const candidates = [`${process.cwd()}/../docs/FRONTEND.md`, new URL('../../../docs/FRONTEND.md', import.meta.url)];
+  for (const candidate of candidates) {
+    try {
+      return readFileSync(candidate, 'utf8');
+    } catch {
+      /* try the next location */
+    }
+  }
+  throw new Error('docs/FRONTEND.md not found next to the frontend package');
+})();
 
 function offendingLines(sources: Record<string, string>, test: (line: string) => boolean, skip: (path: string) => boolean): string[] {
   const out: string[] = [];
@@ -43,9 +58,28 @@ describe('zh.ts', () => {
     const states: Record<UserState, string> = zh.bank.tabs;
     const reasons: Record<ReportReason, string> = zh.word.reportReasons;
     const formats: Record<WebhookFormat, string> = zh.settings.formats;
-    for (const table of [stages, kinds, states, reasons, formats]) {
+    const invalidReasons: Record<InvalidReason, string> = zh.bank.invalidReason; // every client-side rejection has the server's zh reason
+    for (const table of [stages, kinds, states, reasons, formats, invalidReasons]) {
       for (const label of Object.values(table)) expect(label.length).toBeGreaterThan(0);
     }
+  });
+
+  it('is mirrored line for line by the binding block in docs/FRONTEND.md §8', () => {
+    const zhSource = allSources['/src/i18n/zh.ts'];
+    expect(zhSource).toBeTruthy();
+    const frontendMd = frontendDoc;
+    const block = (source: string): string[] => {
+      const start = source.indexOf('export const zh = {');
+      const end = source.indexOf('} as const;', start);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      return source
+        .slice(start, end + '} as const;'.length)
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter((line) => line.length > 0);
+    };
+    expect(block(frontendMd)).toEqual(block(zhSource as string));
   });
 
   it('uses the glossary term for the personal word bank consistently', () => {

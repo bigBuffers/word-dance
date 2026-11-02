@@ -84,6 +84,32 @@ describe('SuggestionRow', () => {
     expect(screen.queryByRole('button', { name: zh.suggestions.undo })).toBeNull();
   });
 
+  it('says "expires today" on the expiry day instead of a zero-day countdown (open and auto rows)', () => {
+    // created at 14:00 Asia/Shanghai, expires 30 days later at the same instant; viewed at 09:00 local on that day
+    const dayOf = new Date('2026-11-13T01:00:00Z');
+    const { rerender } = render(
+      <ul>
+        <SuggestionRow s={suggestion({ created_at: '2026-10-14T06:00:00Z', expires_at: '2026-11-13T06:00:00Z' })} now={dayOf} onAccept={vi.fn()} onReject={vi.fn()} />
+      </ul>,
+    );
+    expect(screen.getByText(zh.suggestions.expiresToday)).toBeTruthy();
+    expect(screen.queryByText(zh.suggestions.expiresIn(0))).toBeNull();
+    const auto = suggestion({ id: 2, type: 'lemmatize', status: 'auto', payload: { from: 'ran', to: 'run' }, created_at: '2026-10-14T06:00:00Z', expires_at: '2026-10-21T06:00:00Z' });
+    rerender(
+      <ul>
+        <SuggestionRow s={auto} now={new Date('2026-10-21T01:00:00Z')} onUndo={vi.fn()} />
+      </ul>,
+    );
+    expect(screen.getByText(zh.suggestions.expiresToday)).toBeTruthy();
+    expect(screen.getByRole('button', { name: zh.suggestions.undo })).toBeTruthy();
+    rerender(
+      <ul>
+        <SuggestionRow s={suggestion({})} now={new Date('2026-11-12T01:00:00Z')} />
+      </ul>,
+    );
+    expect(screen.getByText(zh.suggestions.expiresIn(1))).toBeTruthy();
+  });
+
   it('auto rows offer undo only inside the 7-day window', () => {
     const onUndo = vi.fn();
     const live = suggestion({ id: 2, type: 'lemmatize', status: 'auto', payload: { from: 'ran', to: 'run' }, expires_at: '2026-10-20T00:00:00Z' });
