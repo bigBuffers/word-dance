@@ -6,7 +6,9 @@ Formats (payload shapes): ``generic`` ``{type, date, title, body, counts, words:
 (``url: null`` when no public URL is known) · ``wecom`` ``{"msgtype":"text","text":{"content":…}}`` · ``feishu``
 ``{"msg_type":"text","content":{"text":…}}`` · ``serverchan`` ``{"title":…,"desp":…}`` · ``bark`` ``{"title":…,"body":…,"url":…}``
 (``url`` omitted when unknown). :func:`send_test_webhook` is called synchronously by ``POST /api/settings/webhook/test``
-(WP2's settings router).
+(WP2's settings router) and answers ``{ok, http_status, error, reason}``: ``error`` is the English transport diagnostic
+kept for the admin job ledger, ``reason`` the closed set of API.md 17 (:data:`REASONS`, classified from the exception
+type by :func:`classify_error`) that the UI maps to zh copy.
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ import logging
 import re
 import socket
 import sqlite3
-from typing import Any, Callable, Mapping
+import ssl
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -40,6 +43,12 @@ TEST_TITLE_ZH = "word-Dance 测试消息"
 TEST_BODY_ZH = "Webhook 配置成功，每日词汇将推送到这里。"
 NO_LINK_ZH = email_mod.NO_LINK_ZH
 DELIVERY_ERROR_CHARS = 300
+#: API.md 17 ``reason`` values (``schemas.WebhookTestReason`` mirrors them; ``None`` on success)
+REASONS: tuple[str, ...] = ("dns_failed", "host_not_public", "connect_failed", "timeout", "tls_failed", "http_error", "invalid_url")
+#: substrings of the resolver errors httpcore wraps into a ``ConnectError`` (glibc / macOS / Windows spellings)
+DNS_MARKERS: tuple[str, ...] = ("name or service not known", "nodename nor servname", "name resolution", "getaddrinfo", "no address associated", "name does not resolve")
+#: substrings of the OpenSSL errors httpcore wraps into a ``ConnectError`` (``[SSL: CERTIFICATE_VERIFY_FAILED] …``)
+TLS_MARKERS: tuple[str, ...] = ("ssl", "tls", "certificate")
 
 #: tests replace this with a factory returning an ``httpx.Client`` on a ``MockTransport``
 CLIENT_FACTORY: Callable[[], httpx.Client] | None = None
@@ -50,7 +59,24 @@ class WebhookError(Exception):
 
 
 class SsrfError(WebhookError):
-    """The URL or a resolved address violates the SSRF rules (never retried)."""
+    """The URL or a resolved address violates the SSRF rules (never retried) — ``reason`` ``host_not_public``."""
+
+
+class InvalidUrlError(SsrfError):
+    """The URL itself is unusable for a webhook (scheme, credentials, host, port) — ``reason`` ``invalid_url``."""
+
+
+class DnsError(SsrfError):
+    """The hostname has no usable address records — ``reason`` ``dns_failed`` (final like every :class:`SsrfError`)."""
+
+
+class PostResult(NamedTuple):
+    """What :func:`safe_post` reports: ``error`` and ``reason`` are None on a 2xx response, else the English diagnostic
+    (``rejected: …`` / ``request failed: <Exception>: …`` / ``HTTP <code>``) and one of :data:`REASONS`."""
+
+    http_status: int | None
+    error: str | None
+    reason: str | None
 
 
 # -------------------------------------------------------------------------------------------- SSRF
@@ -84,7 +110,7 @@ def resolve_host(host: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
-        raise SsrfError(f"cannot resolve {host}: {e}") from e
+        raise DnsError(f"cannot resolve {host}: {e}") from e
     ips: list[str] = []
     for _family, _type, _proto, _canon, sockaddr in infos:
         ip = str(sockaddr[0])
@@ -94,15 +120,22 @@ def resolve_host(host: str) -> list[str]:
 
 
 def validate_url(url: str) -> tuple[str, str]:
-    """Shape check: ``https``, a real hostname, no credentials; returns ``(host, normalised_url)``."""
-    parts = urlsplit((url or "").strip())
+    """Shape check: ``https``, a real hostname, no credentials; returns ``(host, normalised_url)``.
+
+    A malformed URL raises :class:`InvalidUrlError`, a hostname the SSRF policy denies (IP literal, ``localhost``,
+    local suffixes, no dot) a plain :class:`SsrfError`.
+    """
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError as e:  # e.g. an unbalanced IPv6 bracket
+        raise InvalidUrlError(f"malformed URL: {e}") from e
     if parts.scheme.lower() != "https":
-        raise SsrfError("only https URLs are allowed")
+        raise InvalidUrlError("only https URLs are allowed")
     if parts.username is not None or parts.password is not None:
-        raise SsrfError("credentials in URL")
+        raise InvalidUrlError("credentials in URL")
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
-        raise SsrfError("URL has no host")
+        raise InvalidUrlError("URL has no host")
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -112,11 +145,11 @@ def validate_url(url: str) -> tuple[str, str]:
     if host == "localhost" or host.endswith(LOCAL_SUFFIXES) or "." not in host:
         raise SsrfError(f"host {host} is not public")
     if not HOSTNAME_RE.match(host):
-        raise SsrfError(f"invalid hostname {host!r}")
+        raise InvalidUrlError(f"invalid hostname {host!r}")
     try:
         port = parts.port
     except ValueError as e:
-        raise SsrfError("invalid port") from e
+        raise InvalidUrlError("invalid port") from e
     netloc = host if port in (None, 443) else f"{host}:{port}"
     return host, urlunsplit(("https", netloc, parts.path or "/", parts.query, ""))
 
@@ -126,7 +159,7 @@ def pin(url: str) -> tuple[str, str]:
     host, url = validate_url(url)
     ips = resolve_host(host)
     if not ips:
-        raise SsrfError(f"{host} has no address records")
+        raise DnsError(f"{host} has no address records")
     for ip in ips:
         if not is_public_ip(ip):
             raise SsrfError(f"{host} resolves to a non-public address {ip}")
@@ -149,15 +182,57 @@ def _client() -> httpx.Client:
     )
 
 
-def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOUT_S, client: httpx.Client | None = None) -> tuple[int | None, str | None]:
-    """POST ``payload`` as JSON under the SSRF rules; returns ``(http_status, error)`` and never raises.
+def _chain(exc: BaseException) -> Iterator[BaseException]:
+    """``exc`` and everything it was raised from (``__cause__`` / ``__context__``), nearest first."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__ or cur.__context__
 
-    ``error`` is None on a 2xx response. An :class:`SsrfError` reason is reported with ``http_status None``.
+
+def classify_error(exc: BaseException) -> str:
+    """The API.md 17 ``reason`` for a failed send, from the exception type (``error`` keeps the raw diagnostic).
+
+    Our own refusals carry their class (:class:`DnsError` → ``dns_failed``, :class:`InvalidUrlError` → ``invalid_url``,
+    any other :class:`SsrfError` → ``host_not_public``). httpx timeouts → ``timeout``; a ``ConnectError`` (or any other
+    transport error) raised from an :class:`ssl.SSLError` or whose text names OpenSSL → ``tls_failed``, from a
+    :class:`socket.gaierror` or whose text names the resolver → ``dns_failed``; everything else → ``connect_failed``.
+    """
+    if isinstance(exc, DnsError):
+        return "dns_failed"
+    if isinstance(exc, InvalidUrlError):
+        return "invalid_url"
+    if isinstance(exc, SsrfError):
+        return "host_not_public"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    chain = list(_chain(exc))
+    if any(isinstance(e, socket.gaierror) for e in chain):
+        return "dns_failed"
+    if any(isinstance(e, ssl.SSLError) for e in chain):
+        return "tls_failed"
+    text = " ".join(str(e) for e in chain).lower()
+    if any(marker in text for marker in DNS_MARKERS):
+        return "dns_failed"
+    if any(marker in text for marker in TLS_MARKERS):
+        return "tls_failed"
+    return "connect_failed"
+
+
+def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOUT_S, client: httpx.Client | None = None) -> PostResult:
+    """POST ``payload`` as JSON under the SSRF rules; returns :class:`PostResult` ``(http_status, error, reason)`` and
+    never raises.
+
+    ``error`` and ``reason`` are None on a 2xx response. An :class:`SsrfError` is reported with ``http_status None``
+    and the ``rejected: …`` diagnostic, a transport failure as ``request failed: <Exception>: …``, a non-2xx answer as
+    ``HTTP <code>`` with ``reason`` ``http_error``; :func:`classify_error` names the other reasons.
     """
     try:
         host, pinned = pin(url)
     except SsrfError as e:
-        return None, f"rejected: {e}"
+        return PostResult(None, f"rejected: {e}", classify_error(e))
     own = client is None
     c = client if client is not None else _client()
     try:
@@ -170,13 +245,13 @@ def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOU
             timeout=timeout_s,
         )
     except httpx.HTTPError as e:
-        return None, f"request failed: {e.__class__.__name__}: {e}"
+        return PostResult(None, f"request failed: {e.__class__.__name__}: {e}", classify_error(e))
     finally:
         if own:
             c.close()
     if 200 <= response.status_code < 300:
-        return response.status_code, None
-    return response.status_code, f"HTTP {response.status_code}"
+        return PostResult(response.status_code, None, None)
+    return PostResult(response.status_code, f"HTTP {response.status_code}", "http_error")
 
 
 # ------------------------------------------------------------------------------------------ formats
@@ -254,7 +329,7 @@ def send_batch_webhook(conn: sqlite3.Connection, cfg: Any, batch_id: int, now: s
         return {"skipped": "channel_disabled"}
     fmt = str(s["webhook_format"] or "generic")
     payload = digest_payload(fmt, email_mod.build_digest(conn, cfg, batch))
-    status, error = safe_post(str(s["webhook_url"]), payload)
+    status, error, _reason = safe_post(str(s["webhook_url"]), payload)  # the ledger keeps the diagnostic text only
     if error is None:
         _set_webhook_status(conn, batch_id, "sent")
         log.info("webhook sent", extra={"event": "webhook_sent", "user_id": int(batch["user_id"]), "status": status})
@@ -265,7 +340,8 @@ def send_batch_webhook(conn: sqlite3.Connection, cfg: Any, batch_id: int, now: s
 
 
 def send_test_webhook(settings_row: Mapping[str, Any]) -> dict[str, Any]:
-    """API.md 17: post a test message in the configured format synchronously → ``{ok, http_status, error}``."""
+    """API.md 17: post a test message in the configured format synchronously → ``{ok, http_status, error, reason}``
+    (``reason`` ∈ :data:`REASONS`, None when ``ok``)."""
     url = str(settings_row.get("webhook_url") or "")
     fmt = str(settings_row.get("webhook_format") or "generic")
     if fmt not in FORMATS:
@@ -273,8 +349,8 @@ def send_test_webhook(settings_row: Mapping[str, Any]) -> dict[str, Any]:
     from datetime import datetime, timezone
 
     payload = build_payload(fmt, TEST_TITLE_ZH, TEST_BODY_ZH, url=None, date=datetime.now(timezone.utc).date().isoformat(), type_="test")
-    status, error = safe_post(url, payload)
-    return {"ok": error is None, "http_status": status, "error": error}
+    result = safe_post(url, payload)
+    return {"ok": result.error is None, "http_status": result.http_status, "error": result.error, "reason": result.reason}
 
 
 @register("send_webhook")
@@ -307,12 +383,17 @@ def handle_send_webhook(ctx: JobContext, jobs: list[Job]) -> None:
 
 __all__ = [
     "CLIENT_FACTORY",
+    "DnsError",
     "FORMATS",
+    "InvalidUrlError",
+    "PostResult",
+    "REASONS",
     "SsrfError",
     "TEST_BODY_ZH",
     "TEST_TITLE_ZH",
     "WebhookError",
     "build_payload",
+    "classify_error",
     "digest_body",
     "digest_payload",
     "handle_send_webhook",

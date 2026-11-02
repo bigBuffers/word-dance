@@ -1,13 +1,14 @@
 // AddWordsPage render tests (FRONTEND §5.6): a pending-AI result row resolves to the validated badge once the poll
-// sees the AI verdict (badge + header count); client-rejected lines carry the server's own reason; duplicate hint.
+// sees the AI verdict (badge + header count); client-rejected lines carry the server's own reason; duplicate hint;
+// the study-today note (`screen.addedToday` / `screen.addedTomorrow`) for rows the server did or did not append today.
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AddResponse, LookupPreview, Srs, UserWord, WordBrief, WordDetail } from '@/api/types';
+import type { AddResponse, AddResult, LookupPreview, Srs, UserWord, WordBrief, WordDetail } from '@/api/types';
 import { AuthProvider } from '@/auth/AuthContext';
 import { ATTENTION_POLL_MS } from '@/components/bank/AttentionBadge';
 import { zh } from '@/i18n/zh';
-import AddWordsPage, { badgeStatus } from './AddWordsPage';
+import AddWordsPage, { badgeStatus, todayNote } from './AddWordsPage';
 
 const ISO = '2026-10-14T00:00:00Z';
 const srs: Srs = { ease: 2.5, interval_days: 0, step: 0, repetitions: 0, lapses: 0, consecutive_good: 0, due_at: null, last_graded_at: null, mastery_suggested: false };
@@ -164,6 +165,56 @@ describe('AddWordsPage', () => {
     expect(screen.getByText(zh.bank.invalidReason.too_many_tokens, { exact: false })).toBeTruthy();
     expect(screen.getAllByText(zh.bank.invalidReason.charset, { exact: false })).toHaveLength(1); // only abc123
     expect((screen.getByRole('button', { name: zh.bank.submit }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a validated word added with study-today on but not appended today (20/day cap) says it starts tomorrow', async () => {
+    const addedResult: AddResult = { ...pendingAdd.results[0]!, status: 'added', resolved_via: 'exact', word: word({ is_valid_english: true }), added_to_today: false };
+    const addedResponse: AddResponse = { ...pendingAdd, results: [addedResult], added: 1, pending_ai: 0 };
+    mockFetch({ ...baseRoutes, '/api/bank/add': () => json(200, addedResponse) });
+    renderPage();
+    await tick(10);
+    fireEvent.click(screen.getByRole('switch', { name: zh.bank.studyToday }));
+    fireEvent.change(textarea(), { target: { value: 'zzzq' } });
+    await tick(300);
+    fireEvent.click(screen.getByRole('button', { name: zh.bank.submit }));
+    await tick(50);
+    expect(badgeText()).toBe(zh.bank.status.added);
+    expect(screen.getByText(zh.screen.addedTomorrow)).toBeTruthy();
+    expect(screen.queryByText(zh.screen.addedToday)).toBeNull();
+  });
+
+  it('an added word the server appended to today says so, and without the switch no note is shown', async () => {
+    const base: AddResult = { ...pendingAdd.results[0]!, status: 'added', resolved_via: 'exact', word: word({ is_valid_english: true }) };
+    let appended = true;
+    mockFetch({ ...baseRoutes, '/api/bank/add': () => json(200, { ...pendingAdd, results: [{ ...base, added_to_today: appended }], added: 1, pending_ai: 0 } satisfies AddResponse) });
+    renderPage();
+    await tick(10);
+    fireEvent.click(screen.getByRole('switch', { name: zh.bank.studyToday }));
+    fireEvent.change(textarea(), { target: { value: 'zzzq' } });
+    await tick(300);
+    fireEvent.click(screen.getByRole('button', { name: zh.bank.submit }));
+    await tick(50);
+    expect(screen.getByText(zh.screen.addedToday)).toBeTruthy();
+    expect(screen.queryByText(zh.screen.addedTomorrow)).toBeNull();
+
+    appended = false;
+    fireEvent.click(screen.getByRole('switch', { name: zh.bank.studyToday })); // off again: a plain add carries no note
+    fireEvent.change(textarea(), { target: { value: 'zzzq' } });
+    await tick(300);
+    fireEvent.click(screen.getByRole('button', { name: zh.bank.submit }));
+    await tick(50);
+    expect(screen.queryByText(zh.screen.addedTomorrow)).toBeNull();
+  });
+
+  it('todayNote: every in-bank status with the switch on and no study row today reads "tomorrow"; invalid/ambiguous never do', () => {
+    for (const status of ['added', 'readded', 'exists', 'pending_ai'] as const) {
+      expect(todayNote({ status, added_to_today: false }, true)).toBe(zh.screen.addedTomorrow);
+      expect(todayNote({ status, added_to_today: false }, false)).toBeNull();
+      expect(todayNote({ status, added_to_today: true }, true)).toBe(zh.screen.addedToday);
+    }
+    for (const status of ['ambiguous', 'invalid'] as const) {
+      expect(todayNote({ status, added_to_today: false }, true)).toBeNull();
+    }
   });
 
   it('a line repeating an earlier lemma gets the duplicate hint', async () => {

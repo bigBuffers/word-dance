@@ -1,6 +1,7 @@
 // Import reduction (API.md 11/75), the stage toggle, and the push-channel test buttons (FRONTEND §5.8): the webhook
 // test is offered only once the switch is on AND a URL is saved (the server requires both), its failures are
-// reported in zh (no transport text), and the queued test e-mail is announced as queued, not as a success.
+// reported in zh from the response's closed-set `reason` (API.md 17; HTTP status / connection advice as the fallback,
+// never the transport text), and the queued test e-mail is announced as queued, not as a success.
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,7 +81,7 @@ const enableWebhook = async () => {
 describe('push settings test buttons', () => {
   beforeEach(() => {
     calls = [];
-    webhookTestResponse = { ok: true, http_status: 200, error: null };
+    webhookTestResponse = { ok: true, http_status: 200, error: null, reason: null };
     settings = {
       timezone: 'Asia/Shanghai',
       push_time: '08:00',
@@ -124,7 +125,7 @@ describe('push settings test buttons', () => {
     expect(calls.filter((c) => c.path === '/api/settings/webhook/test').map((c) => c.status)).toEqual([200]);
   });
 
-  it('a failed webhook test is reported in zh without the transport text', async () => {
+  it('a failed webhook test is reported in zh without the transport text (no reason → connection advice)', async () => {
     webhookTestResponse = { ok: false, http_status: null, error: 'request failed: ConnectError: [Errno 111] Connection refused' };
     renderSettings();
     await screen.findByRole('button', { name: zh.settings.webhookTest });
@@ -134,6 +135,19 @@ describe('push settings test buttons', () => {
     fireEvent.click(testButton());
     expect(await screen.findByText(zh.settings.webhookFail(zh.settings.webhookFailConnect))).toBeTruthy();
     expect(screen.queryByText(/ConnectError|Connection refused|request failed/)).toBeNull();
+  });
+
+  it('a failed webhook test names the server reason (dns_failed) in zh, never the English diagnostic', async () => {
+    webhookTestResponse = { ok: false, http_status: null, error: 'rejected: cannot resolve hooks.example.com: [Errno -2] Name or service not known', reason: 'dns_failed' };
+    renderSettings();
+    await screen.findByRole('button', { name: zh.settings.webhookTest });
+    await saveUrl();
+    await enableWebhook();
+    await waitFor(() => expect(testButton().disabled).toBe(false));
+    fireEvent.click(testButton());
+    expect(await screen.findByText(zh.settings.webhookFail(zh.settings.webhookFailDns))).toBeTruthy();
+    expect(screen.queryByText(zh.settings.webhookFail(zh.settings.webhookFailConnect))).toBeNull();
+    expect(screen.queryByText(/rejected|cannot resolve|Name or service/)).toBeNull();
   });
 
   it('the test e-mail toast says the mail was queued, not that the test succeeded', async () => {
@@ -146,10 +160,29 @@ describe('push settings test buttons', () => {
 });
 
 describe('webhookFailureReason', () => {
-  it('maps a server-side failure to zh cause + action copy', () => {
+  const failed = { http_status: null, error: 'request failed: ConnectError: something went wrong' };
+
+  it('keys on the closed-set reason first (API.md 17), one precise zh cause + action per value', () => {
+    expect(webhookFailureReason({ ...failed, reason: 'dns_failed' })).toBe(zh.settings.webhookFailDns);
+    expect(webhookFailureReason({ ...failed, reason: 'host_not_public' })).toBe(zh.settings.webhookFailPrivate);
+    expect(webhookFailureReason({ ...failed, reason: 'connect_failed' })).toBe(zh.settings.webhookFailConnect);
+    expect(webhookFailureReason({ ...failed, reason: 'timeout' })).toBe(zh.settings.webhookFailTimeout);
+    expect(webhookFailureReason({ ...failed, reason: 'tls_failed' })).toBe(zh.settings.webhookFailTls);
+    expect(webhookFailureReason({ ...failed, reason: 'invalid_url' })).toBe(zh.settings.webhookFailInvalidUrl);
+    expect(webhookFailureReason({ http_status: 404, error: 'HTTP 404', reason: 'http_error' })).toBe(zh.settings.webhookFailHttp(404));
+    const copies = new Set([zh.settings.webhookFailDns, zh.settings.webhookFailPrivate, zh.settings.webhookFailConnect, zh.settings.webhookFailTimeout, zh.settings.webhookFailTls, zh.settings.webhookFailInvalidUrl]);
+    expect(copies.size).toBe(6); // every reason reads differently
+  });
+
+  it('falls back to the HTTP status, then the connection advice, and never echoes `error`', () => {
     expect(webhookFailureReason({ http_status: 404, error: 'HTTP 404' })).toBe(zh.settings.webhookFailHttp(404));
     expect(webhookFailureReason({ http_status: null, error: 'rejected: cannot resolve hooks.example.com' })).toBe(zh.settings.webhookFailConnect);
     expect(webhookFailureReason({ http_status: null, error: null })).toBe(zh.settings.webhookFailConnect);
+    expect(webhookFailureReason({ http_status: null, error: null, reason: null })).toBe(zh.settings.webhookFailConnect);
+    expect(webhookFailureReason({ http_status: null, error: 'HTTP ?', reason: 'http_error' })).toBe(zh.settings.webhookFailConnect); // no status to show
+    for (const reason of ['dns_failed', 'host_not_public', 'connect_failed', 'timeout', 'tls_failed', 'invalid_url', 'http_error'] as const) {
+      expect(webhookFailureReason({ http_status: 502, error: 'request failed: ConnectError: boom', reason })).not.toContain('ConnectError');
+    }
   });
 });
 

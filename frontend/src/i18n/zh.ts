@@ -77,6 +77,8 @@ export const zh = {
               webhook: 'Webhook 推送', webhookUrl: 'Webhook 地址（https）', webhookFormat: '格式', formats: { generic: '通用 JSON', wecom: '企业微信机器人', feishu: '飞书机器人', serverchan: 'Server酱', bark: 'Bark' },
               webhookTest: '发送测试', webhookOk: '测试成功', webhookFail: (e: string) => `测试失败：${e}`, webhookEnableFirst: '请先开启 Webhook 推送',
               webhookFailHttp: (n: number) => `目标返回 HTTP ${n}，请检查地址或令牌`, webhookFailConnect: '无法连接到目标地址，请检查地址后重试',
+              webhookFailDns: '域名无法解析，请检查地址拼写', webhookFailPrivate: '地址不是公网地址，已拒绝；请填写公网 https 地址', webhookFailTimeout: '连接超时，请稍后重试或检查目标服务',
+              webhookFailTls: 'HTTPS 证书校验失败，请检查目标站点的证书', webhookFailInvalidUrl: '地址格式无效，请检查后重新填写',
               showImages: '显示配图', zhExamples: '例句译文', zhModes: { tap: '点按显示', always: '总是显示' }, autoPronounce: '自动发音', accent: '口音', accents: { 'en-US': '美音', 'en-GB': '英音' },
               displayName: '昵称', changePassword: '修改密码', currentPassword: '当前密码', newPassword: '新密码', export: '导出数据', exportCsv: 'CSV', exportJson: 'JSON',
               import: '导入数据', importHint: '选择之前导出的 CSV 或 JSON 文件', importDone: (n: number, m: number) => `已导入 ${n} 个，跳过 ${m} 个`,
