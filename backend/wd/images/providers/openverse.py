@@ -80,7 +80,13 @@ def parse_search(data: dict) -> list[Candidate]:
         if not isinstance(r, dict):
             continue
         url = str(r.get("url") or "")
-        if not url.startswith("https://") or httpx.URL(url).host.lower() == API_HOST:
+        if not url.startswith("https://"):
+            continue
+        try:
+            host = httpx.URL(url).host.lower()
+        except httpx.InvalidURL:
+            continue  # a URL httpx cannot build a request for (C0/DEL byte, bad port) — one result, not the whole search
+        if host == API_HOST:
             continue  # never download through the API host (thumbnails spend quota)
         ref = str(r.get("id") or "")
         if not ref or ref in seen or url in seen:

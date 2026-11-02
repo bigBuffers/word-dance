@@ -123,7 +123,16 @@ def resolve_host(host: str) -> list[str]:
 
 def validate_url(url: str) -> tuple[str, str]:
     """Check the URL shape; returns ``(host, url)`` with the host lower-cased. Raises :class:`SsrfError`."""
-    parts = urlsplit(url.strip())
+    raw = url.strip()
+    try:
+        # the whole URL, not only the host: a C0/DEL byte in the path or query, or a port that is not a number, would
+        # otherwise surface inside the request as httpx.InvalidURL / ValueError — neither is an httpx.HTTPError, so
+        # nothing below would turn it into a FetchError and the whole fetch job would crash on one candidate
+        httpx.URL(raw)
+        parts = urlsplit(raw)
+        port = parts.port
+    except (httpx.InvalidURL, ValueError) as e:
+        raise SsrfError(f"invalid URL: {e}") from e
     if parts.scheme.lower() != "https":
         raise SsrfError("only https URLs are downloaded")
     if parts.username is not None or parts.password is not None:
@@ -141,7 +150,7 @@ def validate_url(url: str) -> tuple[str, str]:
         raise SsrfError(f"host {host} is not public")
     if not HOSTNAME_RE.match(host):
         raise SsrfError(f"invalid hostname {host!r}")
-    if parts.port not in (None, 443):
+    if port not in (None, 443):
         raise SsrfError("only port 443 is allowed")
     normalised = urlunsplit(("https", host, parts.path or "/", parts.query, ""))
     return host, normalised
@@ -219,7 +228,7 @@ def safe_download(
                         buf += chunk
                         if len(buf) > cap:
                             raise FetchError(f"body exceeds the {cap}-byte cap")
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, httpx.InvalidURL) as e:  # InvalidURL is not an HTTPError (belt and braces to validate_url)
                 raise FetchError(f"request failed: {e.__class__.__name__}: {e}") from e
             data = bytes(buf)
             if sniff_mime(data) is None:

@@ -3,10 +3,11 @@
     fetch_image {word_id, exclude?: [str], provider?: str, query?: str}      (IoWorker, one job at a time)
       keywords = query or content.image_keywords[:3] or [lemma]
       for kw in keywords: for provider in chain (skip Openverse at priority ≥ 90; skip when quota.allow is False):
-          cands = provider.search(kw, 10); quota.record(provider)
+          cands = provider.search(kw, 10); quota.record(provider)      (any provider failure is counted and skipped)
           for best in select.rank(cands, kw, exclude)[:3]: img = fetch.download_and_store(best) → activate → done
-      all failed → generate_svg enqueued when WD_SVG_VIA_CLAUDE=1, priority < 90 and the word is studied;
-                   words.image_state = 'failed' (the template card is served; the SVG replaces it when it lands)
+      all failed, image still active (换一张 found nothing new) → kept, image_state = 'ready' — never an SVG over a photo
+      all failed, no image → generate_svg enqueued when WD_SVG_VIA_CLAUDE=1, priority < 90 and the word is studied;
+                             words.image_state = 'failed' (the template card is served; the SVG replaces it when it lands)
 """
 
 from __future__ import annotations
@@ -138,7 +139,10 @@ def fetch_for_word(
     if provider == "claude_svg":
         if not cfg.ai_enabled:
             return FetchOutcome(STATUS_SKIPPED, detail="AI disabled; no SVG job")
-        svg_job = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id)}, dedupe_key=f"svg:{int(word_id)}", priority=int(priority), now=now)
+        # An explicit request (API.md 69, `wd fetch-image --provider claude_svg`) draws even over an active photo, so it
+        # carries `requested` on its own live key: folded into a fallback `svg:<id>` job it would keep that job's payload
+        # (the dedupe UPSERT never rewrites payload_json) and the handler would skip it as soon as a photo is active.
+        svg_job = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id), "requested": True}, dedupe_key=f"svg:{int(word_id)}:req", priority=int(priority), now=now)
         return FetchOutcome(STATUS_SVG_QUEUED, svg_job_id=svg_job, detail="generate_svg enqueued on request")
 
     names: tuple[str, ...] = (provider,) if provider else tuple(cfg.image_providers)
@@ -168,6 +172,11 @@ def fetch_for_word(
                     quota.mark_error(conn, p.name, now, str(e))
                     log.warning("provider %s failed: %s", p.name, e, extra={"provider": p.name, "event": "provider_error"})
                 continue
+            except Exception as e:  # noqa: BLE001 — a response the parser chokes on is provider trouble, not a job crash
+                quota.record(conn, p.name, now)  # the request was made: it must count against the quota
+                quota.mark_error(conn, p.name, now, f"{e.__class__.__name__}: {e}"[:500])
+                log.exception("provider %s crashed on %r; trying the next one", p.name, kw, extra={"provider": p.name, "event": "provider_error"})
+                continue
             quota.record(conn, p.name, now)
             quota.mark_ok(conn, p.name, now)
             for best in select.rank(cands, kw, excluded, used_refs=used_refs)[:CANDIDATES_PER_SEARCH]:
@@ -186,10 +195,13 @@ def fetch_for_word(
                     file_path=stored.file_path,
                 )
 
-    svg_job_id = None
-    if _svg_allowed(cfg, int(priority), allow_svg) and service.word_is_studied(conn, word_id, now):
-        svg_job_id = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id)}, dedupe_key=f"svg:{int(word_id)}", priority=int(priority), now=now)
+    # DESIGN §9 / §0.1 row 7: the Claude SVG stands in only when NO acceptable photo exists. A 换一张 that finds nothing
+    # new keeps the current image — it is never traded for a drawing, and the SVG sub-cap is not spent on a word that
+    # already has a picture. (The report flow is unaffected: reject_active_image clears active_image_id first.)
     has_active = service.active_image_row(conn, word_id) is not None
+    svg_job_id = None
+    if not has_active and _svg_allowed(cfg, int(priority), allow_svg) and service.word_is_studied(conn, word_id, now):
+        svg_job_id = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id)}, dedupe_key=f"svg:{int(word_id)}", priority=int(priority), now=now)
     store.set_image_state(conn, word_id, STATUS_READY if has_active else STATUS_FAILED, now=now)
     return FetchOutcome(STATUS_FAILED, svg_job_id=svg_job_id, detail="no acceptable photo from any provider" + (" (current image kept)" if has_active else ""))
 
