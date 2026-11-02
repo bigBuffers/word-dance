@@ -279,6 +279,37 @@ def test_fk_child_columns_of_the_account_deletion_cascade_are_indexed(conn, tabl
     assert "SCAN" not in plan and "INDEX" in plan, plan
 
 
+# ----------------------------------------------------------------------------------- 0009: phonetic delimiters
+def test_upgrade_strips_ipa_delimiters_from_stored_phonetics(settings, tmp_path: Path):
+    """Before ai/common.clean_phonetic a Claude lookup could store "/…/" or "[…]"; the UI adds its own slashes, so those rows
+    rendered as //…//. 0009 repairs them once and leaves ECDICT-style values ("ə'biliti") alone."""
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", baseline / "0001_init.sql")
+    c = db.connect(settings.db_path)
+    try:
+        assert db.run_migrations(c, migrations_dir=baseline).applied == [(1, "init")]
+        c.executemany(
+            "INSERT INTO words(id, lemma, display, source, phonetic) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, "gdp", "GDP", "claude", "/ˌdʒiː diː ˈpiː/"),
+                (2, "abandon", "abandon", "claude", "[əˈbændən]"),
+                (3, "ability", "ability", "seed", "ə'biliti"),
+                (4, "blank", "blank", "claude", "/ /"),
+                (5, "none", "none", "seed", None),
+                (6, "slash", "slash", "seed", "a/b"),  # an inner slash is not a delimiter
+            ],
+        )
+        result = db.run_migrations(c)
+        assert (9, "strip_phonetic_delimiters") in result.applied
+        rows = {r["id"]: r["phonetic"] for r in c.execute("SELECT id, phonetic FROM words ORDER BY id")}
+        assert rows == {1: "ˌdʒiː diː ˈpiː", 2: "əˈbændən", 3: "ə'biliti", 4: None, 5: None, 6: "a/b"}
+        assert db.run_migrations(c).applied == []  # idempotent: a second run matches nothing
+        assert not c.in_transaction
+    finally:
+        c.close()
+
+
 def test_list_migration_files_rejects_duplicates(tmp_path: Path):
     (tmp_path / "0001_a.sql").write_text("", encoding="utf-8")
     (tmp_path / "0001_b.sql").write_text("", encoding="utf-8")
