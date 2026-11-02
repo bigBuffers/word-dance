@@ -28,6 +28,14 @@
 --     autocommit=True connection, then conn.executescript(file)) and, in that same transaction, executes
 --     INSERT INTO schema_migrations(version, name) VALUES (NNNN, '<name>'); a failing file ROLLBACKs both
 --   * migration files therefore NEVER insert into schema_migrations themselves (this file included — see §10)
+--   * the RUNNER also owns foreign-key enforcement: `PRAGMA foreign_keys=OFF` BEFORE the BEGIN (inside a transaction the
+--     PRAGMA is a silent no-op), `PRAGMA foreign_key_check` before the bookkeeping row (any violation fails the file),
+--     `PRAGMA foreign_keys=ON` again afterwards. This is SQLite's own recipe for the table rebuild a CHECK-list change
+--     needs (CREATE new → INSERT … SELECT → DROP old → RENAME): with enforcement on, DROP TABLE of a parent would
+--     cascade-delete every child row and be committed as applied. Files must not toggle PRAGMA foreign_keys themselves,
+--     must delete child rows explicitly when they delete parents (no ON DELETE actions run during a migration), and
+--     PRAGMA defer_foreign_keys / rename-first orderings are NOT alternatives (tests/unit/test_db.py)
+--   * later files (0008_fk_child_indexes.sql, …) are additive; this file stays the complete baseline schema
 CREATE TABLE schema_migrations (
   version    INTEGER PRIMARY KEY,                       -- NNNN from the file name NNNN_name.sql (written by the runner)
   name       TEXT    NOT NULL,

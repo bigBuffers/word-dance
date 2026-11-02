@@ -135,6 +135,7 @@ e-mail verification codes.
 | Service down for days | first tick builds **today's** batches only; `downtime` event; history shows 「服务器离线」 | nothing — missed days are not back-filled by design |
 | A job is `dead` | 管理 → 任务 (or `GET /api/admin/jobs?status=dead`) with `last_error` | fix the cause (auth, budget, provider), then 重试 / `POST /api/admin/jobs/requeue-dead`; nightly maintenance requeues dead content/lookup jobs once |
 | Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must |
+| Service lost the worker lease (log `lease_lost` / `lease_fenced`) | its renewals lapsed > 90 s (stall, paused VM) and another instance took the lease; the losing process keeps serving requests but claims no jobs and sweeps nothing until `lease_reacquired` / `lease_resumed` | stop the extra instance (`ps -ef | grep 'wd serve'`); the fenced service re-acquires within 30 s on its own — no restart needed |
 | Restore needed | — | §3 |
 | Flag tier fell back to 0 | `claude_probe_fallback` event | inspect the stderr excerpt in the event; upgrade the CLI or stay on tier 0 (fully functional) |
 | Reverse proxy / HTTPS wanted later | — | `deploy/install.sh --with-caddy words.example.com` (sets `WD_HOST=127.0.0.1`, `WD_PUBLIC_URL`, `WD_TRUST_PROXY=1`) |

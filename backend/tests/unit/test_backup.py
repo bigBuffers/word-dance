@@ -180,10 +180,11 @@ def test_pre_hook_runs_before_the_first_pending_file(settings, conn, tmp_path):
     mig = tmp_path / "migrations"
     mig.mkdir()
     shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", mig / "0001_init.sql")
-    (mig / "0002_extra.sql").write_text("CREATE TABLE extra(x INTEGER);\n", encoding="utf-8")
+    (mig / "0099_extra.sql").write_text("CREATE TABLE extra(x INTEGER);\n", encoding="utf-8")
+    before = db.current_version(conn)  # `conn` is at the latest shipped version
     result = db.run_migrations(conn, pre_hook=db.backup_pre_hook(), migrations_dir=mig)
-    assert result.applied == [(2, "extra")]
-    archive = settings.backups_dir / "pre-migrate-1-to-2.db.gz"
+    assert result.applied == [(99, "extra")]
+    archive = settings.backups_dir / f"pre-migrate-{before}-to-99.db.gz"
     assert archive.is_file()
     copy = _gunzip(archive, tmp_path / "pre.db")
     c = sqlite3.connect(copy)
@@ -198,12 +199,13 @@ def test_pre_hook_failure_blocks_the_migration(settings, conn, tmp_path, monkeyp
     mig = tmp_path / "migrations"
     mig.mkdir()
     shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", mig / "0001_init.sql")
-    (mig / "0002_extra.sql").write_text("CREATE TABLE extra(x INTEGER);\n", encoding="utf-8")
+    (mig / "0099_extra.sql").write_text("CREATE TABLE extra(x INTEGER);\n", encoding="utf-8")
+    before = db.current_version(conn)
     monkeypatch.setattr(backup, "integrity_ok", lambda path: (False, "corrupt"))
     with pytest.raises(backup.BackupError):
         db.run_migrations(conn, pre_hook=db.backup_pre_hook(), migrations_dir=mig)
     assert "extra" not in db.table_names(conn)
-    assert db.current_version(conn) == 1
+    assert db.current_version(conn) == before
     assert conn.execute("SELECT COUNT(*) FROM system_events WHERE kind='backup_failed'").fetchone()[0] == 1
 
 
