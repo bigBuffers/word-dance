@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# usage: deploy/install.sh [--with-caddy DOMAIN | --with-nginx DOMAIN] [--with-ecdict] [--no-restart] [--dry-run] [--contact-email ADDR]
+# usage: deploy/install.sh [--with-caddy DOMAIN | --with-nginx DOMAIN] [--with-ecdict] [--no-restart] [--dry-run] [--contact-email ADDR] [--move-data]
 #        options may be given in any order and combined, e.g. deploy/install.sh --with-ecdict --with-caddy words.example.com --no-restart
+#        data dir: $WD_DATA_DIR when set, else the directory the installed unit's EnvironmentFile= points at, else /home/sqin/word-dance-data;
+#        a WD_DATA_DIR that differs from the installed unit's directory is refused (exit 2) unless --move-data re-points the units (ops.md §5)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 DATA=${WD_DATA_DIR:-/home/sqin/word-dance-data}
+UNIT_FILE=${WD_UNIT_FILE:-/etc/systemd/system/word-dance.service}      # WD_UNIT_FILE: the tests point it at a temp file so the dry runs stay hermetic
+UNIT_DATA=$(sed -n 's|^EnvironmentFile=\(.*\)/\.env$|\1|p' "$UNIT_FILE" 2>/dev/null | head -n1 || true)   # data dir of the installed instance ('' when none)
 RUN_USER=${RUN_USER:-$(id -un)}            # must be the user whose `claude` CLI is authenticated (sqin)
 PY=python3
-PROXY=""; DOMAIN=""; ECDICT=0; NO_RESTART=0; DRY=0; CONTACT=${WD_CONTACT_EMAIL:-}
+PROXY=""; DOMAIN=""; ECDICT=0; NO_RESTART=0; DRY=0; MOVE_DATA=0; CONTACT=${WD_CONTACT_EMAIL:-}
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-caddy|--with-nginx) PROXY=${1#--with-}; DOMAIN=${2:?domain required after $1}; shift;;
@@ -14,13 +18,27 @@ while [ $# -gt 0 ]; do
     --no-restart)    NO_RESTART=1;;
     --dry-run)       DRY=1;;
     --contact-email) CONTACT=${2:?address required after --contact-email}; shift;;
-    -h|--help)       sed -n '2,3p' "$0"; exit 0;;
-    *) echo "unknown option: $1"; sed -n '2,3p' "$0"; exit 64;;
+    --move-data)     MOVE_DATA=1;;
+    -h|--help)       sed -n '2,5p' "$0"; exit 0;;
+    *) echo "unknown option: $1"; sed -n '2,5p' "$0"; exit 64;;
   esac
   shift
 done
 log(){ printf '\n==> %s\n' "$*"; }
 run(){ if [ "$DRY" = 1 ]; then echo "+ $*"; else "$@"; fi; }     # EVERY mutating step goes through run(); --dry-run prints them and changes nothing
+
+# 0. data dir (read-only, so it also runs under --dry-run) ------------------
+# An installed instance owns its data directory: an upgrade run without WD_DATA_DIR follows the unit (a moved directory,
+# ops.md §5, no longer gets a fresh empty instance at the default path), and an explicit WD_DATA_DIR that disagrees with the
+# unit is refused before anything is changed — --move-data says the disagreement is intended and step 7 re-points both units.
+if [ -n "$UNIT_DATA" ]; then
+  if [ -z "${WD_DATA_DIR:-}" ]; then
+    DATA=$UNIT_DATA; echo "data dir from the installed unit: $DATA"
+  elif [ "$WD_DATA_DIR" != "$UNIT_DATA" ]; then
+    if [ "$MOVE_DATA" = 1 ]; then echo "WARN: --move-data: the installed unit ($UNIT_FILE) uses $UNIT_DATA; both units will be re-pointed at $DATA"
+    else echo "ERROR: WD_DATA_DIR=$WD_DATA_DIR but the installed unit ($UNIT_FILE) uses $UNIT_DATA — unset WD_DATA_DIR to upgrade that instance, or pass --move-data after moving the directory (ops.md §5)"; exit 2; fi
+  fi
+fi
 
 # 1. preflight (read-only) -------------------------------------------------
 log "preflight"

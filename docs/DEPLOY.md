@@ -25,14 +25,18 @@ Facts this relies on (FACTS §1/§3): Ubuntu 24.04.4, Python 3.12.3 with `python
 
 ```bash
 #!/usr/bin/env bash
-# usage: deploy/install.sh [--with-caddy DOMAIN | --with-nginx DOMAIN] [--with-ecdict] [--no-restart] [--dry-run] [--contact-email ADDR]
+# usage: deploy/install.sh [--with-caddy DOMAIN | --with-nginx DOMAIN] [--with-ecdict] [--no-restart] [--dry-run] [--contact-email ADDR] [--move-data]
 #        options may be given in any order and combined, e.g. deploy/install.sh --with-ecdict --with-caddy words.example.com --no-restart
+#        data dir: $WD_DATA_DIR when set, else the directory the installed unit's EnvironmentFile= points at, else /home/sqin/word-dance-data;
+#        a WD_DATA_DIR that differs from the installed unit's directory is refused (exit 2) unless --move-data re-points the units (ops.md §5)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 DATA=${WD_DATA_DIR:-/home/sqin/word-dance-data}
+UNIT_FILE=${WD_UNIT_FILE:-/etc/systemd/system/word-dance.service}      # WD_UNIT_FILE: the tests point it at a temp file so the dry runs stay hermetic
+UNIT_DATA=$(sed -n 's|^EnvironmentFile=\(.*\)/\.env$|\1|p' "$UNIT_FILE" 2>/dev/null | head -n1 || true)   # data dir of the installed instance ('' when none)
 RUN_USER=${RUN_USER:-$(id -un)}            # must be the user whose `claude` CLI is authenticated (sqin)
 PY=python3
-PROXY=""; DOMAIN=""; ECDICT=0; NO_RESTART=0; DRY=0; CONTACT=${WD_CONTACT_EMAIL:-}
+PROXY=""; DOMAIN=""; ECDICT=0; NO_RESTART=0; DRY=0; MOVE_DATA=0; CONTACT=${WD_CONTACT_EMAIL:-}
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-caddy|--with-nginx) PROXY=${1#--with-}; DOMAIN=${2:?domain required after $1}; shift;;
@@ -40,13 +44,27 @@ while [ $# -gt 0 ]; do
     --no-restart)    NO_RESTART=1;;
     --dry-run)       DRY=1;;
     --contact-email) CONTACT=${2:?address required after --contact-email}; shift;;
-    -h|--help)       sed -n '2,3p' "$0"; exit 0;;
-    *) echo "unknown option: $1"; sed -n '2,3p' "$0"; exit 64;;
+    --move-data)     MOVE_DATA=1;;
+    -h|--help)       sed -n '2,5p' "$0"; exit 0;;
+    *) echo "unknown option: $1"; sed -n '2,5p' "$0"; exit 64;;
   esac
   shift
 done
 log(){ printf '\n==> %s\n' "$*"; }
 run(){ if [ "$DRY" = 1 ]; then echo "+ $*"; else "$@"; fi; }     # EVERY mutating step goes through run(); --dry-run prints them and changes nothing
+
+# 0. data dir (read-only, so it also runs under --dry-run) ------------------
+# An installed instance owns its data directory: an upgrade run without WD_DATA_DIR follows the unit (a moved directory,
+# ops.md §5, no longer gets a fresh empty instance at the default path), and an explicit WD_DATA_DIR that disagrees with the
+# unit is refused before anything is changed — --move-data says the disagreement is intended and step 7 re-points both units.
+if [ -n "$UNIT_DATA" ]; then
+  if [ -z "${WD_DATA_DIR:-}" ]; then
+    DATA=$UNIT_DATA; echo "data dir from the installed unit: $DATA"
+  elif [ "$WD_DATA_DIR" != "$UNIT_DATA" ]; then
+    if [ "$MOVE_DATA" = 1 ]; then echo "WARN: --move-data: the installed unit ($UNIT_FILE) uses $UNIT_DATA; both units will be re-pointed at $DATA"
+    else echo "ERROR: WD_DATA_DIR=$WD_DATA_DIR but the installed unit ($UNIT_FILE) uses $UNIT_DATA — unset WD_DATA_DIR to upgrade that instance, or pass --move-data after moving the directory (ops.md §5)"; exit 2; fi
+  fi
+fi
 
 # 1. preflight (read-only) -------------------------------------------------
 log "preflight"
@@ -172,7 +190,7 @@ else echo "word-Dance is running at http://${LAN_IP:-$(hostname -I | awk '{print
 echo "registration mode: ${WD_REGISTRATION_MODE:-invite} — the first account registered becomes admin; afterwards create invite codes with: $REPO/.venv/bin/wd invite --uses 5 --days 7"
 ```
 
-Behaviour: re-running after `git pull` upgrades dependencies, rebuilds the frontend, **stops the running unit** (unless `--no-restart`), applies new migrations (with a pre-migrate snapshot), starts the unit again, and never touches `.env` (apart from filling an empty `WD_PUBLIC_URL` with the LAN URL on a proxy-less install), the DB or images. `.env` is validated before it is sourced: every line must be `KEY="value"` (§4). The running-unit probe (`systemctl is-active`) needs no privilege, so it also runs without passwordless `sudo -n`: the unit is then neither stopped nor restarted, the script prints the additive-only NOTE plus `WARN: no passwordless sudo — the OLD version keeps serving …`, the step-7 fallback says `systemctl restart word-dance` (not `enable --now`, a no-op on an active unit), and step 9 ends with `health OK, but the OLD process answered — … run: sudo systemctl restart word-dance` instead of the success line. Under `--dry-run` on a fresh box the `WD_PUBLIC_URL` branch reads `deploy/env.example` (the file step 5 would have copied) so the planned `sed -i` is printed and nothing is read from the absent `.env`.
+Behaviour: re-running after `git pull` upgrades dependencies, rebuilds the frontend, **stops the running unit** (unless `--no-restart`), applies new migrations (with a pre-migrate snapshot), starts the unit again, and never touches `.env` (apart from filling an empty `WD_PUBLIC_URL` with the LAN URL on a proxy-less install), the DB or images. `.env` is validated before it is sourced: every line must be `KEY="value"` (§4). **Data directory** (step 0, read-only, so it also runs under `--dry-run`): `WD_DATA_DIR` when set; otherwise the directory named by the `EnvironmentFile=<dir>/.env` line of the installed unit (`/etc/systemd/system/word-dance.service`; `WD_UNIT_FILE` overrides that path so the tests stay hermetic), printed as `data dir from the installed unit: …`; otherwise `/home/sqin/word-dance-data`. So an upgrade after the ops.md §5 move needs no variable, and a plain run can no longer create a fresh, empty instance at the default path and re-point the unit at it. A `WD_DATA_DIR` that **differs** from the installed unit's directory is refused — `ERROR: WD_DATA_DIR=… but the installed unit (…) uses …`, exit 2 before step 1, nothing planned or changed — unless `--move-data` is given: that is the move itself (ops.md §5), the script prints `WARN: --move-data: …` and step 7 re-renders both units with the new `EnvironmentFile=`. The running-unit probe (`systemctl is-active`) needs no privilege, so it also runs without passwordless `sudo -n`: the unit is then neither stopped nor restarted, the script prints the additive-only NOTE plus `WARN: no passwordless sudo — the OLD version keeps serving …`, the step-7 fallback says `systemctl restart word-dance` (not `enable --now`, a no-op on an active unit), and step 9 ends with `health OK, but the OLD process answered — … run: sudo systemctl restart word-dance` instead of the success line. Under `--dry-run` on a fresh box the `WD_PUBLIC_URL` branch reads `deploy/env.example` (the file step 5 would have copied) so the planned `sed -i` is printed and nothing is read from the absent `.env`.
 
 `deploy/fetch_ecdict.sh <DATA>` (optional, `--with-ecdict`): downloads `https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip` (216 MB) with `curl -fL --retry 3 -o "$DATA/tmp/ecdict-sqlite-28.zip"`, verifies `sha256sum` against the pinned `ECDICT_SHA256=ea01f76a3b3351021ce47077e89234465cc9441c8793054495320d06c0c3f3f6` (computed from the verified release asset on this box; mismatch → delete + exit 1), extracts with the **stdlib** `python3 -m zipfile -e "$DATA/tmp/ecdict-sqlite-28.zip" "$DATA/tmp/ecdict"` (the zip's single member is `stardict.db`, 851 MB; no `unzip` binary exists on the box — FACTS §1), moves it to `$DATA/stardict.db` (0600), removes the zip, and writes `WD_ECDICT_DB_PATH="$DATA/stardict.db"` into `.env` (quoted). Idempotent: exits 0 at once when `$DATA/stardict.db` already exists. Needs ≈ 1.1 GB free in `$DATA` during extraction (checked first). Options are parsed by a `while` loop, so they combine in any order (`--with-ecdict --with-caddy DOMAIN --no-restart`). `--dry-run` routes every mutating step through `run()`, which prints `+ <command>` instead of executing it, and exits before the health check — so `deploy/install.sh --dry-run` is safe on a fresh box (WP9 acceptance). `WD_CONTACT_EMAIL` comes from the environment, `--contact-email`, or an interactive prompt when `.env` is first created (falls back to `admin@localhost`). The printed URL is consistent with the bind: default `WD_HOST=0.0.0.0` → LAN URL; with a proxy → `127.0.0.1` + the https URL.
 
@@ -366,7 +384,7 @@ Vite binds `localhost` only (`::1` on this box — `vite.config.ts` sets no `ser
 
 ## 10. Upgrade and rollback
 
-Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, frontend, then **the unit is stopped**, migrations run with the pre-migrate snapshot, and the unit is started again (downtime ≈ the migration time + 3 s, typically < 30 s; in-flight jobs are recovered by the stale-lock sweep; a `claude` call in flight is allowed up to `TimeoutStopSec=300` to finish). With `--no-restart` the service keeps running during `wd migrate`, which is safe **only for purely additive migrations** (new tables/columns/indexes, e.g. `0008_fk_child_indexes.sql`; never `DROP`/`RENAME`/type changes) — install.sh prints that note. The same applies without passwordless `sudo -n` (§2): the script detects the running unit anyway but cannot stop or restart it, prints the note plus a `WARN` that the OLD version keeps serving, and its last line tells you to run `sudo systemctl restart word-dance` instead of claiming success — stop the unit yourself before re-running when a pending migration is not additive. A table rebuild (the only way to change a CHECK list in SQLite) is an ordinary stop-first migration: the runner turns foreign-key enforcement off around the file and runs `foreign_key_check` before committing (§5), so the rebuild keeps every child row. Rollback: `git checkout <previous tag> && deploy/install.sh` (stops, migrates nothing new, restarts); if a migration must be undone, `sudo systemctl stop word-dance && wd restore backups/pre-migrate-*.db.gz && sudo systemctl start word-dance`. If the data directory was moved (ops.md §5), every `deploy/install.sh` run here needs `WD_DATA_DIR=<dir>` in its environment — the script takes the path from that variable alone (`DATA=${WD_DATA_DIR:-…}`, §2) and would otherwise create a fresh, empty instance at the default path and point the units at it.
+Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, frontend, then **the unit is stopped**, migrations run with the pre-migrate snapshot, and the unit is started again (downtime ≈ the migration time + 3 s, typically < 30 s; in-flight jobs are recovered by the stale-lock sweep; a `claude` call in flight is allowed up to `TimeoutStopSec=300` to finish). With `--no-restart` the service keeps running during `wd migrate`, which is safe **only for purely additive migrations** (new tables/columns/indexes, e.g. `0008_fk_child_indexes.sql`; never `DROP`/`RENAME`/type changes) — install.sh prints that note. The same applies without passwordless `sudo -n` (§2): the script detects the running unit anyway but cannot stop or restart it, prints the note plus a `WARN` that the OLD version keeps serving, and its last line tells you to run `sudo systemctl restart word-dance` instead of claiming success — stop the unit yourself before re-running when a pending migration is not additive. A table rebuild (the only way to change a CHECK list in SQLite) is an ordinary stop-first migration: the runner turns foreign-key enforcement off around the file and runs `foreign_key_check` before committing (§5), so the rebuild keeps every child row. Rollback: `git checkout <previous tag> && deploy/install.sh` (stops, migrates nothing new, restarts); if a migration must be undone, `sudo systemctl stop word-dance && wd restore backups/pre-migrate-*.db.gz && sudo systemctl start word-dance`. If the data directory was moved (ops.md §5), every `deploy/install.sh` run here keeps working without a variable: when `WD_DATA_DIR` is unset the script takes the directory from the installed unit's `EnvironmentFile=` line (step 0, §2) and prints `data dir from the installed unit: …` — the older rule (`WD_DATA_DIR=<dir>` required on every run, else a fresh, empty instance at the default path) no longer applies. An explicit `WD_DATA_DIR=<dir>` is fine when it names the unit's directory (the ops.md §5 profile export) and is refused with exit 2 when it does not — a stale export or a typo; only the move procedure passes a different value, and it does so with `--move-data`.
 
 ## 11. Runbook highlights (`docs/ops.md`)
 
@@ -377,7 +395,7 @@ Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, f
 | Many words show the text-only card (low photo hit rate) | admin overview `words.card_only` high vs `with_photo`/`with_claude_svg`; `budget_svg` event when the SVG sub-cap is hit | raise `WD_AI_SVG_DAILY_BUDGET_USD` (each card ≈ $0.028) + restart; or add a keyed provider (`WD_PIXABAY_KEY`/`WD_PEXELS_KEY`); or register an Openverse app key |
 | Fresh install, nobody can log in | `GET /api/health` → `needs_setup:true`; login page says 「尚无账号，首个注册的账号将成为管理员」 | open the site and register — the first account becomes admin without an invite code; or `wd create-admin` on the box |
 | Openverse 429 | provider cooldown in admin overview | nothing; Wikimedia continues; optionally register an Openverse app key |
-| Disk low | admin health `disk_free_bytes` | prune `images/` of words nobody studies (`wd images-prune --unused-days 365`, ops.md) or move the data directory: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh` (re-renders both units; never a plain `install.sh`, never a hand-edited unit — procedure in ops.md §5) |
+| Disk low | admin health `disk_free_bytes` | prune `images/` of words nobody studies (`wd images-prune --unused-days 365`, ops.md) or move the data directory: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh --move-data` (re-renders both units; without the flag a differing `WD_DATA_DIR` is refused; never a hand-edited unit — procedure in ops.md §5; later upgrades follow the unit by themselves) |
 | Service down for days | first tick builds **today's** batches only (back before a user's push time → delivered at push time as usual; back after it → published at once, deliveries `skipped` when > 6 h late); `downtime` event; history shows 「服务器离线」 | nothing |
 | Restore needed | — | §5 |
 | Rotate secrets | — | edit `.env`, `sudo systemctl restart word-dance` |

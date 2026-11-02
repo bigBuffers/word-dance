@@ -55,10 +55,15 @@ def _node_ok() -> bool:
     return v.split(".")[0].isdigit() and int(v.split(".")[0]) >= 22
 
 
-def _install_env(tmp_path: Path, data_dir: Path, *, sudo_ok: bool = True, service_active: bool = False) -> dict[str, str]:
+def _install_env(tmp_path: Path, data_dir: Path | None, *, sudo_ok: bool = True, service_active: bool = False, unit_data: Path | None = None) -> dict[str, str]:
     """A hermetic environment for install.sh --dry-run: fake `claude`, `sudo` (passwordless or not) and `systemctl`
     (unit active or not) in PATH, no inherited WD_* values — the printed plan must not depend on the host's unit or
-    sudoers. Under --dry-run only the read-only probes (`sudo -n true`, `systemctl is-active`) are executed."""
+    sudoers. Under --dry-run only the read-only probes (`sudo -n true`, `systemctl is-active`) are executed.
+
+    ``WD_UNIT_FILE`` always points into ``tmp_path``: a rendered ``word-dance.service`` whose ``EnvironmentFile=`` names
+    ``unit_data`` when given, otherwise a path that does not exist — never the box's real unit (which names the
+    production data directory and would make every run with another ``WD_DATA_DIR`` exit 2). ``data_dir=None`` leaves
+    ``WD_DATA_DIR`` unset, the upgrade-after-a-move case of ops.md §5."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     fakes = {
@@ -72,8 +77,25 @@ def _install_env(tmp_path: Path, data_dir: Path, *, sudo_ok: bool = True, servic
         p.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if not k.startswith("WD_")}
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '/usr/bin:/bin')}"
-    env["WD_DATA_DIR"] = str(data_dir)
+    if data_dir is not None:
+        env["WD_DATA_DIR"] = str(data_dir)
+    if unit_data is not None:
+        unit_file = tmp_path / "etc-systemd" / "word-dance.service"
+        render_units(unit_file.parent, user="sqin", repo=REPO, data=unit_data)
+    else:
+        unit_file = tmp_path / "no-unit-installed" / "word-dance.service"  # never created, even when the same tmp_path rendered one above
+    env["WD_UNIT_FILE"] = str(unit_file)
     return env
+
+
+def _preamble_data_dir(tmp_path: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    """Run install.sh's option loop and data-dir resolution only (everything before step 1) and print the result: the
+    one way to observe the hard-coded default without the dry run reading whatever lives at that path on this box."""
+    body = INSTALL.read_text(encoding="utf-8")
+    preamble = body[: body.index("# 1. preflight")] + 'echo "RESOLVED DATA=$DATA UNIT_DATA=$UNIT_DATA"\n'
+    script = tmp_path / "preamble.sh"
+    script.write_text(preamble, encoding="utf-8")
+    return _sh(["bash", str(script), *args], env=env)
 
 
 def _lan_ip() -> str | None:
@@ -201,6 +223,7 @@ def test_install_sh_syntax_help_and_unknown_option():
     assert os.access(INSTALL, os.X_OK)
     cp = _sh([str(INSTALL), "--help"])
     assert cp.returncode == 0 and "usage: deploy/install.sh" in cp.stdout and "--dry-run" in cp.stdout
+    assert "--move-data" in cp.stdout and "EnvironmentFile=" in cp.stdout  # the data-dir rule is part of the usage text
     cp = _sh([str(INSTALL), "--bogus"])
     assert cp.returncode == 64 and "unknown option: --bogus" in cp.stdout
     cp = _sh([str(INSTALL), "--with-caddy"])  # domain required
@@ -308,6 +331,121 @@ def test_install_sh_upgrade_without_passwordless_sudo_warns_that_the_old_version
     body = INSTALL.read_text(encoding="utf-8")
     assert re.search(r'^if \[ "\$STALE" = 1 \]; then echo "health OK, but the OLD process answered', body, re.M)
     assert body.index('if [ "$STALE" = 1 ]; then echo "health OK') < body.index('echo "word-Dance is running at $WD_PUBLIC_URL"')
+
+
+# ------------------------------------------------------------------ install.sh: data dir vs the installed unit (ops.md §5)
+def _fake_unit_env(tmp_path: Path, *, data_dir: Path | None) -> tuple[Path, dict[str, str]]:
+    """An installed instance whose unit points at ``<tmp>/moved`` (the directory after an ops.md §5 move)."""
+    unit_data = tmp_path / "moved"
+    return unit_data, _install_env(tmp_path, data_dir, unit_data=unit_data)
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_follows_the_installed_unit_when_wd_data_dir_is_unset(tmp_path):
+    """An upgrade run after the data directory was moved (ops.md §5) must use the directory the installed unit serves —
+    not create a fresh, empty instance at the default path and re-point the unit at it."""
+    body = INSTALL.read_text(encoding="utf-8")
+    # guard first: a script without the override would run the dry run below against the hard-coded default path
+    assert "WD_UNIT_FILE" in body and re.search(r"^UNIT_FILE=\$\{WD_UNIT_FILE:-/etc/systemd/system/word-dance\.service\}", body, re.M)
+    unit_data, env = _fake_unit_env(tmp_path, data_dir=None)
+    assert "WD_DATA_DIR" not in env
+    cp = _sh([str(INSTALL), "--dry-run"], env=env)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    out = cp.stdout
+    assert f"data dir from the installed unit: {unit_data}" in out
+    plus = [l for l in out.splitlines() if l.startswith("+ ")]
+    assert any(l.startswith(f"+ install -d -m 0700 {unit_data} ") for l in plus), plus
+    assert any(l == f"+ cp {DEPLOY}/env.example {unit_data}/.env" for l in plus), plus
+    assert any(l.startswith(f"+ sed -i") and f"{unit_data}/.env" in l for l in plus)
+    assert "/home/sqin/word-dance-data" not in out  # the default path appears nowhere in the plan
+    assert "WARN" not in out and "ERROR" not in out
+    assert cp.stderr == ""
+    assert not unit_data.exists()  # dry run
+    # the same resolution, observed directly: no `+` step and no .env read happen before it
+    pre = _preamble_data_dir(tmp_path, env, "--dry-run")
+    assert pre.returncode == 0 and f"RESOLVED DATA={unit_data} UNIT_DATA={unit_data}" in pre.stdout
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_refuses_a_wd_data_dir_that_differs_from_the_installed_unit(tmp_path):
+    """``WD_DATA_DIR`` naming another directory than the unit's is almost always a mistake (a stale profile export, a
+    typo): exit 2 before any mutating step, with both paths and the way out in the message."""
+    unit_data, env = _fake_unit_env(tmp_path, data_dir=tmp_path / "elsewhere")
+    cp = _sh([str(INSTALL), "--dry-run"], env=env)
+    assert cp.returncode == 2, cp.stdout + cp.stderr
+    assert [l for l in cp.stdout.splitlines() if l.startswith("+ ")] == []  # nothing planned, let alone done
+    assert "==> preflight" not in cp.stdout  # refused before step 1
+    err = cp.stdout.splitlines()[-1]
+    assert err.startswith("ERROR: WD_DATA_DIR=") and str(tmp_path / "elsewhere") in err and str(unit_data) in err
+    assert "--move-data" in err and "ops.md §5" in err and env["WD_UNIT_FILE"] in err
+    assert cp.stderr == ""
+    assert not (tmp_path / "elsewhere").exists() and not unit_data.exists()
+    # the same refusal without --dry-run (the real run exits at the same line, before the first `run`)
+    cp2 = _sh([str(INSTALL)], env=env)
+    assert cp2.returncode == 2 and "ERROR: WD_DATA_DIR=" in cp2.stdout and "==> preflight" not in cp2.stdout
+    assert not (tmp_path / "elsewhere").exists() and not unit_data.exists()
+    # WD_DATA_DIR equal to the unit's directory is the normal explicit form (the ops.md §5 profile export): silent
+    cp3 = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, unit_data, unit_data=unit_data))
+    assert cp3.returncode == 0, cp3.stdout + cp3.stderr
+    assert "ERROR" not in cp3.stdout and "WARN" not in cp3.stdout and "data dir from the installed unit" not in cp3.stdout
+    assert any(l.startswith(f"+ install -d -m 0700 {unit_data} ") for l in cp3.stdout.splitlines())
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_move_data_warns_and_repoints_the_units(tmp_path):
+    """``--move-data`` is the ops.md §5 move itself: WARN, then the plan uses the new directory and re-renders both units
+    (step 7 writes them from ``$DATA``, so the new ``EnvironmentFile=`` follows)."""
+    unit_data, env = _fake_unit_env(tmp_path, data_dir=tmp_path / "bigger-disk")
+    new = tmp_path / "bigger-disk"
+    cp = _sh([str(INSTALL), "--move-data", "--dry-run"], env=env)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    out = cp.stdout
+    warn = next(l for l in out.splitlines() if l.startswith("WARN: --move-data"))
+    assert str(unit_data) in warn and str(new) in warn
+    assert "ERROR" not in out
+    plus = [l for l in out.splitlines() if l.startswith("+ ")]
+    assert any(l.startswith(f"+ install -d -m 0700 {new} ") for l in plus), plus
+    assert f"+ sudo_write {DEPLOY}/word-dance.service /etc/systemd/system/word-dance.service" in plus
+    assert f"+ sudo_write {DEPLOY}/word-dance-backup.service /etc/systemd/system/word-dance-backup.service" in plus
+    assert "+ sudo -n systemctl daemon-reload" in plus
+    assert str(unit_data) not in "\n".join(plus)  # no step still targets the old directory
+    assert out.index("WARN: --move-data") < out.index("==> preflight")  # said before anything else
+    assert not new.exists() and not unit_data.exists()
+    # the flag changes nothing when the unit already agrees (idempotent second run after the move) or no unit exists
+    cp2 = _sh([str(INSTALL), "--move-data", "--dry-run"], env=_install_env(tmp_path, unit_data, unit_data=unit_data))
+    assert cp2.returncode == 0 and "WARN: --move-data" not in cp2.stdout
+    cp3 = _sh([str(INSTALL), "--move-data", "--dry-run"], env=_install_env(tmp_path, new))
+    assert cp3.returncode == 0 and "WARN" not in cp3.stdout and "ERROR" not in cp3.stdout
+
+
+def test_install_sh_data_dir_defaults_when_no_unit_is_installed(tmp_path):
+    """A fresh box: no unit → ``WD_DATA_DIR`` when set, else the hard-coded default; a missing unit file is silent."""
+    body = INSTALL.read_text(encoding="utf-8")
+    assert re.search(r"^DATA=\$\{WD_DATA_DIR:-/home/sqin/word-dance-data\}$", body, re.M)  # the default itself is unchanged
+    env = _install_env(tmp_path, None)
+    assert not Path(env["WD_UNIT_FILE"]).exists()
+    pre = _preamble_data_dir(tmp_path, env, "--dry-run")
+    assert pre.returncode == 0, pre.stdout + pre.stderr
+    assert "RESOLVED DATA=/home/sqin/word-dance-data UNIT_DATA=" in pre.stdout
+    assert "data dir from the installed unit" not in pre.stdout and pre.stderr == ""  # no sed noise about the absent file
+    pre2 = _preamble_data_dir(tmp_path, _install_env(tmp_path, tmp_path / "data"), "--dry-run")
+    assert pre2.returncode == 0 and f"RESOLVED DATA={tmp_path / 'data'} UNIT_DATA=" in pre2.stdout
+    assert "WARN" not in pre2.stdout and "ERROR" not in pre2.stdout
+    # a unit without an EnvironmentFile= line (hand-written) counts as no unit
+    odd = tmp_path / "odd.service"
+    odd.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    pre3 = _preamble_data_dir(tmp_path, {**env, "WD_UNIT_FILE": str(odd)}, "--dry-run")
+    assert pre3.returncode == 0 and "RESOLVED DATA=/home/sqin/word-dance-data UNIT_DATA=" in pre3.stdout
+
+
+def test_deploy_doc_section_2_mirrors_install_sh():
+    """DEPLOY.md §2 quotes install.sh in full; the quoted block must be the file, byte for byte."""
+    doc = (REPO / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+    start = doc.index("\n## 2. `deploy/install.sh`")
+    end = doc.index("\n## 3. ", start)
+    block = re.search(r"```bash\n(.*?)```\n", doc[start:end], re.S)
+    assert block, "DEPLOY §2 must carry the install.sh code block"
+    assert block.group(1) == INSTALL.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")

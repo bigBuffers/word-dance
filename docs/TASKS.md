@@ -44,7 +44,8 @@ docs/{DESIGN,API,CLAUDE_INTEGRATION,FRONTEND,DEPLOY,TASKS}.md docs/SCHEMA.sql
 
 **Acceptance**
 ```
-.venv/bin/wd migrate && .venv/bin/wd version                 # creates 25 tables, 1 view (compare: python3 -c "import sqlite3;…" count == 25); schema_migrations has exactly one row (1,'init') written by the runner
+.venv/bin/wd migrate && .venv/bin/wd version                 # creates 25 tables, 1 view (compare: python3 -c "import sqlite3;…" count == 25); schema_migrations has one row per shipped migration file, all written by the runner —
+                                                              # (1,'init') alone at P0; (1,'init') and (8,'fk_child_indexes') since 0008_fk_child_indexes.sql shipped (indexes only: still 25 tables, 1 view)
 .venv/bin/wd migrate                                          # second run: "0 pending", no error (proves files do not self-register)
 $PT -q backend/tests                                          # conftest imports; fake_claude self-test passes (tests/test_fake_claude.py: all modes produce the expected envelope/exit code);
                                                               # tests/unit/test_db.py: a broken migration file leaves no schema_migrations row and no partial table (autocommit=True + explicit BEGIN IMMEDIATE);
@@ -344,7 +345,7 @@ Acceptance:
 systemd-analyze verify deploy/word-dance.service deploy/word-dance-backup.service deploy/word-dance-backup.timer   # (after rendering __PLACEHOLDERS__) no errors
 bash -n deploy/install.sh && deploy/install.sh --dry-run && deploy/install.sh --with-ecdict --with-caddy words.example.com --no-restart --dry-run   # combined flags parse; every mutating line printed with '+ ', nothing changed
 grep -Ev '^[[:space:]]*(#|$)' deploy/env.example | grep -Ev "^WD_[A-Z0-9_]+=(\"[^\"\$\`\\\\]*\"|'[^']*')\$" | wc -l | grep -x 0    # every example value is quoted (KEY="value")
-printf 'WD_AI_EXTRA_ARGS=--effort low\n' > /tmp/wd-bad.env && ! WD_DATA_DIR=/tmp/wd-bad-data bash -c 'DATA=/tmp/wd-bad-data; mkdir -p $DATA; cp /tmp/wd-bad.env $DATA/.env; deploy/install.sh --dry-run'   # unquoted value → clear error, exit 1
+printf 'WD_AI_EXTRA_ARGS=--effort low\n' > /tmp/wd-bad.env && ! WD_DATA_DIR=/tmp/wd-bad-data WD_UNIT_FILE=/nonexistent bash -c 'DATA=/tmp/wd-bad-data; mkdir -p $DATA; cp /tmp/wd-bad.env $DATA/.env; deploy/install.sh --dry-run'   # unquoted value → clear error, exit 1 (WD_UNIT_FILE: ignore the installed unit, whose data dir differs — DEPLOY §2)
 deploy/install.sh && systemctl is-active word-dance && systemctl is-enabled word-dance-backup.timer && curl -fsS http://127.0.0.1:8000/api/health
 grep -E '^WD_PUBLIC_URL="http://[0-9.]+:8000"$' /home/sqin/word-dance-data/.env                                  # LAN URL written on a proxy-less install
 deploy/install.sh          # second run: idempotent (no .env change, no reseed); the running unit is stopped before `wd migrate` and started again (journal shows Stopped → Started)

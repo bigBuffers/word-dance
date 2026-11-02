@@ -51,6 +51,7 @@ deploy/install.sh                                   # 局域网部署：绑定 0
 deploy/install.sh --with-caddy words.example.com    # 公网域名 + 自动 HTTPS（或 --with-nginx DOMAIN）
 deploy/install.sh --with-ecdict                     # 可选：下载完整 ECDICT 词典（216 MB → 851 MB），用于种子之外单词的即时查询
 deploy/install.sh --dry-run                         # 只打印将要执行的步骤（每行以 + 开头），不做任何更改
+deploy/install.sh --contact-email you@example.com   # 写入 WD_CONTACT_EMAIL：Wikimedia API 政策要求 User-Agent 附带联系邮箱（默认 admin@localhost，也可在 .env 中设置）
 ```
 
 `install.sh` 是幂等的：预检（Python 3.12、Node ≥ 22、`claude` 在 PATH 中、磁盘空间）→ 创建数据目录 `/home/sqin/word-dance-data`（0700）→ venv 与依赖 → 构建前端 → 首次生成 `.env`（0600，随机 `WD_SECRET_KEY`，之后永不覆盖）→ **停止运行中的服务** → `wd migrate`（先写 pre-migrate 快照）→ `wd import-seed` → `wd claude-check`（一次 ≤ $0.05 的探测调用）→ `wd create-admin --if-none` → 安装 `word-dance.service` 与 `word-dance-backup.timer` → 启动 → 健康检查。升级只需 `git pull && deploy/install.sh`（或 `make install`）。

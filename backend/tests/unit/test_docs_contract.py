@@ -207,9 +207,11 @@ def test_runbooks_describe_wd_logs_truthfully():
 # ----------------------------------------------------------------------------- ops.md §4–§6 / DEPLOY §10–§11
 def test_move_data_dir_runbook_passes_wd_data_dir_to_install_sh():
     install = (REPO / "deploy" / "install.sh").read_text(encoding="utf-8")
-    # the premise: install.sh takes the data directory from the environment variable (never from the installed unit or
-    # a relocated .env), then sources .env — so the exported value and the file must agree — and re-renders both units
+    # the premise: install.sh takes the data directory from the environment variable, else from the installed unit's
+    # EnvironmentFile= line (fix2/deploy-docs; never from a relocated .env), then sources .env — so the resolved value
+    # and the file must agree — and re-renders both units
     assert re.search(r"^DATA=\$\{WD_DATA_DIR:-", install, re.M)
+    assert re.search(r"^UNIT_FILE=\$\{WD_UNIT_FILE:-/etc/systemd/system/word-dance\.service\}", install, re.M)
     assert re.search(r'^\s*set -a; \. "\$DATA/\.env"; set \+a', install, re.M)
     for unit in ("word-dance.service", "word-dance-backup.service"):
         assert "EnvironmentFile=__DATA__/.env" in (REPO / "deploy" / unit).read_text(encoding="utf-8")

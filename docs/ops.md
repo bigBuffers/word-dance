@@ -4,8 +4,8 @@ Companion to [`DEPLOY.md`](DEPLOY.md) (what is installed and why). This file is 
 the person running the box. Paths are the defaults of DEPLOY §1: checkout `/home/sqin/word-Dance`, data directory
 `/home/sqin/word-dance-data` (`WD_DATA_DIR`), service user `sqin`, CLI `/home/sqin/word-Dance/.venv/bin/wd`
 (`wd …` below). Every `wd` command reads `$WD_DATA_DIR/.env` itself, so it works from any shell as `sqin` — with
-`WD_DATA_DIR` exported in that shell once the data directory has been moved (§5): the CLI and `install.sh` both default
-to `/home/sqin/word-dance-data`.
+`WD_DATA_DIR` exported in that shell once the data directory has been moved (§5): the CLI defaults to
+`/home/sqin/word-dance-data`, while `install.sh` follows the installed unit (§4).
 
 ## 1. Daily checks
 
@@ -100,10 +100,12 @@ database or images. Downtime ≈ migration time + 3 s. In-flight jobs are recove
 call in flight gets up to `TimeoutStopSec=300` to finish.
 
 **If the data directory was moved (§5), every `deploy/install.sh` / `make install` in this section — upgrade, code
-rollback, migration rollback — must see `WD_DATA_DIR=<dir>` in its environment** (the profile export of §5, or the
-prefix `WD_DATA_DIR=/new/path deploy/install.sh`). The script takes the data directory from that variable alone; a
-plain run creates a second, empty instance at `/home/sqin/word-dance-data` and points the units at it (§5 explains the
-recovery).
+rollback, migration rollback — keeps working as written**: when `WD_DATA_DIR` is unset the script takes the data
+directory from the installed unit (`EnvironmentFile=<dir>/.env` in `/etc/systemd/system/word-dance.service`) and prints
+`data dir from the installed unit: <dir>`. `WD_DATA_DIR=<dir>` in the environment (the profile export of §5) is fine as
+long as it names that same directory; a **different** value is refused with exit 2 before anything is changed
+(`ERROR: WD_DATA_DIR=… but the installed unit (…) uses …`) — a stale export or a typo can no longer build a second,
+empty instance next to the real one. Only the move itself (§5) passes a new directory, with `--move-data`.
 
 `--no-restart` keeps the service running while migrating — only for purely additive migrations (new tables,
 columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder. Without passwordless
@@ -122,7 +124,7 @@ git checkout <previous tag> && deploy/install.sh
 
 Dry runs: `deploy/install.sh --dry-run` prints every mutating step with a leading `+` and changes nothing;
 `deploy/install.sh --help` lists the options (`--with-caddy DOMAIN`, `--with-nginx DOMAIN`, `--with-ecdict`,
-`--no-restart`, `--contact-email ADDR`; any order).
+`--no-restart`, `--contact-email ADDR`, `--move-data`; any order) and the data-directory rule.
 
 ## 5. Configuration changes
 
@@ -139,34 +141,38 @@ CSRF origin), SMTP (`WD_SMTP_*`), optional provider keys (`WD_PIXABAY_KEY`, `WD_
 Rotating secrets: replace the value in `.env`, restart. Rotating `WD_SECRET_KEY` only invalidates unexpired
 e-mail verification codes.
 
-**Moving the data directory** (a bigger disk — the 「Disk low」 row of §6). `install.sh` learns the data directory
-from **one** place: the `WD_DATA_DIR` environment variable (`DATA=${WD_DATA_DIR:-/home/sqin/word-dance-data}`, the
-first line after `REPO=` in DEPLOY §2). It never reads the installed unit or a relocated `.env`, and its step 7
-re-renders **both** units from that value (`EnvironmentFile=__DATA__/.env` in `word-dance.service` and
-`word-dance-backup.service`), so the units are never edited by hand — an edit would be overwritten. A plain
-`deploy/install.sh` after a move therefore builds a **second, empty instance** at the default path: step 2 recreates
-the directory, step 5 writes a fresh `.env` (new `WD_SECRET_KEY`, contact-e-mail prompt), `wd migrate` /
-`wd import-seed` create and seed an empty database there, step 7 points both units back at it and restarts. The site
-then answers `needs_setup:true`, every account is locked out and the first visitor to register becomes admin, while the
-real data sits unused in the new directory. The sequence that works:
+**Moving the data directory** (a bigger disk — the 「Disk low」 row of §6). `install.sh` resolves the data directory in
+step 0 (DEPLOY §2, read-only, also under `--dry-run`): the `WD_DATA_DIR` environment variable when set, otherwise the
+directory in the installed unit's `EnvironmentFile=` line (`/etc/systemd/system/word-dance.service`), otherwise
+`/home/sqin/word-dance-data`. Step 7 re-renders **both** units from that value (`EnvironmentFile=__DATA__/.env` in
+`word-dance.service` and `word-dance-backup.service`), so the units are never edited by hand — an edit would be
+overwritten. Because the installed unit still names the old directory, the script refuses a `WD_DATA_DIR` that differs
+from it (exit 2, nothing changed) unless you say the move is intended with `--move-data`; the flag prints a `WARN` and
+lets step 7 point both units at the new directory. (Before this guard a plain run after a move built a **second, empty
+instance** at the default path — fresh `.env`, empty seeded database, units re-pointed at it, site answering
+`needs_setup:true` — while the real data sat unused; now a plain run follows the unit and a wrong variable is refused.)
+The sequence:
 
 ```bash
 NEW=/data/word-dance                                            # the new location; keeps its 0700 mode through mv
 sudo systemctl stop word-dance
 mv /home/sqin/word-dance-data "$NEW"
-sed -i "s|^WD_DATA_DIR=.*|WD_DATA_DIR=\"$NEW\"|" "$NEW/.env"      # install.sh sources .env AFTER reading the variable: a stale line here
+sed -i "s|^WD_DATA_DIR=.*|WD_DATA_DIR=\"$NEW\"|" "$NEW/.env"      # install.sh sources .env AFTER resolving the data dir: a stale line here
                                                                 # would send wd migrate / import-seed back to the old path
 grep -n '/home/sqin/word-dance-data' "$NEW/.env" || true        # fix any other absolute path under the old directory the same way
                                                                 # (WD_DB_PATH, WD_CLAUDE_CWD, WD_ECDICT_DB_PATH, WD_LOG_FILE)
-WD_DATA_DIR="$NEW" deploy/install.sh                            # re-renders both units with EnvironmentFile=$NEW/.env, migrates nothing, restarts
-echo "export WD_DATA_DIR=\"$NEW\"" >> ~/.profile                # every later `wd …` and every later install.sh run (§4) default to the old path
+WD_DATA_DIR="$NEW" deploy/install.sh --move-data                # WARN, then re-renders both units with EnvironmentFile=$NEW/.env, migrates nothing, restarts
+echo "export WD_DATA_DIR=\"$NEW\"" >> ~/.profile                # every later `wd …` (the CLI, not install.sh) defaults to the old path
 ```
 
-From then on **every** `deploy/install.sh` / `make install` (§4) must run with `WD_DATA_DIR=$NEW` in the environment —
-the profile export above (new login shells, `sudo -iu sqin`) or the explicit prefix. Recovery after a forgotten prefix:
-`sudo systemctl stop word-dance`, confirm the recreated `/home/sqin/word-dance-data` is the fresh install (created
-minutes ago, no `backups/word-dance-*.db.gz`), remove it, and run `WD_DATA_DIR=$NEW deploy/install.sh`. Nothing is
-lost in that scenario — the moved directory is untouched.
+From then on a plain `deploy/install.sh` / `make install` (§4) follows the unit (`data dir from the installed unit:
+$NEW`); the profile export above (new login shells, `sudo -iu sqin`) is for the `wd` CLI and is accepted by install.sh
+because it names the same directory. A forgotten or stale `WD_DATA_DIR` can no longer create a second instance: a value
+other than `$NEW` is refused with `ERROR: WD_DATA_DIR=… but the installed unit (…) uses $NEW` — fix the variable, do not
+reach for `--move-data`. If an older script version did build a second instance at `/home/sqin/word-dance-data`:
+`sudo systemctl stop word-dance`, confirm that directory is the fresh install (created minutes ago, no
+`backups/word-dance-*.db.gz`), remove it, and run `WD_DATA_DIR=$NEW deploy/install.sh --move-data`. Nothing is lost in
+that scenario — the moved directory is untouched.
 
 ## 6. Runbook
 
@@ -178,7 +184,7 @@ lost in that scenario — the moved directory is untouched.
 | Fresh install, nobody can log in | `GET /api/health` → `needs_setup:true`; login page says the first account becomes admin | open the site and register (first account = admin, no invite needed) — or `wd create-admin` on the box |
 | Need more accounts in `invite` mode | registration page asks for a code | `wd invite --uses 5 --days 7` (printed once) or 管理 → 邀请码 |
 | Openverse 429 | provider cooldown in the overview | nothing; Wikimedia continues; optionally register an Openverse app key |
-| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move the data directory to a bigger disk — the §5 procedure: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh` (never a plain `install.sh`, never a hand-edited unit) |
+| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move the data directory to a bigger disk — the §5 procedure: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh --move-data` (without the flag a differing `WD_DATA_DIR` is refused; never a hand-edited unit; later upgrades follow the unit by themselves) |
 | Service down for days | first tick builds **today's** batches only (back *before* a user's push time → built in the normal window, published + delivered at push time; back *after* it → published at once, e-mail/webhook `skipped` when > 6 h late); `downtime` event; history shows 「服务器离线」 | nothing — missed days are not back-filled by design |
 | A job is `dead` | 管理 → 任务 (or `GET /api/admin/jobs?status=dead`) with `last_error` | fix the cause (auth, budget, provider), then 重试 / `POST /api/admin/jobs/requeue-dead`; nightly maintenance requeues dead content/lookup jobs once |
 | Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must. A `lease_busy` right after a crash restart is normal: the service retries every 30 s and logs `lease_acquired` once the dead instance's 90-s lease expires |
@@ -241,6 +247,9 @@ the P0 "migrate twice" and WP1 full-seed acceptance green). Left open deliberate
   recorded the Retry-After cooldown as designed and the chain fell through to **Openverse**, which delivered
   「"Abandoned Mansion, Beirut" by craigfinlay is licensed under CC BY 2.0」 (https://www.flickr.com/photos/71284091@N00/3180066090,
   800×536 JPEG, attribution stored). Re-run the command from the production box to confirm Commons answers from there.
+  **2026-10-28:** the deployed instance fetched 27 Wikimedia Commons photos with attribution for its first batch without
+  a single 503, so the earlier 503 was transient egress throttling, not a block of this box; the Retry-After cooldown and
+  the fall-through to Openverse described above remain the behaviour when it happens again.
 * Pixabay / Pexels parsers are verified only against inline fixtures modelled on the public API docs (both providers
   are optional, keyed and off by default).
 * `wd images-prune` has no worker-lease refusal: safe next to the live service, but it could race a fetch for a word

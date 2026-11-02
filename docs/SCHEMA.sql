@@ -113,6 +113,8 @@ CREATE TABLE invite_codes (
 -- persistent throttle / lockout counters (survive restarts)
 -- key examples: 'login:ip:1.2.3.4' | 'login:user:alice' | 'register:ip:1.2.3.4' | 'custom:user:7' | 'report:user:7'
 --               'refresh:user:7' | 'content_req:user:7' | 'mutate:user:7' | 'email_code:user:7'
+--               'pwcheck:user:7' (password re-checks before change-password / delete-account, 10 per 15 min, cleared by a correct password)
+--               'study_today:user:7' (bank adds appended to today's batch, 20/day — DESIGN §5.3)
 CREATE TABLE auth_throttle (
   key           TEXT PRIMARY KEY,
   window_start  TEXT NOT NULL,                          -- start of the current window (UTC)
@@ -459,10 +461,15 @@ CREATE INDEX ix_bank_suggestions_user ON bank_suggestions(user_id, status, creat
 -- ---------------------------------------------------------------------------
 -- Durable queue. Dedupe keys: 'content:<word_id>' | 'lookup:<word_id>' | 'consolidate:<user_id>:<YYYY-MM-DD>' |
 --   'svg:<word_id>' | 'image:<word_id>' | 'email:<batch_id>' | 'email:test:<user_id>' | 'webhook:<batch_id>' | 'prewarm:<plan_id>'
+--   Variants with their own live key (they must not fold into the base job): 'content:<word_id>:r<n>' (forced regenerate, payload
+--   {"force":true}, n = 1 + the number of earlier ':r%' keys) · 'image:<word_id>:r<n>' (a fetch requested while 'image:<word_id>' is
+--   already running — the follow-up runs behind it; a still-queued follow-up is reused) · 'svg:<word_id>:req' (an explicitly requested
+--   Claude SVG — admin / `wd fetch-image --provider claude_svg` — with payload flag "requested": it draws even over an active photo,
+--   whereas the fallback 'svg:<word_id>' job is skipped once a photo landed)
 -- Priorities (lower runs first): 10 user waiting · 20 bank word / today's batch · 30 lookahead (= the 03:30 maintenance prefetch of
 --   tomorrow's batches, DESIGN §6.4 `maintenance.prefetch`) · 50 nightly consolidation · 90 prewarm
 -- Payloads (CLAUDE_INTEGRATION §6.1): generate_content {"word_id":123,"group_size"?:5,"force"?:true,"plan_id"?:"<uuid>"} ·
---   lookup_word {"word_id":456} · consolidate_bank {"user_id":7,"trigger":"nightly"|"manual"|"admin"} · generate_svg {"word_id":123} ·
+--   lookup_word {"word_id":456} · consolidate_bank {"user_id":7,"trigger":"nightly"|"manual"|"admin"} · generate_svg {"word_id":123,"requested"?:true} ·
 --   fetch_image {"word_id":1,"exclude"?:[…],"provider"?:"…","query"?:"…"} · send_email/send_webhook {"batch_id":9} for a published batch ·
 --   send_email {"user_id":7,"test":true} for POST /api/settings/email/test (no batch; dedupe 'email:test:<user_id>'; subject 【word-Dance】测试邮件,
 --   body = the user's next_push_at rendered in their timezone + the public URL, API.md 18) ·
