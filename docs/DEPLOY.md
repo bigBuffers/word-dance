@@ -297,7 +297,7 @@ The timer is independent of the app process (a wedged service still gets backed 
 | `WD_BACKUP_KEEP_DAILY` / `WD_BACKUP_KEEP_WEEKLY` | `14` / `8` | |
 | `WD_ADMIN_USERNAME` / `WD_ADMIN_PASSWORD` | (empty) | unattended `wd create-admin --if-none` — the only command that reads them (`set-password` prompts, or takes an explicit `--password-env VAR`); remove the password afterwards |
 | `WD_DEV_REAL_CLAUDE` | `0` | dev only (`scripts/dev.sh`): `1` uses the real CLI instead of `tests/fake_claude.py` |
-| `WD_SMOKE_MOCK_HTTP` | `0` | tests/smoke only: `1` (together with `WD_DEV=1`, otherwise ignored) routes every outbound `httpx` request (image providers, downloads, webhooks) through the `wd.smoke_mock` `httpx.MockTransport` fixtures and pins the SSRF DNS step — installed by `create_app` for `wd serve` |
+| `WD_SMOKE_MOCK_HTTP` | `0` | tests/smoke only: `1` (together with `WD_DEV=1`, otherwise ignored) routes every outbound `httpx` request (image providers, downloads, webhooks) through the `wd.smoke_mock` `httpx.MockTransport` fixtures and pins the SSRF DNS step — installed by `create_app` for `wd serve` **and** by `wd.cli.main` for every other `wd` command, so the `wd worker-once` / `wd tick --once` / `wd fetch-image` subprocesses `make smoke` spawns are mocked too (nothing leaves the box) |
 
 Secrets never leave `.env`; `GET /api/admin/config` masks them.
 
@@ -351,7 +351,8 @@ make dev     # scripts/dev.sh: WD_DEV=1 WD_DATA_DIR=./.dev-data WD_REGISTRATION_
              #   .venv/bin/uvicorn wd.main:create_app --factory --reload --port 8000  &  (cd frontend && npm run dev)   # vite :5173 proxies /api,/media
              #   set WD_DEV_REAL_CLAUDE=1 to use the real CLI while developing (spends money)
 make test    # .venv/bin/pytest -q backend/tests && (cd frontend && npm run typecheck && npm test && npm run build)
-make smoke   # scripts/smoke.py: throwaway data dir, port 8010, fake claude, mocked image providers (WD_SMOKE_MOCK_HTTP=1), registration open
+make smoke   # scripts/smoke.py: throwaway data dir, port 8010, fake claude, mocked image providers (WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1,
+             #   honoured by `wd serve` and by the `wd worker-once` / `wd tick --once` subprocesses the script spawns), registration open
 make seed    # python3 -I scripts/build_seed.py --db <stardict.db> --lists <mahavivo dir> --out data/seed && gzip -9 -k -f data/seed/vocab.jsonl  (only when regenerating)
 make install # deploy/install.sh
 ```

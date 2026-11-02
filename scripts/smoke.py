@@ -5,15 +5,19 @@ Boots a throwaway word-Dance instance and walks the whole product once against t
 
     health needs_setup:true → register alice (no invite code → admin) → needs_setup:false → invite → register bob
     → onboarding (gate 409 before completion) → stages → vocab → mark → bank/add "abandoned, children\\nubiquitous；bases"
-    → worker-once (lookup → content → image) → content + image ready (image/jpeg, svg or card) → today/build → tick
+    → worker-once (lookup → content → image) → content + image ready for abandon and ubiquitous (Wikimedia fixture
+    photos: image/jpeg + fixture attribution, abandon's the CC0 one) → today/build → tick
     → grade every kind incl. an in-batch screen 不熟悉 (second row) → master → restore (snapshot back) → master again
     → re-add via unfamiliar (times_added 2) → export → import into bob → history/stats → admin overview
     (today_usd > 0 with the fake; with_photo + with_claude_svg + card_only == with_content) → logout → 401
 
 Instance: a temporary data directory, port 8010, the fake `claude` (backend/tests/fake_claude.py), mocked image
-providers (WD_SMOKE_MOCK_HTTP=1), registration open, worker threads OFF — the queue is drained deterministically
-with `wd worker-once` and the scheduler is driven with `wd tick --once`, which both refuse to run next to a live
-worker lease (DEPLOY §9), hence WD_WORKER_ENABLED=0. Nothing touches /home/sqin/word-dance-data.
+providers (WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1 — honoured by `wd serve` through create_app AND by every `wd` subprocess
+this script spawns through wd.cli.main, so `wd worker-once` / `wd tick --once` answer Wikimedia/Openverse/image
+downloads from backend/tests/fixtures and nothing leaves the box), registration open, worker threads OFF — the queue
+is drained deterministically with `wd worker-once` and the scheduler is driven with `wd tick --once`, which both
+refuse to run next to a live worker lease (DEPLOY §9), hence WD_WORKER_ENABLED=0. Nothing touches
+/home/sqin/word-dance-data.
 
 Exit 0 when every step passes. On failure: the failing step, the last response and the server-log tail are printed,
 the data directory is kept for inspection and the exit code is 1. Options: --port, --data-dir, --keep, --seed.
@@ -45,6 +49,15 @@ UTC = timezone.utc
 USERNAME_A, USERNAME_B = "alice", "bob"
 PASSWORD = "Smoke-Passw0rd!"
 BANK_ADD_TEXT = "abandoned, children\nubiquitous；bases"
+# The attribution lines of the two candidates in backend/tests/fixtures/wikimedia_search.json — what every fetch_image
+# job can activate while the mock serves the `wd worker-once` subprocesses (the first fetch takes the CC0 featured
+# picture, a later one the CC BY picture once the first ref counts as used). A real Wikimedia search would never
+# answer "abandon" with these.
+WIKIMEDIA_FIXTURE_ATTRIBUTIONS = (
+    '"Tree with red apples in Barkedal 4" · W.carter · CC0',
+    '"Red Apple" · Abhijit Tembhekar from Mumbai, India · CC BY 2.0',
+)
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 
 class SmokeFailure(Exception):
@@ -403,21 +416,30 @@ def run_scenario(s: Smoke) -> None:
         w = alice.get(f"/api/words/{ids['ubiquitous']}")["word"]
         expect(w["is_valid_english"] is True, f"ubiquitous after lookup: {w}")
 
-    with s.step("content + image ready for abandon and ubiquitous (image/jpeg, svg or card)"):
+    with s.step("content + image ready for abandon and ubiquitous: Wikimedia fixture photos (image/jpeg + fixture attribution)"):
         for key in ("abandon", "ubiquitous"):
             c = alice.get(f"/api/words/{ids[key]}/content")
             expect(c["state"] == "ready" and c["content"] is not None, f"{key} content {c['state']}")
             expect(len(c["content"]["examples"]) >= 3 and c["content"]["word"], f"{key} examples {c['content']}")
+            # wd.cli.main honours WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1 like create_app does, so the `wd worker-once` subprocesses
+            # answer Wikimedia from the fixture: every fetch is a photo — never the card a failed real request would leave
+            # behind, never a real provider's picture — and its attribution is one of the two fixture lines.
             img = alice.get(f"/api/words/{ids[key]}/image")
-            expect(img["kind"] in ("photo", "svg", "card") and img["url"].startswith("/media/"), f"{key} image {img}")
+            expect(img["kind"] == "photo" and img["provider"] == "wikimedia" and img["mime"] == "image/jpeg", f"{key} image {img}")
+            expect(img["url"].startswith("/media/images/") and img["width"] and img["height"], f"{key} image meta {img}")
+            att = img["attribution"]
+            expect(att is not None and att["text"] in WIKIMEDIA_FIXTURE_ATTRIBUTIONS, f"{key} attribution not from the fixture: {att}")
+            expect(att["license"] in ("CC0", "CC BY 2.0") and att["landing_url"].startswith("https://commons.wikimedia.org/"), f"{key} attribution {att}")
             body = alice.get(img["url"])
             ctype = body.headers.get("content-type", "")
-            expect(ctype.startswith(("image/jpeg", "image/svg+xml")), f"{key} media content-type {ctype}")
-            if img["kind"] == "photo":
-                expect(ctype.startswith("image/jpeg") and img["attribution"] is not None and img["attribution"]["text"], f"photo attribution {img}")
+            expect(ctype.startswith("image/jpeg") and body.content[:3] == JPEG_MAGIC, f"{key} media content-type {ctype}, magic {body.content[:3]!r}")
             card = alice.get(f"/media/card/{ids[key]}.svg")
             expect(card.headers.get("content-type", "").startswith("image/svg+xml"), "card content-type")
             expect("default-src 'none'" in card.headers.get("content-security-policy", ""), "card CSP")
+        # abandon was marked first, so its content job heads the queue and its photo is the first activation of the run:
+        # the CC0 featured picture (score 5) before any fixture ref counts as used
+        att = alice.get(f"/api/words/{ids['abandon']}/image")["attribution"]
+        expect(att["text"] == WIKIMEDIA_FIXTURE_ATTRIBUTIONS[0] and att["creator"] == "W.carter", f"abandon should carry the CC0 fixture picture: {att}")
 
     with s.step("today/build → batch with new + screen items; GET /api/today has no side effects"):
         today = alice.post("/api/today/build")
