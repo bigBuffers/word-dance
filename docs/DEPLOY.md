@@ -85,15 +85,18 @@ if [ ! -f "$DATA/.env" ]; then
   run sed -i "s|^WD_SECRET_KEY=.*|WD_SECRET_KEY=\"$(openssl rand -hex 32)\"|; s|^WD_CLAUDE_BIN=.*|WD_CLAUDE_BIN=\"$CLAUDE_BIN\"|; s|^WD_DATA_DIR=.*|WD_DATA_DIR=\"$DATA\"|; s|^WD_CONTACT_EMAIL=.*|WD_CONTACT_EMAIL=\"${CONTACT:-admin@localhost}\"|" "$DATA/.env"
   run chmod 0600 "$DATA/.env"
 fi
+# under --dry-run step 5 printed the cp but did not create the file: read the template it would have copied
+# (WD_PUBLIC_URL / WD_PORT are not among the keys step 5 rewrites); the `run sed -i` below still targets $DATA/.env
+ENV_READ=$DATA/.env; [ -f "$ENV_READ" ] || ENV_READ=$REPO/deploy/env.example
 if [ -n "$PROXY" ]; then
   run sed -i "s|^WD_HOST=.*|WD_HOST=\"127.0.0.1\"|; s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"https://$DOMAIN\"|; s|^WD_TRUST_PROXY=.*|WD_TRUST_PROXY=\"1\"|" "$DATA/.env"
-elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$DATA/.env"; then
+elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$ENV_READ"; then
   # no proxy and no public URL yet → the LAN URL, so e-mail buttons / webhook `url` fields have a target (DESIGN §6.5); the CSRF check
   # also accepts the Host-derived origin (API.md §1), so reaching the site by hostname keeps working
   # the address of the default route — `hostname -I` lists bridge addresses (docker0 / lxdbr0, often link-down) first
   LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i+1); exit}}')
   [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-  PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$DATA/.env"); PORT=${PORT:-8000}
+  PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$ENV_READ"); PORT=${PORT:-8000}
   [ -n "$LAN_IP" ] && run sed -i "s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"http://$LAN_IP:$PORT\"|" "$DATA/.env"
 fi
 if [ -f "$DATA/.env" ]; then
@@ -109,11 +112,15 @@ fi
 
 # 6. database: stop the live unit, migrate (pre-migrate backup inside) + seed + probe + admin --------------------
 log "migrate + seed"
-if [ "$HAVE_SUDO" = 1 ] && systemctl is-active --quiet word-dance.service 2>/dev/null; then
-  if [ "$NO_RESTART" = 0 ]; then
+ACTIVE=0; systemctl is-active --quiet word-dance.service 2>/dev/null && ACTIVE=1   # read-only probe, needs no sudo (same call as wd.backup.service_is_active)
+STALE=0                                                                            # 1: the OLD process keeps serving after this run (step 9 must not claim success)
+if [ "$ACTIVE" = 1 ]; then
+  if [ "$HAVE_SUDO" = 1 ] && [ "$NO_RESTART" = 0 ]; then
     run sudo -n systemctl stop word-dance.service        # an upgrade: the previous version must not keep serving while the schema changes,
   else                                                   # and the pre-migrate `VACUUM INTO` must not race live writes; step 7 starts it again
-    echo "NOTE: --no-restart: the running service is kept; pending migrations must be purely ADDITIVE (new tables/columns/indexes only) — DEPLOY §10"
+    if [ "$NO_RESTART" = 0 ]; then STALE=1; fi
+    echo "NOTE: the running service is kept; pending migrations must be purely ADDITIVE (new tables/columns/indexes only) — DEPLOY §10"
+    if [ "$STALE" = 1 ]; then echo "WARN: no passwordless sudo — the OLD version keeps serving during and after this run; afterwards run: sudo systemctl restart word-dance"; fi
   fi
 fi
 run "$REPO/.venv/bin/wd" migrate                                    # cli.py: db.run_migrations() records each NNNN file itself; snapshots first (§5)
@@ -137,7 +144,9 @@ if [ "$HAVE_SUDO" = 1 ]; then
   if [ "$NO_RESTART" = 1 ]; then run sudo -n systemctl start word-dance.service; else run sudo -n systemctl restart word-dance.service; fi
   run sudo -n systemctl start word-dance-backup.timer
 else
-  echo "run as root:"; echo "  install units from $REPO/deploy into /etc/systemd/system, then: systemctl daemon-reload && systemctl enable --now word-dance word-dance-backup.timer"
+  if [ "$ACTIVE" = 1 ]; then ROOT_STEPS="systemctl daemon-reload && systemctl restart word-dance && systemctl enable --now word-dance-backup.timer"   # `enable --now` is a no-op on an active unit
+  else ROOT_STEPS="systemctl daemon-reload && systemctl enable --now word-dance word-dance-backup.timer"; fi
+  echo "run as root:"; echo "  install units from $REPO/deploy into /etc/systemd/system, then: $ROOT_STEPS"
 fi
 
 # 8. optional reverse proxy -----------------------------------------------
@@ -157,12 +166,13 @@ if [ "$DRY" = 1 ]; then log "dry run complete — nothing was changed"; exit 0; 
 log "health"
 for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health"; echo
-if [ -n "${WD_PUBLIC_URL:-}" ]; then echo "word-Dance is running at $WD_PUBLIC_URL";
+if [ "$STALE" = 1 ]; then echo "health OK, but the OLD process answered — the new version is not running yet; run: sudo systemctl restart word-dance";
+elif [ -n "${WD_PUBLIC_URL:-}" ]; then echo "word-Dance is running at $WD_PUBLIC_URL";
 else echo "word-Dance is running at http://${LAN_IP:-$(hostname -I | awk '{print $1}')}:${WD_PORT:-8000}  (bind ${WD_HOST:-0.0.0.0})"; fi
 echo "registration mode: ${WD_REGISTRATION_MODE:-invite} — the first account registered becomes admin; afterwards create invite codes with: $REPO/.venv/bin/wd invite --uses 5 --days 7"
 ```
 
-Behaviour: re-running after `git pull` upgrades dependencies, rebuilds the frontend, **stops the running unit** (unless `--no-restart`), applies new migrations (with a pre-migrate snapshot), starts the unit again, and never touches `.env` (apart from filling an empty `WD_PUBLIC_URL` with the LAN URL on a proxy-less install), the DB or images. `.env` is validated before it is sourced: every line must be `KEY="value"` (§4).
+Behaviour: re-running after `git pull` upgrades dependencies, rebuilds the frontend, **stops the running unit** (unless `--no-restart`), applies new migrations (with a pre-migrate snapshot), starts the unit again, and never touches `.env` (apart from filling an empty `WD_PUBLIC_URL` with the LAN URL on a proxy-less install), the DB or images. `.env` is validated before it is sourced: every line must be `KEY="value"` (§4). The running-unit probe (`systemctl is-active`) needs no privilege, so it also runs without passwordless `sudo -n`: the unit is then neither stopped nor restarted, the script prints the additive-only NOTE plus `WARN: no passwordless sudo — the OLD version keeps serving …`, the step-7 fallback says `systemctl restart word-dance` (not `enable --now`, a no-op on an active unit), and step 9 ends with `health OK, but the OLD process answered — … run: sudo systemctl restart word-dance` instead of the success line. Under `--dry-run` on a fresh box the `WD_PUBLIC_URL` branch reads `deploy/env.example` (the file step 5 would have copied) so the planned `sed -i` is printed and nothing is read from the absent `.env`.
 
 `deploy/fetch_ecdict.sh <DATA>` (optional, `--with-ecdict`): downloads `https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip` (216 MB) with `curl -fL --retry 3 -o "$DATA/tmp/ecdict-sqlite-28.zip"`, verifies `sha256sum` against the pinned `ECDICT_SHA256=ea01f76a3b3351021ce47077e89234465cc9441c8793054495320d06c0c3f3f6` (computed from the verified release asset on this box; mismatch → delete + exit 1), extracts with the **stdlib** `python3 -m zipfile -e "$DATA/tmp/ecdict-sqlite-28.zip" "$DATA/tmp/ecdict"` (the zip's single member is `stardict.db`, 851 MB; no `unzip` binary exists on the box — FACTS §1), moves it to `$DATA/stardict.db` (0600), removes the zip, and writes `WD_ECDICT_DB_PATH="$DATA/stardict.db"` into `.env` (quoted). Idempotent: exits 0 at once when `$DATA/stardict.db` already exists. Needs ≈ 1.1 GB free in `$DATA` during extraction (checked first). Options are parsed by a `while` loop, so they combine in any order (`--with-ecdict --with-caddy DOMAIN --no-restart`). `--dry-run` routes every mutating step through `run()`, which prints `+ <command>` instead of executing it, and exits before the health check — so `deploy/install.sh --dry-run` is safe on a fresh box (WP9 acceptance). `WD_CONTACT_EMAIL` comes from the environment, `--contact-email`, or an interactive prompt when `.env` is first created (falls back to `admin@localhost`). The printed URL is consistent with the bind: default `WD_HOST=0.0.0.0` → LAN URL; with a proxy → `127.0.0.1` + the https URL.
 
@@ -296,7 +306,7 @@ Secrets never leave `.env`; `GET /api/admin/config` masks them.
 
 * `wd backup --keep-daily N --keep-weekly M`: `VACUUM INTO '$DATA/tmp/word-dance-<ts>.db'` (consistent online snapshot under WAL) → `PRAGMA integrity_check` on the copy (abort + `system_events('backup_failed')` + non-zero exit if not `ok`) → gzip → `$DATA/backups/word-dance-YYYYMMDD-HHMM.db.gz` (0600) → retention: newest N daily + Sunday copies up to M weekly → `kv.backup.last = {file, at, bytes}` (shown in admin health). Images are re-fetchable and not backed up by default; `--with-images` adds `images-YYYYMMDD.tar`. The same flags are used everywhere (timer unit, DESIGN §11, WP9 acceptance).
 * `wd migrate [--dry-run]` (`cli.py` → `db.run_migrations(pre_hook=wd.backup.snapshot_before_migrate)`, the hook late-imported and skipped with a warning if `backup.py` is absent during Phase 0): pending = `backend/wd/migrations/NNNN_*.sql` whose `NNNN` is not in `schema_migrations`; before applying the first pending file it writes `backups/pre-migrate-<from>-to-<to>.db.gz` (same pipeline); each file then runs inside one `BEGIN IMMEDIATE` transaction and **the runner inserts `schema_migrations(version, name)` in that same transaction** — migration files never self-register (SCHEMA.sql §1/§10), so a fresh install cannot hit a duplicate-key crash and a half-applied file rolls back together with its bookkeeping row. This atomicity holds only because `db.connect()` opens the connection with `sqlite3.connect(path, autocommit=True)` (Python 3.12) and the runner issues `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` explicitly — in the legacy default mode `conn.executescript()` commits implicitly before running the file (verified on this box), silently ending the transaction (TASKS P0 step 4 + its unit test). `--dry-run` lists pending files only. install.sh stops the running unit before `wd migrate` (unless `--no-restart`, §2/§10).
-* `wd restore <file.db.gz> [--yes]`: refuses while the service runs (checks `kv.worker_lease` expiry and `systemctl is-active`); moves the current DB to `word-dance.db.bak-<ts>`, gunzips, runs `integrity_check`, removes stale `-wal/-shm`, prints `sudo systemctl start word-dance`.
+* `wd restore <file.db.gz> [--yes]`: refuses while the service runs (checks `kv.worker_lease` expiry and `systemctl is-active`); gunzips to `word-dance.db.restore-<ts>` **next to the target** (never into `tmp/`: `WD_DB_PATH` may be on another filesystem and the final rename must not cross devices) and runs `integrity_check` first; runs `PRAGMA wal_checkpoint(TRUNCATE)` on the current DB and **refuses (exit 2) when SQLite reports it blocked** (`busy` / frames not folded in — another connection holds an open transaction, and the `.bak` would otherwise silently lose the newest commits); keeps the current DB as `word-dance.db.bak-<ts>` (hard link; a copy where links are unsupported), moves its `-wal`/`-shm` next to that name (`.bak-<ts>-wal`/`-shm`, recovered by SQLite when the `.bak` is opened — complete even when the checkpoint failed on a damaged file), then swaps the verified copy in with **one atomic `os.replace`** — the database path is never absent and a failed swap leaves the current DB untouched (exit 1); sets 0600, prints `sudo systemctl start word-dance`.
 * Off-box copies: `rsync -a --delete /home/sqin/word-dance-data/backups/ user@host:/backups/word-dance/` from any cron on another machine (documented in `docs/ops.md`).
 * Monthly drill (ops.md): restore into `$DATA/tmp` and run `wd check --db <path>`.
 
@@ -353,7 +363,7 @@ make install # deploy/install.sh
 
 ## 10. Upgrade and rollback
 
-Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, frontend, then **the unit is stopped**, migrations run with the pre-migrate snapshot, and the unit is started again (downtime ≈ the migration time + 3 s, typically < 30 s; in-flight jobs are recovered by the stale-lock sweep; a `claude` call in flight is allowed up to `TimeoutStopSec=300` to finish). With `--no-restart` the service keeps running during `wd migrate`, which is safe **only for purely additive migrations** (new tables/columns/indexes; never `DROP`/`RENAME`/type changes) — install.sh prints that note. Rollback: `git checkout <previous tag> && deploy/install.sh` (stops, migrates nothing new, restarts); if a migration must be undone, `sudo systemctl stop word-dance && wd restore backups/pre-migrate-*.db.gz && sudo systemctl start word-dance`.
+Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, frontend, then **the unit is stopped**, migrations run with the pre-migrate snapshot, and the unit is started again (downtime ≈ the migration time + 3 s, typically < 30 s; in-flight jobs are recovered by the stale-lock sweep; a `claude` call in flight is allowed up to `TimeoutStopSec=300` to finish). With `--no-restart` the service keeps running during `wd migrate`, which is safe **only for purely additive migrations** (new tables/columns/indexes; never `DROP`/`RENAME`/type changes) — install.sh prints that note. The same applies without passwordless `sudo -n` (§2): the script detects the running unit anyway but cannot stop or restart it, prints the note plus a `WARN` that the OLD version keeps serving, and its last line tells you to run `sudo systemctl restart word-dance` instead of claiming success — stop the unit yourself before re-running when a pending migration is not additive. Rollback: `git checkout <previous tag> && deploy/install.sh` (stops, migrates nothing new, restarts); if a migration must be undone, `sudo systemctl stop word-dance && wd restore backups/pre-migrate-*.db.gz && sudo systemctl start word-dance`.
 
 ## 11. Runbook highlights (`docs/ops.md`)
 

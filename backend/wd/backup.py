@@ -9,9 +9,16 @@
   pass through ``db.backup_pre_hook()``: writes ``backups/pre-migrate-<from>-to-<to>.db.gz`` through the same
   pipeline before the first pending migration file runs. A fresh database (``from_version == 0``) has nothing to protect and is skipped.
 * ``wd restore <file.db.gz> [--yes]``: refuses while the service runs (``kv.worker_lease`` live or
-  ``systemctl is-active word-dance.service``), verifies the archive first (gunzip → ``integrity_check``), then moves
-  the current database to ``word-dance.db.bak-<ts>``, removes stale ``-wal``/``-shm`` files, puts the verified copy in
-  place (0600) and prints ``sudo systemctl start word-dance``.
+  ``systemctl is-active word-dance.service``), verifies the archive first (gunzip → ``integrity_check``, into
+  ``word-dance.db.restore-<ts>`` **next to the target**, so the final rename never crosses a filesystem even when
+  ``WD_DB_PATH`` lives outside ``WD_DATA_DIR``), folds the WAL of the current database with ``wal_checkpoint(TRUNCATE)``
+  and refuses (exit 2) when SQLite reports it blocked — another connection holds an open transaction and the frames
+  left in the WAL would be the only copy of the newest commits — then keeps the current database as
+  ``word-dance.db.bak-<ts>`` (a hard link; a copy where links are unsupported), moves its ``-wal``/``-shm`` next to
+  that name (SQLite recovers them when the ``.bak`` is opened, so the kept copy is complete even when the checkpoint
+  could not run on a damaged file), swaps the verified copy in with ONE atomic ``os.replace`` — the database path is
+  never absent, and a failed swap leaves the current database untouched (exit 1) — sets 0600 and prints
+  ``sudo systemctl start word-dance``.
 
 File names use the operational timezone ``WD_TZ`` (the timer fires at 03:30 Asia/Shanghai → ``…-0330.db.gz``);
 ``kv.backup.last.at`` is UTC like every other timestamp. Images are re-fetchable and not backed up unless
@@ -47,6 +54,8 @@ IMAGES_TAR_RE = re.compile(r"^images-(\d{4})(\d{2})(\d{2})\.tar$")
 PRE_MIGRATE_NAME = "pre-migrate-{from_version}-to-{to_version}.db.gz"
 SERVICE_NAME = "word-dance.service"
 CHUNK = 1 << 20
+CHECKPOINT_TIMEOUT_S = 5.0  # busy wait of the wal_checkpoint before a restore (tests lower it)
+DB_SIDE_SUFFIXES = ("-wal", "-shm")
 
 
 class BackupError(RuntimeError):
@@ -327,16 +336,109 @@ def lease_is_live(db_path: Path, now: datetime) -> dict | None:
         conn.close()
 
 
-def _checkpoint(db_path: Path) -> None:
-    """Fold the WAL into the main file so the ``.bak`` copy is complete (best effort — the DB may be damaged)."""
+@dataclass(frozen=True)
+class Checkpoint:
+    """The ``(busy, log, checkpointed)`` row of ``PRAGMA wal_checkpoint(TRUNCATE)`` run before a restore."""
+
+    busy: bool = False
+    log: int = 0
+    checkpointed: int = 0
+    error: str | None = None  # the pragma itself failed (a damaged file, which is a reason to restore, not to refuse)
+
+    @property
+    def blocked(self) -> bool:
+        """Another connection holds an open transaction. SQLite reports a blocked checkpoint in the result row
+        (``busy=1``, ``checkpointed < log``), never as an exception; the frames still in the WAL are then the only copy
+        of the newest commits, so a ``.bak`` made of the main file alone would silently lose them."""
+        return self.error is None and (self.busy or self.checkpointed < self.log)
+
+
+def _checkpoint(db_path: Path, *, timeout: float | None = None) -> Checkpoint:
+    """Fold the WAL into the main file so the ``.bak`` copy is complete; see :class:`Checkpoint`."""
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn = sqlite3.connect(str(db_path), timeout=CHECKPOINT_TIMEOUT_S if timeout is None else timeout)
         try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         finally:
             conn.close()
     except sqlite3.Error as e:
-        log.warning("wal_checkpoint before restore failed (continuing): %s", e)
+        log.warning("wal_checkpoint before restore failed: %s", e)
+        return Checkpoint(error=str(e))
+    if not row:  # pragma: no cover - the pragma always yields one row
+        return Checkpoint()
+    busy, nlog, nckpt = (int(v) for v in row)  # log/checkpointed are -1 for a database that is not in WAL mode
+    return Checkpoint(busy=bool(busy), log=nlog, checkpointed=nckpt)
+
+
+def _unlink_db_files(path: Path, *, main: bool = True) -> None:
+    """Remove ``path`` (optionally) and its ``-wal``/``-shm`` companions."""
+    if main:
+        path.unlink(missing_ok=True)
+    for suffix in DB_SIDE_SUFFIXES:
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def _unique(path: Path) -> Path:
+    """``path`` itself, or ``path-1``, ``path-2``, … when it exists already (two restores within one second) — a kept
+    copy is never overwritten."""
+    if not path.exists():
+        return path
+    n = 1
+    while path.with_name(f"{path.name}-{n}").exists():
+        n += 1
+    return path.with_name(f"{path.name}-{n}")
+
+
+def _keep_copy(src: Path, dest: Path) -> None:
+    """Give ``src`` the second name ``dest``: a hard link (same inode — instant, no extra space, same 0600 mode);
+    a copy on filesystems without hard links."""
+    try:
+        os.link(src, dest)
+    except FileExistsError:
+        raise
+    except OSError as e:
+        log.info("hard link %s -> %s not possible (%s); copying instead", src, dest, e)
+        shutil.copy2(src, dest)
+
+
+def _swap_in(db_path: Path, candidate: Path, backup_path: Path | None) -> None:
+    """Put ``candidate`` (already next to ``db_path``, same filesystem) in place of ``db_path`` without a moment in
+    which ``db_path`` is absent.
+
+    1. the current file gets its second name ``backup_path`` (:func:`_keep_copy`);
+    2. its ``-wal``/``-shm`` move next to that name: SQLite's WAL recovery is file-name independent, so the kept copy
+       is complete even when the checkpoint could not run, and an empty or garbage file is ignored on open;
+       (without a database to keep, leftover ``-wal``/``-shm`` are orphans and are deleted — they must never be
+       recovered into the restored file);
+    3. ONE atomic ``os.replace(candidate, db_path)``.
+    Any ``OSError`` undoes 1–2 and propagates; the caller removes the candidate. Before this ordering the live file
+    was renamed away first and ``os.replace`` from ``tmp/`` could fail afterwards (``EXDEV`` when ``WD_DB_PATH`` is on
+    another filesystem), leaving no database at ``db_path`` at all.
+    """
+    moved: list[tuple[Path, Path]] = []
+    kept = False
+    try:
+        if backup_path is not None:
+            _keep_copy(db_path, backup_path)
+            kept = True
+            for suffix in DB_SIDE_SUFFIXES:
+                side = Path(f"{db_path}{suffix}")
+                if side.exists():
+                    dest = Path(f"{backup_path}{suffix}")
+                    os.replace(side, dest)
+                    moved.append((side, dest))
+        else:
+            _unlink_db_files(db_path, main=False)
+        os.replace(candidate, db_path)
+    except OSError:
+        for side, dest in reversed(moved):
+            try:
+                os.replace(dest, side)
+            except OSError as e:  # pragma: no cover - the directory just allowed the opposite rename
+                log.error("could not move %s back to %s: %s", dest, side, e)
+        if kept and backup_path is not None:
+            backup_path.unlink(missing_ok=True)
+        raise
 
 
 def restore(
@@ -376,9 +478,11 @@ def restore(
             return 2
 
     stamp = _local(when, cfg.tz).strftime("%Y%m%d-%H%M%S")
-    cfg.tmp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    candidate = cfg.tmp_dir / f"restore-{stamp}.db"
-    candidate.unlink(missing_ok=True)
+    # the candidate is built NEXT TO the target (``word-dance.db.restore-<ts>``), not in ``tmp/``: ``WD_DB_PATH`` may
+    # live on another filesystem than ``WD_DATA_DIR`` (DEPLOY §4) and the final swap must be a same-device rename
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    candidate = cfg.db_path.with_name(f"{cfg.db_path.name}.restore-{stamp}")
+    _unlink_db_files(candidate)
     try:
         if archive.name.endswith(".gz"):
             _gunzip_file(archive, candidate)
@@ -387,10 +491,11 @@ def restore(
             with os.fdopen(fd, "wb") as out, archive.open("rb") as f:
                 shutil.copyfileobj(f, out, CHUNK)
     except (OSError, EOFError, gzip.BadGzipFile) as e:
-        candidate.unlink(missing_ok=True)
+        _unlink_db_files(candidate)
         print(f"wd restore: cannot read {archive}: {e}", file=sys.stderr)
         return 1
     ok, detail = integrity_ok(candidate)
+    _unlink_db_files(candidate, main=False)  # a read-only open leaves no -wal/-shm today; never let one travel along
     if not ok:
         candidate.unlink(missing_ok=True)
         print(f"wd restore: {archive.name} failed integrity_check ({detail}); the current database was left untouched", file=sys.stderr)
@@ -398,13 +503,25 @@ def restore(
 
     backup_path: Path | None = None
     if cfg.db_path.exists():
-        _checkpoint(cfg.db_path)
-        backup_path = cfg.db_path.with_name(f"{cfg.db_path.name}.bak-{stamp}")
-        os.replace(cfg.db_path, backup_path)
-    for suffix in ("-wal", "-shm"):
-        Path(f"{cfg.db_path}{suffix}").unlink(missing_ok=True)  # stale WAL/SHM belong to the old file
-    cfg.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.replace(candidate, cfg.db_path)
+        ckpt = _checkpoint(cfg.db_path)
+        if ckpt.blocked:
+            candidate.unlink(missing_ok=True)
+            print(
+                f"wd restore: another connection holds an open transaction on {cfg.db_path} (wal_checkpoint busy: "
+                f"{ckpt.checkpointed} of {ckpt.log} WAL frames folded in) — close sqlite3 shells / DB browsers / "
+                "wd stats|check and retry; nothing was changed",
+                file=sys.stderr,
+            )
+            return 2
+        if ckpt.error:
+            print(f"wd restore: wal_checkpoint on {cfg.db_path} failed ({ckpt.error}); its -wal/-shm files are kept next to the .bak copy", file=sys.stderr)
+        backup_path = _unique(cfg.db_path.with_name(f"{cfg.db_path.name}.bak-{stamp}"))
+    try:
+        _swap_in(cfg.db_path, candidate, backup_path)
+    except OSError as e:
+        candidate.unlink(missing_ok=True)
+        print(f"wd restore: could not replace {cfg.db_path}: {e}; the current database was left untouched", file=sys.stderr)
+        return 1
     cfg.db_path.chmod(0o600)
     print(f"restored {cfg.db_path} from {archive}")
     if backup_path is not None:

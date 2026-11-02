@@ -55,17 +55,31 @@ def _node_ok() -> bool:
     return v.split(".")[0].isdigit() and int(v.split(".")[0]) >= 22
 
 
-def _install_env(tmp_path: Path, data_dir: Path) -> dict[str, str]:
-    """A hermetic environment for install.sh --dry-run: a fake `claude` in PATH, no inherited WD_* values."""
+def _install_env(tmp_path: Path, data_dir: Path, *, sudo_ok: bool = True, service_active: bool = False) -> dict[str, str]:
+    """A hermetic environment for install.sh --dry-run: fake `claude`, `sudo` (passwordless or not) and `systemctl`
+    (unit active or not) in PATH, no inherited WD_* values — the printed plan must not depend on the host's unit or
+    sudoers. Under --dry-run only the read-only probes (`sudo -n true`, `systemctl is-active`) are executed."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
-    claude = fake_bin / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n")
-    claude.chmod(0o755)
+    fakes = {
+        "claude": "exit 0",
+        "sudo": "exit 0" if sudo_ok else "exit 1",
+        "systemctl": f'[ "$1" = is-active ] && exit {0 if service_active else 3}\nexit 0',
+    }
+    for name, body in fakes.items():
+        p = fake_bin / name
+        p.write_text(f"#!/bin/sh\n{body}\n")
+        p.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if not k.startswith("WD_")}
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["WD_DATA_DIR"] = str(data_dir)
     return env
+
+
+def _lan_ip() -> str | None:
+    """What install.sh computes: the default-route source address, else the first `hostname -I` address."""
+    route = _sh(["bash", "-c", "ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == \"src\") {print $(i+1); exit}}'"]).stdout.strip()
+    return route or _sh(["bash", "-c", "hostname -I 2>/dev/null | awk '{print $1}'"]).stdout.strip() or None
 
 
 # ------------------------------------------------------------------------------------- env.example
@@ -217,7 +231,62 @@ def test_install_sh_dry_run_prints_every_step_and_changes_nothing(tmp_path):
         assert any(needle in l for l in plus), needle
     assert not data.exists()  # nothing created
     assert not (REPO / ".venv").exists() or True  # the worktree may or may not have a venv; the dry run must not create one
-    assert "+ sudo -n systemctl stop" not in out  # no service is running here
+    assert "+ sudo -n systemctl stop" not in out and "NOTE:" not in out  # the (fake) unit is inactive
+    # the WD_PUBLIC_URL branch reads the template the dry run would have copied — never the absent .env
+    # (was: `grep: …/.env: No such file or directory` on stderr and the planned `sed -i` missing from the plan)
+    assert cp.stderr == ""
+    sed_lines = [l for l in plus if l.startswith("+ sed -i") and "WD_PUBLIC_URL" in l]
+    lan = _lan_ip()
+    if lan:
+        assert len(sed_lines) == 1 and f'WD_PUBLIC_URL="http://{lan}:8000"' in sed_lines[0], sed_lines
+    else:
+        assert sed_lines == []
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_upgrade_with_sudo_stops_the_unit_before_migrate(tmp_path):
+    data = tmp_path / "data"
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data, sudo_ok=True, service_active=True))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    plus = [l for l in cp.stdout.splitlines() if l.startswith("+ ")]
+    stop = plus.index("+ sudo -n systemctl stop word-dance.service")
+    migrate = next(i for i, l in enumerate(plus) if l.endswith("/.venv/bin/wd migrate"))
+    restart = plus.index("+ sudo -n systemctl restart word-dance.service")
+    assert stop < migrate < restart
+    assert "NOTE:" not in cp.stdout and "OLD version" not in cp.stdout
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_upgrade_without_passwordless_sudo_warns_that_the_old_version_keeps_serving(tmp_path):
+    """HAVE_SUDO=0 must not skip the running-unit check (`systemctl is-active` needs no privilege): the unit cannot be
+    stopped, so the operator is told that the migration runs next to the live old process (additive only), that the
+    OLD version keeps serving, and the root-steps hint says `restart` (`enable --now` is a no-op on an active unit)."""
+    data = tmp_path / "data"
+    env = _install_env(tmp_path, data, sudo_ok=False, service_active=True)
+    cp = _sh([str(INSTALL), "--dry-run"], env=env)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    out = cp.stdout
+    assert "WARN: no passwordless sudo — systemd steps will be printed, not executed" in out
+    assert "NOTE: the running service is kept; pending migrations must be purely ADDITIVE" in out
+    assert "WARN: no passwordless sudo — the OLD version keeps serving during and after this run; afterwards run: sudo systemctl restart word-dance" in out
+    assert "systemctl stop" not in out
+    assert "systemctl daemon-reload && systemctl restart word-dance" in out
+    assert "enable --now word-dance word-dance-backup.timer" not in out
+    lines = out.splitlines()
+    note = next(i for i, l in enumerate(lines) if l.startswith("NOTE:"))
+    migrate = next(i for i, l in enumerate(lines) if l.endswith("/.venv/bin/wd migrate"))
+    assert note < migrate
+    # --no-restart: the operator asked for it — the NOTE stays, the stale-process warning does not apply
+    cp2 = _sh([str(INSTALL), "--dry-run", "--no-restart"], env=env)
+    assert cp2.returncode == 0 and "NOTE: the running service is kept" in cp2.stdout and "OLD version keeps serving" not in cp2.stdout
+    # no sudo but no running unit (a fresh box): neither line
+    cp3 = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data, sudo_ok=False, service_active=False))
+    assert cp3.returncode == 0 and "NOTE:" not in cp3.stdout and "OLD version" not in cp3.stdout
+    assert "enable --now word-dance word-dance-backup.timer" in cp3.stdout
+    # step 9 is not reached under --dry-run: pin its wording — the health line must not claim success for a stale process
+    body = INSTALL.read_text(encoding="utf-8")
+    assert re.search(r'^if \[ "\$STALE" = 1 \]; then echo "health OK, but the OLD process answered', body, re.M)
+    assert body.index('if [ "$STALE" = 1 ]; then echo "health OK') < body.index('echo "word-Dance is running at $WD_PUBLIC_URL"')
 
 
 @pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import io
 import json
@@ -10,6 +11,7 @@ import shutil
 import sqlite3
 import stat
 import tarfile
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -246,7 +248,7 @@ def test_cli_backup_then_restore_round_trip(settings, no_service, capsys):
     assert len(baks) == 1
     assert not Path(f"{settings.db_path}-wal").exists() or Path(f"{settings.db_path}-wal").read_bytes() != b"stale"
     assert not Path(f"{settings.db_path}-shm").exists() or Path(f"{settings.db_path}-shm").read_bytes() != b"stale"
-    assert list(settings.tmp_dir.glob("restore-*.db")) == []
+    _no_candidate_left(settings)
 
 
 def test_cli_backup_defaults_come_from_settings(settings, conn, monkeypatch, capsys):
@@ -299,7 +301,7 @@ def test_restore_rejects_corrupt_archive(settings, conn, no_service, tmp_path, c
     assert "integrity_check" in capsys.readouterr().err
     assert db.kv_get(conn, "marker") == "live"
     assert list(settings.db_path.parent.glob("*.bak-*")) == []
-    assert list(settings.tmp_dir.glob("restore-*.db")) == []
+    _no_candidate_left(settings)
 
 
 def test_restore_rejects_missing_or_odd_files(settings, conn, no_service, tmp_path, capsys):
@@ -307,6 +309,190 @@ def test_restore_rejects_missing_or_odd_files(settings, conn, no_service, tmp_pa
     odd = tmp_path / "x.txt"
     odd.write_text("x")
     assert cli.main(["restore", str(odd), "--yes"]) == 1
+
+
+# --------------------------------------------------------------- restore: the swap and the kept copy (review fixes)
+def _no_candidate_left(cfg) -> None:
+    """The verified copy is built next to the target (``word-dance.db.restore-<ts>``); nothing of it may remain."""
+    assert list(cfg.db_path.parent.glob("*.restore-*")) == []
+    assert list(cfg.tmp_dir.glob("restore-*")) == []
+
+
+def _settings_with_db(monkeypatch, db_path: Path):
+    """Settings whose ``WD_DB_PATH`` is ``db_path`` — DEPLOY §4 allows a database outside ``WD_DATA_DIR``."""
+    from wd.config import Settings, ensure_dirs
+
+    monkeypatch.setenv("WD_DB_PATH", str(db_path))
+    cfg = Settings.from_env()
+    ensure_dirs(cfg)
+    return cfg
+
+
+def _archive_of(cfg, marker: str) -> Path:
+    """A migrated database whose ``kv.marker`` is ``marker``, backed up; returns the archive."""
+    c = db.connect(cfg.db_path)
+    db.run_migrations(c)
+    db.kv_set(c, "marker", marker)
+    c.close()
+    return backup.run_backup(cfg, keep_daily=14, keep_weekly=8, now=NOW).path
+
+
+def _set_marker(db_path: Path, value: str) -> None:
+    c = db.connect(db_path)
+    db.kv_set(c, "marker", value)
+    c.close()
+
+
+def _marker_and_integrity(db_path: Path) -> tuple[str | None, str]:
+    c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = c.execute("SELECT value FROM kv WHERE key='marker'").fetchone()
+        return (row[0] if row else None), c.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        c.close()
+
+
+def _kept_copies(cfg) -> list[Path]:
+    return [p for p in cfg.db_path.parent.glob("word-dance.db.bak-*") if not p.name.endswith(("-wal", "-shm"))]
+
+
+def _restore_round_trip(cfg, capsys) -> Path:
+    archive = _archive_of(cfg, "v1")
+    _set_marker(cfg.db_path, "v2")
+    assert cli.main(["restore", str(archive), "--yes"]) == 0
+    assert "previous database kept at" in capsys.readouterr().out
+    assert _marker_and_integrity(cfg.db_path) == ("v1", "ok")
+    assert _mode(cfg.db_path) == 0o600
+    baks = _kept_copies(cfg)
+    assert len(baks) == 1
+    assert _marker_and_integrity(baks[0]) == ("v2", "ok")  # the kept copy is complete
+    _no_candidate_left(cfg)
+    return baks[0]
+
+
+def test_restore_round_trip_with_db_outside_data_dir(test_env, no_service, monkeypatch, tmp_path, capsys):
+    cfg = _settings_with_db(monkeypatch, tmp_path / "elsewhere" / "db" / "word-dance.db")
+    assert cfg.db_path.parent != cfg.data_dir
+    bak = _restore_round_trip(cfg, capsys)
+    assert bak.parent == cfg.db_path.parent
+    assert list(cfg.data_dir.glob("*.bak-*")) == []
+
+
+def _other_device(near: Path) -> Path | None:
+    """A writable directory on another filesystem than ``near`` (``/dev/shm`` is tmpfs on the target box)."""
+    shm = Path("/dev/shm")
+    if shm.is_dir() and os.access(shm, os.W_OK) and os.stat(shm).st_dev != os.stat(near).st_dev:
+        return shm
+    return None
+
+
+def test_restore_round_trip_across_filesystems(test_env, no_service, monkeypatch, tmp_path, capsys):
+    """``WD_DB_PATH`` on another filesystem than ``WD_DATA_DIR``: the swap must be a same-device rename. The previous
+    order (``os.replace`` the live DB to ``.bak`` first, then ``os.replace`` the candidate out of ``tmp/``) failed
+    with ``EXDEV`` after the first step and left no database at ``db_path`` at all."""
+    other = _other_device(tmp_path)
+    if other is None:
+        pytest.skip("needs a writable directory on another filesystem than the pytest tmp dir (/dev/shm)")
+    base = Path(tempfile.mkdtemp(prefix="wd-test-restore-", dir=other))
+    try:
+        cfg = _settings_with_db(monkeypatch, base / "word-dance.db")
+        assert os.stat(cfg.db_path.parent).st_dev != os.stat(cfg.tmp_dir).st_dev
+        _restore_round_trip(cfg, capsys)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_restore_failed_swap_leaves_the_database_untouched(settings, no_service, monkeypatch, capsys):
+    """The final rename fails (an ``EXDEV``-style error): the live DB, its ``-wal``/``-shm`` and the directory are
+    exactly as before and the exit code is 1 — there is never a moment without a database at ``db_path``."""
+    archive = _archive_of(settings, "v1")
+    idle = db.connect(settings.db_path)  # keeps the WAL alive: the newest commit stays in word-dance.db-wal
+    idle.execute("SELECT count(*) FROM kv").fetchone()
+    _set_marker(settings.db_path, "v2")
+    wal, shm = Path(f"{settings.db_path}-wal"), Path(f"{settings.db_path}-shm")
+    before_db, before_wal = settings.db_path.read_bytes(), wal.read_bytes()
+    assert len(before_wal) > 32 and shm.exists()
+    # the checkpoint "fails" (the damaged-file path), so the -wal/-shm travel with the .bak and must be moved back
+    monkeypatch.setattr(backup, "_checkpoint", lambda p, **kw: backup.Checkpoint(error="simulated"))
+    real_replace = os.replace
+
+    def failing_replace(src, dst, *args, **kwargs):
+        if Path(dst) == settings.db_path:
+            raise OSError(errno.EXDEV, "Invalid cross-device link", str(src), None, str(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    assert cli.main(["restore", str(archive), "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert "could not replace" in err and "left untouched" in err
+    assert settings.db_path.read_bytes() == before_db and wal.read_bytes() == before_wal and shm.exists()
+    names = sorted(p.name for p in settings.db_path.parent.iterdir() if p.name.startswith("word-dance.db"))
+    assert names == ["word-dance.db", "word-dance.db-shm", "word-dance.db-wal"]  # no .bak, no candidate
+    _no_candidate_left(settings)
+    idle.close()  # the last connection folds the WAL back in: nothing was lost
+    assert _marker_and_integrity(settings.db_path) == ("v2", "ok")
+
+
+def test_restore_refuses_while_another_connection_holds_a_transaction(settings, no_service, monkeypatch, capsys):
+    """A reader on an older snapshot (a forgotten ``BEGIN;`` in a sqlite3 shell) blocks ``wal_checkpoint(TRUNCATE)``;
+    SQLite reports that in the result row, not as an error. Restore must refuse instead of deleting the WAL frames
+    that are the only copy of the newest commits (the ``.bak`` would silently lose them)."""
+    archive = _archive_of(settings, "v1")
+    reader = db.connect(settings.db_path)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM kv").fetchone()  # the read snapshot predates the next commit
+    _set_marker(settings.db_path, "v2")  # lands in the WAL; the writer's close cannot checkpoint past the reader
+    wal = Path(f"{settings.db_path}-wal")
+    wal_size = wal.stat().st_size
+    assert wal_size > 32
+    monkeypatch.setattr(backup, "CHECKPOINT_TIMEOUT_S", 0.2)
+    try:
+        assert cli.main(["restore", str(archive), "--yes"]) == 2
+        err = capsys.readouterr().err
+        assert "another connection holds an open transaction" in err and "wal_checkpoint busy" in err
+        assert wal.stat().st_size == wal_size  # the frames are untouched
+        assert list(settings.db_path.parent.glob("*.bak-*")) == []
+        _no_candidate_left(settings)
+        assert _marker_and_integrity(settings.db_path) == ("v2", "ok")
+    finally:
+        reader.execute("ROLLBACK")
+        reader.close()
+    # the reader is gone: the same restore succeeds and the kept copy holds the newest commit
+    assert cli.main(["restore", str(archive), "--yes"]) == 0
+    assert _marker_and_integrity(settings.db_path) == ("v1", "ok")
+    baks = _kept_copies(settings)
+    assert len(baks) == 1 and _marker_and_integrity(baks[0]) == ("v2", "ok")
+
+
+def test_restore_keeps_wal_next_to_bak_when_checkpoint_fails(settings, no_service, monkeypatch, capsys):
+    """Damaged-file path: the checkpoint cannot run, yet the frames of the newest commits travel with the ``.bak``
+    (``.bak-<ts>-wal``) instead of being deleted, and SQLite recovers them when the ``.bak`` is opened."""
+    archive = _archive_of(settings, "v1")
+    idle = db.connect(settings.db_path)  # a second connection keeps the WAL alive (no close-time checkpoint)
+    idle.execute("SELECT count(*) FROM kv").fetchone()
+    _set_marker(settings.db_path, "v2")
+    wal = Path(f"{settings.db_path}-wal")
+    assert wal.stat().st_size > 32
+    monkeypatch.setattr(backup, "_checkpoint", lambda p, **kw: backup.Checkpoint(error="database disk image is malformed"))
+    assert cli.main(["restore", str(archive), "--yes"]) == 0
+    captured = capsys.readouterr()
+    assert "kept next to the .bak copy" in captured.err and "previous database kept at" in captured.out
+    idle.close()
+    baks = _kept_copies(settings)
+    assert len(baks) == 1 and Path(f"{baks[0]}-wal").exists()
+    assert not wal.exists()  # nothing of the old database is left next to the restored file
+    assert _marker_and_integrity(baks[0]) == ("v2", "ok")
+    assert _marker_and_integrity(settings.db_path) == ("v1", "ok")
+    _no_candidate_left(settings)
+
+
+def test_checkpoint_result_blocked_rule():
+    assert not backup.Checkpoint().blocked
+    assert not backup.Checkpoint(log=-1, checkpointed=-1).blocked  # not a WAL database
+    assert backup.Checkpoint(busy=True, log=1, checkpointed=0).blocked
+    assert backup.Checkpoint(busy=False, log=5, checkpointed=3).blocked
+    assert backup.Checkpoint(busy=True, log=5, checkpointed=5).blocked  # a reader on the latest snapshot: refuse too
+    assert not backup.Checkpoint(error="malformed").blocked  # a damaged file is a reason to restore, not to refuse
 
 
 def test_cli_registers_backup_and_restore_without_stubs():
