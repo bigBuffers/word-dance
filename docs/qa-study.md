@@ -4,6 +4,9 @@ Checklist for the WP8 pages (`/today`, `/study`, `/screen`, `/screen/:stage`, `/
 `/history/:batchId`). Run against a real backend (`make dev`; the fake Claude via `WD_CLAUDE_BIN` is fine) with
 a user who finished onboarding and has a few bank words. Tick every box on a **phone (360 px)** and on a
 **desktop (1280 px)**; the keyboard column applies to the desktop run. Linked from `docs/qa.md` (WP9).
+Vite binds `localhost` only (open `http://localhost:5173`, not `127.0.0.1`), so a real phone cannot reach `:5173`:
+run `cd frontend && npm run dev -- --host` (then `http://<LAN-ip>:5173`), or use the built SPA of the installed
+service on `http://<LAN-ip>:8000`, or the desktop browser's device emulation at 360 px.
 
 Dev override for the 10-minute step: start Vite with `VITE_REQUEUE_SECONDS=30 npm run dev` — the client then
 shows a requeued card 30 s after its intermediate grade instead of waiting for the server's `requeue_at`

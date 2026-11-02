@@ -491,7 +491,7 @@ Streak: `daily_stats.graded ≥ 1` on review/new/extra cards (screening alone do
 
 ### 7.1 `daily_stats` deltas — `services/stats_core.on_action` (Phase 0, the single writer)
 
-`on_action(conn, user_id, local_date, *, action, context, new_state, item_kind, elapsed_ms, undone=None)` upserts the `(user_id, local_date)` row (`INSERT … ON CONFLICT DO UPDATE`). Called by WP3 (`bank.apply_action`, `apply_verdict`, `add_custom_words`, `import_rows`, suggestions) and WP4 (`grade_item`) right after the `review_logs` row is written; `local_date` is the user's local date of the action. `screening` below = `context IN ('screen_page','onboarding')` or `item_kind = 'screen'`; `card` = `item_kind IN ('review','new','extra')`.
+`on_action(conn, user_id, local_date, *, action, context, new_state, item_kind, elapsed_ms, undone=None, prev_state=None) -> dict[str, int]` (returns the applied deltas; `prev_state` = the action's `review_logs.prev_state`; `undone` = the reversed `review_logs` row plus `item_kind` resolved from `push_items`) upserts the `(user_id, local_date)` row (`INSERT … ON CONFLICT DO UPDATE`). Called by WP3 (`bank.apply_action`, `apply_verdict`, `add_custom_words`, `import_rows`, suggestions) and WP4 (`grade_item`) right after the `review_logs` row is written; `local_date` is the user's local date of the action. `screening` below = `context IN ('screen_page','onboarding')` or `item_kind = 'screen'`; `card` = `item_kind IN ('review','new','extra')`.
 
 | `action` | deltas |
 |---|---|

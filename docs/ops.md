@@ -3,7 +3,9 @@
 Companion to [`DEPLOY.md`](DEPLOY.md) (what is installed and why). This file is the *what do I do now* document for
 the person running the box. Paths are the defaults of DEPLOY §1: checkout `/home/sqin/word-Dance`, data directory
 `/home/sqin/word-dance-data` (`WD_DATA_DIR`), service user `sqin`, CLI `/home/sqin/word-Dance/.venv/bin/wd`
-(`wd …` below). Every `wd` command reads `$WD_DATA_DIR/.env` itself, so it works from any shell as `sqin`.
+(`wd …` below). Every `wd` command reads `$WD_DATA_DIR/.env` itself, so it works from any shell as `sqin` — with
+`WD_DATA_DIR` exported in that shell once the data directory has been moved (§5): the CLI and `install.sh` both default
+to `/home/sqin/word-dance-data`.
 
 ## 1. Daily checks
 
@@ -13,7 +15,7 @@ the person running the box. Paths are the defaults of DEPLOY §1: checkout `/hom
 | Backup timer | `systemctl list-timers word-dance-backup.timer` (next run 03:30 Asia/Shanghai, randomised ≤ 10 min) |
 | Liveness | `curl -fsS http://127.0.0.1:8000/api/health` → `{"status":"ok","needs_setup":false,…}` |
 | Live log | `journalctl -u word-dance -f` · `journalctl -u word-dance --since today -p warning` |
-| Last 200 log lines | `wd logs --tail 200` (DEPLOY §6) |
+| Last 200 log lines | `journalctl -u word-dance -n 200 -o cat` (JSON lines, DEPLOY §6). `wd logs --tail N` is **not** this: it tails `WD_LOG_FILE` when that is set (empty by default) and otherwise prints only a hint, because the 2000-line ring buffer it reads lives inside the `wd serve` process |
 | Self-check | `wd check all` (db · claude · smtp · providers) |
 | Admin view | log in as an admin → 管理 (overview: spend, queue, provider quotas, events, health incl. `last_backup`) |
 
@@ -97,6 +99,12 @@ pending), re-imports the seed only if the shipped file changed, starts the unit,
 database or images. Downtime ≈ migration time + 3 s. In-flight jobs are recovered by the stale-lock sweep; a Claude
 call in flight gets up to `TimeoutStopSec=300` to finish.
 
+**If the data directory was moved (§5), every `deploy/install.sh` / `make install` in this section — upgrade, code
+rollback, migration rollback — must see `WD_DATA_DIR=<dir>` in its environment** (the profile export of §5, or the
+prefix `WD_DATA_DIR=/new/path deploy/install.sh`). The script takes the data directory from that variable alone; a
+plain run creates a second, empty instance at `/home/sqin/word-dance-data` and points the units at it (§5 explains the
+recovery).
+
 `--no-restart` keeps the service running while migrating — only for purely additive migrations (new tables,
 columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder. Without passwordless
 `sudo -n` the script cannot stop or restart the unit either: it prints the same NOTE plus `WARN: no passwordless
@@ -131,6 +139,35 @@ CSRF origin), SMTP (`WD_SMTP_*`), optional provider keys (`WD_PIXABAY_KEY`, `WD_
 Rotating secrets: replace the value in `.env`, restart. Rotating `WD_SECRET_KEY` only invalidates unexpired
 e-mail verification codes.
 
+**Moving the data directory** (a bigger disk — the 「Disk low」 row of §6). `install.sh` learns the data directory
+from **one** place: the `WD_DATA_DIR` environment variable (`DATA=${WD_DATA_DIR:-/home/sqin/word-dance-data}`, the
+first line after `REPO=` in DEPLOY §2). It never reads the installed unit or a relocated `.env`, and its step 7
+re-renders **both** units from that value (`EnvironmentFile=__DATA__/.env` in `word-dance.service` and
+`word-dance-backup.service`), so the units are never edited by hand — an edit would be overwritten. A plain
+`deploy/install.sh` after a move therefore builds a **second, empty instance** at the default path: step 2 recreates
+the directory, step 5 writes a fresh `.env` (new `WD_SECRET_KEY`, contact-e-mail prompt), `wd migrate` /
+`wd import-seed` create and seed an empty database there, step 7 points both units back at it and restarts. The site
+then answers `needs_setup:true`, every account is locked out and the first visitor to register becomes admin, while the
+real data sits unused in the new directory. The sequence that works:
+
+```bash
+NEW=/data/word-dance                                            # the new location; keeps its 0700 mode through mv
+sudo systemctl stop word-dance
+mv /home/sqin/word-dance-data "$NEW"
+sed -i "s|^WD_DATA_DIR=.*|WD_DATA_DIR=\"$NEW\"|" "$NEW/.env"      # install.sh sources .env AFTER reading the variable: a stale line here
+                                                                # would send wd migrate / import-seed back to the old path
+grep -n '/home/sqin/word-dance-data' "$NEW/.env" || true        # fix any other absolute path under the old directory the same way
+                                                                # (WD_DB_PATH, WD_CLAUDE_CWD, WD_ECDICT_DB_PATH, WD_LOG_FILE)
+WD_DATA_DIR="$NEW" deploy/install.sh                            # re-renders both units with EnvironmentFile=$NEW/.env, migrates nothing, restarts
+echo "export WD_DATA_DIR=\"$NEW\"" >> ~/.profile                # every later `wd …` and every later install.sh run (§4) default to the old path
+```
+
+From then on **every** `deploy/install.sh` / `make install` (§4) must run with `WD_DATA_DIR=$NEW` in the environment —
+the profile export above (new login shells, `sudo -iu sqin`) or the explicit prefix. Recovery after a forgotten prefix:
+`sudo systemctl stop word-dance`, confirm the recreated `/home/sqin/word-dance-data` is the fresh install (created
+minutes ago, no `backups/word-dance-*.db.gz`), remove it, and run `WD_DATA_DIR=$NEW deploy/install.sh`. Nothing is
+lost in that scenario — the moved directory is untouched.
+
 ## 6. Runbook
 
 | Situation | What you see | Action |
@@ -141,7 +178,7 @@ e-mail verification codes.
 | Fresh install, nobody can log in | `GET /api/health` → `needs_setup:true`; login page says the first account becomes admin | open the site and register (first account = admin, no invite needed) — or `wd create-admin` on the box |
 | Need more accounts in `invite` mode | registration page asks for a code | `wd invite --uses 5 --days 7` (printed once) or 管理 → 邀请码 |
 | Openverse 429 | provider cooldown in the overview | nothing; Wikimedia continues; optionally register an Openverse app key |
-| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move `WD_DATA_DIR` (stop → `mv` → edit `.env` + unit `EnvironmentFile` path → `install.sh`) |
+| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move the data directory to a bigger disk — the §5 procedure: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh` (never a plain `install.sh`, never a hand-edited unit) |
 | Service down for days | first tick builds **today's** batches only (back *before* a user's push time → built in the normal window, published + delivered at push time; back *after* it → published at once, e-mail/webhook `skipped` when > 6 h late); `downtime` event; history shows 「服务器离线」 | nothing — missed days are not back-filled by design |
 | A job is `dead` | 管理 → 任务 (or `GET /api/admin/jobs?status=dead`) with `last_error` | fix the cause (auth, budget, provider), then 重试 / `POST /api/admin/jobs/requeue-dead`; nightly maintenance requeues dead content/lookup jobs once |
 | Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must. A `lease_busy` right after a crash restart is normal: the service retries every 30 s and logs `lease_acquired` once the dead instance's 90-s lease expires |
@@ -167,7 +204,10 @@ needs ≈ 1.1 GB free during extraction. Without it, words outside the seed are 
   admin → logout. Safe next to the production service (different port and data dir). `--keep` keeps the data dir,
   `--port` changes the port.
 * `make dev` — `scripts/dev.sh`: backend with auto-reload on :8000 + Vite on :5173 using `./.dev-data`;
-  `WD_DEV_REAL_CLAUDE=1 make dev` uses the real CLI (spends money).
+  `WD_DEV_REAL_CLAUDE=1 make dev` uses the real CLI (spends money). Vite binds `localhost` only (`::1` on this box):
+  open `http://localhost:5173`, not `127.0.0.1:5173`; a phone on the LAN cannot reach it — run
+  `cd frontend && npm run dev -- --host` for the 360-px checks (then `http://<LAN-ip>:5173`), or use the built SPA
+  of the installed service on `http://<LAN-ip>:8000`.
 
 Real-Claude acceptance (≤ $0.20 total) and the delivery checks are manual: see [`qa.md`](qa.md).
 
