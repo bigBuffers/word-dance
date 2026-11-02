@@ -190,6 +190,41 @@ def test_lemmatize_auto_only_when_verifiable_and_target_not_in_bank(seeded, alic
     assert queue.live_job(seeded, f"content:{abandon}") is not None  # the headword wants content
 
 
+def test_auto_lemmatize_clears_the_attention_flags_of_the_replaced_string(seeded, alice):
+    """A dead lookup flagged alice's `abandonning` row 「暂时无法校验」; the nightly auto-lemmatize onto `abandon` carried
+    the flag over, so the validated headword sat in 待处理 and the batch builder skipped it (DESIGN §6.3). The 待处理
+    columns describe the replaced string: cleared like suggestions.repoint_or_merge / API.md 36 `keep`, re-flagged
+    「未识别为英文单词」 only when the target itself is a word Claude rejected."""
+    from wd.ai import lookup
+    from wd.services import batches
+
+    prov = add(seeded, alice, "abandonning")
+    uw = bank.my_row(seeded, alice, prov)
+    assert lookup.set_dead_attention(seeded, prov, now=NOW) == 1
+    seeded.execute("UPDATE user_words SET suggested_word_id = ? WHERE id = ?", (wid(seeded, "apple"), uw["id"]))
+    settings_row = bank.user_settings_row(seeded, alice)
+    assert bank.attention_count(seeded, alice) == 1 and batches.select_words(seeded, alice, settings_row, "2026-10-14").news == []
+    _, _, summary = run_apply(seeded, alice, {"items": [item(uw["id"], "lemmatize", "abandon", "是 abandon 的变形")], "confusable_groups": [], "difficulty_tags": []})
+    assert summary.auto_applied == 1
+    row = db.row_to_dict(seeded.execute("SELECT * FROM user_words WHERE id = ?", (uw["id"],)).fetchone())
+    assert row["word_id"] == wid(seeded, "abandon") and row["state"] == "new"
+    assert (row["needs_attention"], row["attention_msg"], row["suggested_word_id"]) == (0, None, None)
+    assert bank.attention_count(seeded, alice) == 0
+    assert [r["uw_id"] for r in batches.select_words(seeded, alice, settings_row, "2026-10-14").news] == [uw["id"]]
+    # a target Claude itself rejected (DESIGN §5.2 step 4) re-flags the row instead — exactly what accepting a suggestion does
+    bob = int(seeded.execute("INSERT INTO users(username, password_hash, onboarding_state) VALUES ('bob', 'x', 'done')").lastrowid)
+    seeded.execute("INSERT INTO user_settings(user_id) VALUES (?)", (bob,))
+    bad = add(seeded, bob, "zzqx")
+    seeded.execute("UPDATE words SET is_valid_english = 0, is_public = 0 WHERE id = ?", (bad,))
+    prov2 = add(seeded, alice, "zzqxing")
+    uw2 = bank.my_row(seeded, alice, prov2)
+    assert lookup.set_dead_attention(seeded, prov2, now=NOW) == 1
+    _, _, summary = run_apply(seeded, alice, {"items": [item(uw2["id"], "lemmatize", "zzqx")], "confusable_groups": [], "difficulty_tags": []})
+    assert summary.auto_applied == 1
+    row2 = db.row_to_dict(seeded.execute("SELECT * FROM user_words WHERE id = ?", (uw2["id"],)).fetchone())
+    assert row2["word_id"] == bad and (row2["needs_attention"], row2["attention_msg"], row2["suggested_word_id"]) == (1, bank.ATTENTION_INVALID_MSG, None)
+
+
 def test_lemmatize_is_a_suggestion_when_target_in_bank_or_unrelated_or_seed(seeded, alice):
     prov = add(seeded, alice, "abandonning")
     abandon = mark(seeded, alice, "abandon")

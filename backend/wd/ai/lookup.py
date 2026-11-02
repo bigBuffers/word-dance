@@ -7,13 +7,17 @@ transaction per word (:func:`apply_item`):
    row flagged 「未识别为英文单词：…」, a resolvable ``suggested_correction`` becomes ``suggested_word_id`` + 「是否改为 “…”？」
    (never auto-applied).
 2. a headword that fails :func:`wd.services.words.validate_headword` → the row is kept as typed, dictionary fields
-   filled, and an open ``fix_spelling`` suggestion is stored per holder (the proposal is visible only as a suggestion).
+   filled, and an open ``fix_spelling`` suggestion is stored per holder (the proposal is visible only as a suggestion;
+   ``target_word_id`` is set when the proposal resolves through DESIGN §5.2 steps 1–3 to another existing word, so the
+   inbox shows that word's brief — otherwise it stays NULL and the accept path resolves ``payload.to``).
 3. a validated headword with a different lemma → **merge** into the existing target — an exact headword or the unique
    ``word_forms`` target of the lemma (DESIGN §5.2 steps 1–2: ``children`` is a form of ``child``, never a new
    headword) — (holders repointed with their SRS state, duplicate holders' rows set to ``removed`` — never deleted —,
    ``word_forms(alt)``, ``merged_into_word_id``, the source word's content job cancelled, open-batch ``push_items``
-   rewritten, 7-day ``auto`` undo rows); an ambiguous form (``axes`` → ax / axe / axis) is handled like step 2; a
-   **rename** of the provisional row only when the lemma is neither a headword nor a known form (DESIGN §3.2 guard).
+   rewritten, 7-day ``auto`` undo rows; a holder who has the target only as ``mastered`` / ``known`` / ``removed`` while
+   the typed word is in the bank gets the held row re-added per DESIGN §4 before the typed row is parked — the entry
+   never leaves 生词库); an ambiguous form (``axes`` → ax / axe / axis) is handled like step 2; a **rename** of the
+   provisional row only when the lemma is neither a headword nor a known form (DESIGN §3.2 guard).
 4. NULL/empty dictionary fields filled, ``is_valid_english=1``, ``is_public = safe_for_sharing`` (also for a merge
    target that was itself still unvalidated); a resolvable ``suggested_correction`` → ``suggested_word_id`` +
    「是否改为 “…”？」 on the typed string's own bank rows (the rows a merge repointed), nothing else changed.
@@ -72,7 +76,9 @@ def bank_holders(conn: sqlite3.Connection, word_id: int) -> list[dict[str, Any]]
 
 
 def resolve_existing(conn: sqlite3.Connection, text: str, *, created_by: int | None, now: str) -> dict[str, Any] | None:
-    """DESIGN §5.2 steps 1–3 (exact → unique form → ECDICT) for a Claude-proposed correction; never creates a provisional row."""
+    """DESIGN §5.2 steps 1–3 (exact → unique form → ECDICT) for a Claude-proposed correction; never creates a provisional
+    row. An ambiguous form (``axes`` → ax / axe / axis) ends the chain with None exactly as :func:`wd.services.words.resolve`
+    does — the ECDICT step must not turn it into a headword (DESIGN §3.2)."""
     norm = words.normalise_input(text or "")
     if not norm.ok:
         return None
@@ -82,8 +88,8 @@ def resolve_existing(conn: sqlite3.Connection, text: str, *, created_by: int | N
         final, _ = words.follow_merge(conn, row)
         return final
     res = words._resolve_forms(conn, norm.lemma, created_by or 0)
-    if res is not None and res.word_id is not None:
-        return words.word_row(conn, int(res.word_id))
+    if res is not None:
+        return None if res.word_id is None else words.word_row(conn, int(res.word_id))
     if ecdict.lookup(norm.lemma) is not None:
         res = words._resolve_ecdict(conn, norm.lemma, created_by, now)  # type: ignore[arg-type]
         if res is not None and res.word_id is not None:
@@ -197,7 +203,13 @@ def flag_queued_lookups(conn: sqlite3.Connection, *, now: str) -> int:
 
 # --------------------------------------------------------------------------------------- merge
 def merge_into(conn: sqlite3.Connection, source: Mapping[str, Any], target: Mapping[str, Any], *, note_zh: str, now: str) -> dict[str, Any]:
-    """§6.5 step 3 (target exists): repoint every holder of W onto L, park duplicates as ``removed``, mark W merged."""
+    """§6.5 step 3 (target exists): repoint every holder of W onto L, park duplicates as ``removed``, mark W merged.
+
+    A holder whose L row is outside the bank (``mastered`` / ``known`` / ``removed``) while the W row is in it has L
+    re-added first per DESIGN §4 (``readd``: ``times_added+1``, priority 80, ease penalty from ``mastered``,
+    ``review_logs.action='readd'``, content enqueued) — parking W against a row with no live SRS state would make the
+    word the user just added vanish from 生词库 (the same rule as ``suggestions.repoint_or_merge``).
+    """
     w_id, l_id = int(source["id"]), int(target["id"])
     for row in holders(conn, w_id):
         uid = int(row["user_id"])
@@ -219,6 +231,32 @@ def merge_into(conn: sqlite3.Connection, source: Mapping[str, Any], target: Mapp
             )
             repoint_push_items(conn, uid, w_id, l_id, int(row["id"]), today)
         else:
+            if str(row["state"]) in bank.BANK_STATES and str(other["state"]) not in bank.BANK_STATES:
+                # the holder has L only as mastered / known / removed: re-add it (DESIGN §4) before parking W, and write
+                # the 7-day 「已自动整理」 row on the row that now carries the entry
+                bank.apply_action(
+                    conn,
+                    uid,
+                    l_id,
+                    "unfamiliar",
+                    origin=str(row["origin"]),
+                    context="consolidate",
+                    note=row.get("note"),
+                    input_text=row.get("input_text"),
+                    now=now,
+                    tz=bank.user_timezone(conn, uid),
+                )
+                insert_suggestion(
+                    conn,
+                    user_id=uid,
+                    type_="lemmatize",
+                    user_word_id=int(other["id"]),
+                    target_word_id=l_id,
+                    payload={"from": source["display"], "to": target["display"], "note_zh": note_zh},
+                    status="auto",
+                    now=now,
+                    undo={"prev_word_id": w_id},
+                )
             if str(row["state"]) != "removed":
                 conn.execute("UPDATE user_words SET state = 'removed', due_at = NULL, updated_at = ? WHERE id = ?", (now, row["id"]))
                 _log_consolidate(conn, uid, w_id, row, str(row["state"]), "removed", today=today, now=now)
@@ -352,8 +390,13 @@ def _flag_invalid(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mappi
 
 
 def _suggest_fix_spelling(conn: sqlite3.Connection, word: Mapping[str, Any], proposed: str, item: Mapping[str, Any], *, now: str) -> int:
+    """Step 2: one open ``fix_spelling`` per bank holder. ``target_word_id`` is the existing word the proposal resolves to
+    (DESIGN §5.2 steps 1–3, never the word itself) so the inbox shows its brief; unresolved, it stays NULL and the accept
+    path resolves ``payload.to`` (API.md 40)."""
     count = 0
     note = _text(item, "note_zh", NOTE_MAX) or _text(item, "form_note_zh", NOTE_MAX)
+    target = resolve_existing(conn, proposed, created_by=word.get("created_by_user_id"), now=now)
+    target_id = None if target is None or int(target["id"]) == int(word["id"]) else int(target["id"])
     for row in bank_holders(conn, int(word["id"])):
         if has_open_suggestion(conn, int(row["id"]), "fix_spelling"):
             continue
@@ -362,7 +405,7 @@ def _suggest_fix_spelling(conn: sqlite3.Connection, word: Mapping[str, Any], pro
             user_id=int(row["user_id"]),
             type_="fix_spelling",
             user_word_id=int(row["id"]),
-            target_word_id=None,
+            target_word_id=target_id,
             payload={"from": word["display"], "to": proposed, "note_zh": note, "confidence": FIX_SPELLING_CONFIDENCE},
             status="open",
             now=now,

@@ -11,7 +11,9 @@ item (ids validated against the batch; unknown ids ignored and logged; a ``targe
 
 * ``fill_data`` / ``difficulty_tags`` → auto-applied to NULL/empty fields of non-seed words (audit rows ``auto``);
 * ``lemmatize`` → auto only when the target exists, the entry is a known inflection of it (``word_forms`` or the
-  suffix rules), the target is not already in the bank and the entry is not a seed word; otherwise a suggestion;
+  suffix rules), the target is not already in the bank and the entry is not a seed word (the row's 待处理 columns are
+  cleared — they described the replaced string — and re-flagged only when the target itself is a word Claude
+  rejected); otherwise a suggestion;
 * ``fix_spelling`` (always), ``merge_duplicate``, ``split_phrase`` → open suggestions (accept → WP3 repoint/merge);
 * ``invalid_word`` → ``is_valid_english=0, is_public=0`` only for provisional rows + open suggestion;
 * ``confusable_groups`` → ``accepted`` rows limited to bank headwords (the 「易混」 chips).
@@ -167,12 +169,16 @@ def finish_run(conn: sqlite3.Connection, run_id: int, status: str, *, auto_appli
         )
 
 
-def expire_stale_suggestions(conn: sqlite3.Connection, user_id: int, *, now: str) -> int:
-    """Open rows past their 30-day ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6)."""
+def expire_stale_suggestions(conn: sqlite3.Connection, user_id: int | None, *, now: str) -> int:
+    """Open rows past their 30-day ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6) for one user, or for every user
+    when ``user_id`` is None (the scheduler's hourly GC — the API already treats such rows as expired, this catches the
+    column up). Returns the rows updated."""
+    uid = None if user_id is None else int(user_id)
     with db.maybe_tx(conn):
         cur = conn.execute(
-            "UPDATE bank_suggestions SET status = 'expired', resolved_at = ? WHERE user_id = ? AND status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?",
-            (now, int(user_id), now),
+            "UPDATE bank_suggestions SET status = 'expired', resolved_at = :now WHERE status = 'open' AND expires_at IS NOT NULL AND expires_at <= :now "
+            "AND (:uid IS NULL OR user_id = :uid)",
+            {"now": now, "uid": uid},
         )
         return int(cur.rowcount)
 
@@ -218,10 +224,21 @@ def _resolve_target(conn: sqlite3.Connection, norm: words.Normalised, user_id: i
     return words.word_row(conn, int(res.word_id))
 
 
+def _reset_attention(conn: sqlite3.Connection, user_word_id: int, target: Mapping[str, Any], now: str) -> None:
+    """The 待处理 columns describe the string a row carries: a row flagged 「暂时无法校验」 by a dead lookup of the typo
+    must not keep that flag once it holds the validated headword (a flagged row is parked in 待处理 and skipped by the
+    batch builder, DESIGN §6.3). Cleared like ``suggestions.repoint_or_merge`` / API.md 36 ``keep``, re-flagged only
+    when the target itself is a word Claude rejected (DESIGN §5.2 step 4)."""
+    bank.clear_attention(conn, user_word_id, now)
+    if target.get("is_valid_english") == 0:
+        conn.execute("UPDATE user_words SET needs_attention = 1, attention_msg = ? WHERE id = ?", (bank.ATTENTION_INVALID_MSG, int(user_word_id)))
+
+
 def _repoint(conn: sqlite3.Connection, uw: Mapping[str, Any], target: Mapping[str, Any], *, now: str, today: str) -> None:
     uid = int(uw["user_id"])
     source = int(uw["word_id"])
     conn.execute("UPDATE user_words SET word_id = ?, updated_at = ? WHERE id = ?", (int(target["id"]), now, uw["uw_id"]))
+    _reset_attention(conn, int(uw["uw_id"]), target, now)
     row = bank._row(conn, "SELECT * FROM user_words WHERE id = ?", (uw["uw_id"],))
     assert row is not None
     bank.write_log(

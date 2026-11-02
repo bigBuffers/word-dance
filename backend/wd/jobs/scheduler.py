@@ -11,7 +11,8 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   downtime builds today only — and when the service comes back on a later local day *before* that day's push
   time, ``next_push_at`` is re-anchored to that instant (guarded) so today's batch is built in its normal window
   and published + delivered at push time instead of being published at once with ``skipped`` deliveries;
-* ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, stale ``running`` jobs);
+* ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, stale ``running`` jobs, timed-out open
+  ``bank_suggestions`` → ``expired`` for every user — ``consolidate.expire_stale_suggestions``);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
 * 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, one requeue of dead
   content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
@@ -36,7 +37,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from .. import db
-from ..ai import budget
+from ..ai import budget, consolidate
 from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, parse_push_time, to_iso, zone
 from ..services import bank, batches
 from . import lease, queue
@@ -166,7 +167,9 @@ def process_pushes(conn: sqlite3.Connection, now: datetime, *, prebuild_hours: i
 
 # -------------------------------------------------------------------------------------------- hourly
 def hourly_gc(conn: sqlite3.Connection, now: datetime, *, boot_id: str) -> bool:
-    """Once per hour: expired sessions, finished throttle rows, stale ``running`` jobs (boot-id sweep)."""
+    """Once per hour: expired sessions, finished throttle rows, stale ``running`` jobs (boot-id sweep), and open
+    ``bank_suggestions`` past their 30-day ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6; the nightly
+    ``consolidate_bank`` job does the same for its user only, and only when the bank needs a run)."""
     now_s = to_iso(now)
     last = db.kv_get(conn, KV_HOURLY)
     if last and parse_iso(last) > now - HOURLY:
@@ -178,9 +181,12 @@ def hourly_gc(conn: sqlite3.Connection, now: datetime, *, boot_id: str) -> bool:
             (now_s, to_iso(now - timedelta(days=1))),
         )
         swept = queue.requeue_stale(conn, boot_id, now=now_s)
+        expired = consolidate.expire_stale_suggestions(conn, None, now=now_s)
         db.kv_set(conn, KV_HOURLY, now_s, now=now_s)
     if swept:
         log.info("requeued %d stale running job(s)", swept, extra={"event": "stale_sweep"})
+    if expired:
+        log.info("expired %d timed-out open suggestion(s)", expired, extra={"event": "suggestions_expired"})
     return True
 
 

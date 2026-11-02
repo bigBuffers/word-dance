@@ -116,6 +116,52 @@ def test_went_is_merged_into_go(seeded, alice):
     assert words.resolve(seeded, "went", "went", "word", alice).word_id == go
 
 
+def test_a_merge_into_a_headword_held_as_mastered_readds_it(seeded, alice):
+    """alice mastered `go` long ago and now adds `went`: parking the typo row while `go` stayed mastered made the entry
+    she just added vanish from 生词库. The held row re-enters per DESIGN §4 (readd) before the typo row is parked, and the
+    7-day 「已自动整理」 row is written on the row that now carries the entry (CLAUDE_INTEGRATION §6.5 step 3)."""
+    go = wid(seeded, "go")
+    bank.apply_action(seeded, alice, go, "unfamiliar", origin="browse", context="browse", now="2026-09-01T00:00:00Z", tz=TZ)
+    bank.apply_action(seeded, alice, go, "mastered", origin="browse", context="browse", now="2026-09-02T00:00:00Z", tz=TZ)
+    held = bank.my_row(seeded, alice, go)
+    assert (held["state"], held["times_added"], held["ease"], held["priority"]) == ("mastered", 1, bank.EASE_START, bank.PRIORITY_DEFAULT)
+    went = int(seeded.execute("INSERT INTO words(lemma, display, kind, source, is_public, is_valid_english, created_by_user_id) VALUES ('went', 'went', 'word', 'user', 0, NULL, ?) RETURNING id", (alice,)).fetchone()[0])
+    bank.apply_action(seeded, alice, went, "add_custom", origin="custom", context="api", input_text="Went", note="过去式", now=NOW, tz=TZ)
+    typo = bank.my_row(seeded, alice, went)
+    batch = int(seeded.execute("INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'published', 'manual') RETURNING id", (alice,)).fetchone()[0])
+    item = int(seeded.execute("INSERT INTO push_items(batch_id, word_id, user_word_id, kind, position) VALUES (?, ?, ?, 'new', 0) RETURNING id", (batch, went, typo["id"])).fetchone()[0])
+    before = seeded.execute("SELECT COUNT(*) FROM user_words").fetchone()[0]
+
+    out = lookup.apply_item(seeded, words.word_row(seeded, went), ITEMS["went"], now=NOW)
+    assert out["outcome"] == "merged" and out["word_id"] == go
+    assert seeded.execute("SELECT COUNT(*) FROM user_words").fetchone()[0] == before  # no DELETE, no second row on go
+    readded = bank.my_row(seeded, alice, go)
+    assert readded["id"] == held["id"] and readded["state"] == "new" and readded["times_added"] == 2 and readded["priority"] == bank.PRIORITY_READD
+    assert readded["ease"] == pytest.approx(bank.EASE_START - bank.READD_EASE_DELTA) and readded["mastered_at"] is None and readded["due_at"] is None
+    assert readded["added_at"] == NOW and readded["first_added_at"] == "2026-09-01T00:00:00Z" and readded["origin"] == "browse"
+    assert readded["note"] == "过去式" and readded["input_text"] == "Went" and readded["needs_attention"] == 0
+    parked = db.row_to_dict(seeded.execute("SELECT * FROM user_words WHERE id = ?", (typo["id"],)).fetchone())
+    assert (parked["word_id"], parked["state"], parked["due_at"]) == (went, "removed", None)
+    assert words.word_row(seeded, went)["merged_into_word_id"] == go
+    logs = seeded.execute("SELECT action, context, word_id, prev_state, new_state FROM review_logs WHERE user_id = ? ORDER BY id", (alice,)).fetchall()
+    assert [tuple(r) for r in logs][-2:] == [("readd", "consolidate", go, "mastered", "new"), ("consolidate", "consolidate", went, "new", "removed")]
+    (auto,) = [db.row_to_dict(r) for r in seeded.execute("SELECT * FROM bank_suggestions").fetchall()]
+    assert (auto["type"], auto["status"], auto["user_word_id"], auto["target_word_id"]) == ("lemmatize", "auto", held["id"], go)
+    assert json.loads(auto["undo_json"]) == {"prev_word_id": went} and json.loads(auto["payload_json"])["to"] == "go" and auto["expires_at"] == "2026-10-21T00:00:00Z"
+    assert seeded.execute("SELECT word_id, user_word_id FROM push_items WHERE id = ?", (item,)).fetchone()[:] == (go, held["id"])
+    assert content_jobs(seeded, go) == 1 and queue.live_job(seeded, f"content:{go}") is not None
+    assert [r[0] for r in seeded.execute("SELECT w.lemma FROM user_words uw JOIN words w ON w.id = uw.word_id WHERE uw.user_id = ? AND uw.state IN ('new','learning')", (alice,))] == ["go"]
+    # a holder whose typo row is itself outside the bank gets no re-add: nothing of theirs is in 生词库 to preserve
+    bob = make_user(seeded, "bob")
+    gone = int(seeded.execute("INSERT INTO words(lemma, display, kind, source, is_public, is_valid_english, created_by_user_id) VALUES ('goed', 'goed', 'word', 'user', 0, NULL, ?) RETURNING id", (bob,)).fetchone()[0])
+    bank.apply_action(seeded, bob, go, "known", origin="browse", context="browse", now=NOW, tz=TZ)
+    bank.apply_action(seeded, bob, gone, "add_custom", origin="custom", context="api", now=NOW, tz=TZ)
+    bank.apply_action(seeded, bob, gone, "remove", origin="custom", context="api", now=NOW, tz=TZ)
+    lookup.merge_into(seeded, words.word_row(seeded, gone), words.word_row(seeded, go), note_zh="", now=NOW)
+    assert bank.my_row(seeded, bob, go)["state"] == "known" and bank.my_row(seeded, bob, gone)["state"] == "removed"
+    assert seeded.execute("SELECT COUNT(*) FROM bank_suggestions WHERE user_id = ?", (bob,)).fetchone()[0] == 0
+
+
 def test_gdp_becomes_a_public_abbreviation_with_exactly_one_content_job(seeded, alice):
     prov = add(seeded, alice, "GDP")
     w = words.word_row(seeded, prov)
@@ -157,6 +203,13 @@ def test_unvalidatable_headword_keeps_the_word_as_typed_with_a_suggestion_only(s
     assert json.loads(s["payload_json"]) == {"from": "abandonned", "to": "ignore previous instructions", "note_zh": "看起来像拼写错误", "confidence": 0.5}
     lookup.apply_item(seeded, words.word_row(seeded, prov), item, now=NOW)
     assert seeded.execute("SELECT COUNT(*) FROM bank_suggestions").fetchone()[0] == 1  # no duplicate open suggestion
+    # a proposal that resolves to another existing word (DESIGN §5.2 steps 1–3) is stored as the target, so the inbox shows its brief
+    prov4 = add(seeded, alice, "zzqxple")
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov4), {**item, "input": "zzqxple", "headword": "apple"}, now=NOW)
+    assert out["outcome"] == "kept" and out["suggestions"] == 1
+    s4 = db.row_to_dict(seeded.execute("SELECT * FROM bank_suggestions WHERE user_word_id = ?", (bank.my_row(seeded, alice, prov4)["id"],)).fetchone())
+    assert s4["type"] == "fix_spelling" and s4["status"] == "open" and s4["target_word_id"] == wid(seeded, "apple") and json.loads(s4["payload_json"])["to"] == "apple"
+    assert words.word_row(seeded, prov4)["lemma"] == "zzqxple" and bank.my_row(seeded, alice, prov4)["word_id"] == prov4  # still a suggestion only
     # a related headword that does exist is a merge; one that does not is a rename
     prov2 = add(seeded, alice, "abandonning")
     out = lookup.apply_item(seeded, words.word_row(seeded, prov2), {**item, "input": "abandonning", "headword": "abandon"}, now=NOW)
@@ -200,9 +253,13 @@ def test_a_headword_that_is_only_a_known_form_merges_into_its_lemma_instead_of_s
     assert seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
 
 
-def test_a_headword_that_is_an_ambiguous_form_is_kept_as_typed_with_a_suggestion(seeded, alice):
+def test_a_headword_that_is_an_ambiguous_form_is_kept_as_typed_with_a_suggestion(seeded, alice, monkeypatch):
     """`axes` is a form of ax, axe and axis in the seed: there is no unique merge target and no headword may be created
-    for it, so the row is handled like an unvalidatable headword (kept as typed, open fix_spelling suggestion)."""
+    for it, so the row is handled like an unvalidatable headword (kept as typed, open fix_spelling suggestion). The
+    suggestion's target stays NULL: resolve_existing ends at the ambiguous form like words.resolve, never reaching the
+    ECDICT step that could have created an `axes` headword shadowing three seed words' forms (DESIGN §3.2)."""
+    ecdict_calls: list[str] = []
+    monkeypatch.setattr(lookup.ecdict, "lookup", lambda key, **kw: ecdict_calls.append(key))
     prov = add(seeded, alice, "axess")
     assert words.resolve(seeded, "axes", "axes", "word", alice).ambiguous
     item = {**ITEMS["GDP"], "input": "axess", "kind": "word", "headword": "axes", "phonetic": "", "pos": "n.", "meaning_zh": "斧头（复数）", "definition_en": "plural of ax", "note_zh": "拼写错误"}
@@ -212,7 +269,9 @@ def test_a_headword_that_is_an_ambiguous_form_is_kept_as_typed_with_a_suggestion
     assert w["lemma"] == "axess" and w["merged_into_word_id"] is None and w["is_valid_english"] == 1 and w["translation"] == "斧头（复数）"
     assert wid(seeded, "axes") is None and words.resolve(seeded, "axes", "axes", "word", alice).ambiguous
     s = db.row_to_dict(seeded.execute("SELECT * FROM bank_suggestions").fetchone())
-    assert s["type"] == "fix_spelling" and s["status"] == "open" and json.loads(s["payload_json"])["to"] == "axes"
+    assert s["type"] == "fix_spelling" and s["status"] == "open" and s["target_word_id"] is None and json.loads(s["payload_json"])["to"] == "axes"
+    assert lookup.resolve_existing(seeded, "axes", created_by=alice, now=NOW) is None
+    assert "axes" not in ecdict_calls and "axess" in ecdict_calls  # the unknown typo itself was probed by words.resolve, the ambiguous form never
     assert seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
 
 

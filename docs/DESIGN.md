@@ -253,6 +253,7 @@ Every transition writes one `review_logs` row. **API action → `review_logs.act
 | `POST /api/bank/import` | `import` |
 | `POST /api/bank/{id}/accept-suggestion` | `remove` (flagged row) + `add_custom` (target row) |
 | `lookup_word` merge, consolidation repoint / merge (incl. the losing row → `removed`), suggestion accept/undo that repoints | `consolidate` |
+| `lookup_word` merge / accepted consolidation merge whose target the user holds only as `mastered`/`known`/`removed` while the source row is in the bank: the held row re-enters the bank (`times_added+1`, priority 80, ease penalty from `mastered` — the re-add row above; CLAUDE_INTEGRATION §6.5 step 3, §6.6) and the source row is parked as `removed` | `readd` (held row, `context='consolidate'`) + `consolidate` (source row → `removed`) |
 | `PATCH /api/bank/{id} {note}` | `note` |
 | `PATCH /api/bank/{id} {attention:'keep'\|'retry'}` (保留 / 重试 on a 待处理 row, API.md 36) | `attention` (`result_json={"decision":…}`) |
 
@@ -381,7 +382,7 @@ tick(now):
               enqueue send_email / send_webhook (dedupe 'email:<id>' / 'webhook:<id>') unless stale (> 6 h late → status 'skipped')
           UPDATE user_settings SET next_push_at = compute_next_push(now, tz, push_time) WHERE user_id=? AND next_push_at = s.next_push_at
   finalize_building()
-  hourly: delete expired sessions, prune auth_throttle, requeue stale running jobs (boot_id sweep)
+  hourly: delete expired sessions, prune auth_throttle, requeue stale running jobs (boot_id sweep), open bank_suggestions past expires_at → 'expired' (all users)
   daily at 02:30 (per user local): for each user whose local time is ≥ 02:30 AND kv['consolidate:<user_id>:last_date'] != local_date:
       set kv['consolidate:<user_id>:last_date'] = local_date (same transaction) and, if the bank has rows changed since the last run
       or with is_valid_english IS NULL / difficulty IS NULL, enqueue consolidate_bank {"user_id", "trigger":"nightly"}
