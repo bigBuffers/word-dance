@@ -84,11 +84,32 @@ def test_public_addresses_are_accepted(ip):
         "https:///x.jpg",
         "ftp://thumb.wikimedia.org/x.jpg",
         "https://bad_host!/x.jpg",
+        "https://thumb.wikimedia.org/a\x7f.jpg",  # DEL in the path: httpx.InvalidURL (not an HTTPError) when the request is built
+        "https://thumb.wikimedia.org/x.jpg?q=\x01",  # C0 byte in the query
+        "https://thumb.wikimedia.org/a\tb.jpg",
+        "https://thumb.wikimedia.org:abc/x.jpg",  # urlsplit().port raises a bare ValueError
+        "https://thumb.wikimedia.org:99999/x.jpg",
+        "https://[abc/x.jpg",  # urlsplit itself raises ("Invalid IPv6 URL")
     ],
 )
 def test_validate_url_rejects(url):
     with pytest.raises(SsrfError):
         fetch.validate_url(url)
+
+
+def test_malformed_urls_become_fetch_errors_before_any_request(settings, public_dns):
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, content=jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
+
+    for url in ("https://thumb.wikimedia.org/a\x7f.jpg", "https://thumb.wikimedia.org:abc/x.jpg"):
+        with pytest.raises(FetchError, match="invalid URL"):
+            fetch.safe_download(url, settings, client_factory=client_with(handler))
+    assert calls == []
+    cand = Candidate("openverse", "3", "x", None, None, "CC0", None, "", "https://live.staticflickr.com/8035/807\x7f4168006.jpg", 800, 600, "image/jpeg")
+    assert fetch.download_and_store(cand, settings, client_factory=client_with(handler)) is None  # "None on any failure" holds
 
 
 def test_validate_url_accepts_and_normalises():

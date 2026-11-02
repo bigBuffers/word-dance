@@ -1,7 +1,11 @@
 """``generate_svg`` handler (CLAUDE_INTEGRATION §5.5, §6.1, §6.7, §7 SVG sub-cap).
 
-One word per call. The job is enqueued by WP6's ``fetch_image`` only for studied words at priority < 90; the
-budget reservation applies the SVG daily sub-cap (``WD_AI_SVG_DAILY_BUDGET_USD``, counted inside the daily cap).
+One word per call. The job is enqueued by WP6's ``fetch_image`` only for studied words at priority < 90 that have
+no image; the budget reservation applies the SVG daily sub-cap (``WD_AI_SVG_DAILY_BUDGET_USD``, counted inside the
+daily cap). The SVG is the DESIGN §9 last resort before the template card, never a replacement for a photo: a
+fallback job whose word gained an image meanwhile (a later 换一张 / report / admin refetch, or the job sat deferred
+under the sub-cap) finishes ``{"skipped": "photo_active"}`` — checked before the call and again before activation.
+Only an explicit admin request (payload ``requested: true``, API.md 69) draws over an active photo.
 A returned SVG goes through WP6's ``images.activate_svg`` (defusedxml parse + allow-lists + re-serialisation); a
 rejected SVG leaves ``image_state='failed'`` so the template card keeps being served and is never retried
 automatically.
@@ -95,6 +99,13 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
             if cfg.ai_svg_daily_budget_usd <= 0:
                 _skip(conn, job, wid, "svg_budget_disabled", now=now)
                 continue
+            requested = job.payload.get("requested") is True
+            if not requested and _has_active_image(conn, wid):
+                # DESIGN §9: a fallback SVG only stands in while the word has no image; one landed since this job was
+                # enqueued, so keep it (image_state stays 'ready') and spend nothing.
+                queue.finish(conn, job.id, {"skipped": "photo_active"}, now=now)
+                ctx.log.info("generate_svg: word %s already has an image; skipped", word["lemma"], extra={"job_id": job.id, "job_type": job.type, "event": "svg_skipped"})
+                continue
             result = common.claude_call(
                 ctx,
                 conn,
@@ -112,6 +123,11 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
                 common.handle_failure(ctx, conn, [job], result, now=now, on_dead=_on_dead(now))
                 continue
             common.record_success(conn, now=now)
+            if not requested and _has_active_image(conn, wid):
+                # a photo landed during the call (up to 120 s): the drawing must not supersede it
+                queue.finish(conn, job.id, {"skipped": "photo_active", "cost_usd": round(result.cost_usd, 6)}, now=now)
+                ctx.log.info("generate_svg: a photo for word %s landed during the call; SVG discarded", word["lemma"], extra={"job_id": job.id, "job_type": job.type, "cost_usd": result.cost_usd, "event": "svg_skipped"})
+                continue
             structured = result.structured or {}
             svg = structured.get("svg")
             alt = structured.get("alt_zh") if isinstance(structured.get("alt_zh"), str) else None

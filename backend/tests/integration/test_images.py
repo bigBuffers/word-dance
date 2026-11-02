@@ -85,6 +85,14 @@ def svg_jobs(conn, word_id: int) -> list[dict]:
     return [db.row_to_dict(r) for r in conn.execute("SELECT * FROM jobs WHERE type='generate_svg' AND json_extract(payload_json,'$.word_id')=?", (word_id,))]
 
 
+def ai_calls(conn) -> list[dict]:
+    return [db.row_to_dict(r) for r in conn.execute("SELECT kind, status, cost_usd FROM ai_calls ORDER BY id")]
+
+
+def image_state(conn, word_id: int) -> str:
+    return conn.execute("SELECT image_state FROM words WHERE id=?", (word_id,)).fetchone()[0]
+
+
 def drain_images(ctx: JobContext) -> int:
     """Drain only ``fetch_image`` jobs: the ``generate_svg`` jobs this chain enqueues must stay queued for the
     assertions below (their handler is WP5's and would otherwise activate the fake's SVG; it has its own tests)."""
@@ -236,6 +244,109 @@ def test_all_providers_fail_svg_rules(ctx, conn, cfg, mock_http, pinned_dns, con
         assert svg_jobs(conn, w) == []
 
 
+def test_refresh_with_an_active_photo_never_falls_back_to_svg(ctx, conn, mock_http, pinned_dns):
+    """DESIGN §9 / §0.1 row 7: the Claude SVG stands in only when NO acceptable photo exists. A 换一张 on a studied word
+    that finds nothing new keeps the photo — it must not queue (and later activate) a drawing nor spend the SVG sub-cap."""
+    wid = insert_word(conn, "apple")
+    set_content(conn, wid, ["red apple"])
+    add_to_bank(conn, wid)
+    assert service.word_is_studied(conn, wid, ctx.now())
+    enqueue(conn, wid)
+    drain_images(ctx)
+    photo = active_image(conn, wid)
+    assert photo["provider"] == "wikimedia"
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+    rid = request_refresh(conn, wid, now=ctx.now())
+    drain_images(ctx)
+    result = json.loads(job(conn, rid)["result_json"])
+    assert result["status"] == "failed" and result["detail"].endswith("(current image kept)") and "svg_job_id" not in result
+    assert svg_jobs(conn, wid) == []
+    assert active_image(conn, wid)["id"] == photo["id"] and image_state(conn, wid) == "ready"
+    assert worker.drain(ctx, ("generate_svg",)) == 0 and ai_calls(conn) == []  # the Claude worker has nothing to do
+    assert image_meta(conn, wid)["kind"] == "photo"
+    # the report flow (不合适) still falls through to the SVG: the photo is rejected first, so no image is active any more
+    jid = reject_active_image(conn, wid, reason="irrelevant_image", now=ctx.now())
+    drain_images(ctx)
+    result = json.loads(job(conn, jid)["result_json"])
+    assert result["status"] == "failed" and len(svg_jobs(conn, wid)) == 1 and result["svg_job_id"] == svg_jobs(conn, wid)[0]["id"]
+    assert image_state(conn, wid) == "failed" and image_meta(conn, wid)["kind"] == "card"
+
+
+def test_queued_svg_job_is_skipped_once_a_photo_landed(ctx, conn, mock_http, pinned_dns):
+    """The race behind the same rule: a generate_svg job queued legitimately (no image at the time) runs only after a
+    later fetch landed a photo (it sat deferred under the SVG sub-cap, say) — it must finish skipped, spending nothing."""
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+    wid = insert_word(conn, "pear")
+    add_to_bank(conn, wid)
+    enqueue(conn, wid)
+    drain_images(ctx)
+    assert active_image(conn, wid) is None and image_state(conn, wid) == "failed"
+    assert len(svg_jobs(conn, wid)) == 1 and svg_jobs(conn, wid)[0]["status"] == "queued"
+    mock_http.overrides.clear()  # the providers recover and an admin refetch lands a photo while the svg job is still queued
+    service.admin_refetch(conn, wid, now=ctx.now())
+    drain_images(ctx)
+    photo = active_image(conn, wid)
+    assert photo["provider"] == "wikimedia" and svg_jobs(conn, wid)[0]["status"] == "queued"
+    assert worker.drain(ctx, ("generate_svg",)) == 1
+    svg = svg_jobs(conn, wid)[0]
+    assert svg["status"] == "done" and json.loads(svg["result_json"]) == {"skipped": "photo_active"}
+    assert active_image(conn, wid)["id"] == photo["id"] and conn.execute("SELECT status FROM word_images WHERE id=?", (photo["id"],)).fetchone()[0] == "active"
+    assert ai_calls(conn) == [] and image_state(conn, wid) == "ready" and image_meta(conn, wid)["kind"] == "photo"
+
+
+def test_svg_drawn_while_a_photo_lands_is_discarded(ctx, conn, cfg, mock_http, pinned_dns, monkeypatch):
+    """The call takes up to 120 s; a photo that lands meanwhile wins — the handler re-checks before activating."""
+    from wd.ai import svg as svg_handler
+
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+    wid = insert_word(conn, "plum")
+    add_to_bank(conn, wid)
+    enqueue(conn, wid)
+    drain_images(ctx)
+    assert active_image(conn, wid) is None and len(svg_jobs(conn, wid)) == 1
+    late = store.write_bytes(cfg, b"\xff\xd8\xff" + b"p" * 100, "jpg")
+    real_call = svg_handler.common.claude_call
+
+    def call_during_which_a_photo_lands(ctx_, conn_, **kw):
+        result = real_call(ctx_, conn_, **kw)
+        store.activate(conn_, wid, provider="wikimedia", ref="late", file_path=late.file_path, file_bytes=late.file_bytes, sha256=late.sha256, mime="image/jpeg", now=ctx.now())
+        return result
+
+    monkeypatch.setattr(svg_handler.common, "claude_call", call_during_which_a_photo_lands)
+    assert worker.drain(ctx, ("generate_svg",)) == 1
+    svg = svg_jobs(conn, wid)[0]
+    result = json.loads(svg["result_json"])
+    assert svg["status"] == "done" and result["skipped"] == "photo_active" and result["cost_usd"] > 0
+    assert active_image(conn, wid)["provider_ref"] == "late" and image_state(conn, wid) == "ready"
+    assert [c["kind"] for c in ai_calls(conn)] == ["svg"]  # the call happened (ledger) but the drawing was never activated
+    assert conn.execute("SELECT COUNT(*) FROM word_images WHERE word_id=? AND provider='claude_svg'", (wid,)).fetchone()[0] == 0
+
+
+def test_admin_claude_svg_request_draws_over_an_active_photo(ctx, conn, mock_http, pinned_dns):
+    """API.md 69 `provider: "claude_svg"` is an explicit decision: the job carries `requested` on its own live key and
+    the handler draws although a photo is active, while a fallback job for the same word is skipped."""
+    wid = insert_word(conn, "apple")
+    enqueue(conn, wid)
+    queue.run_once(ctx)
+    photo = active_image(conn, wid)
+    sid = service.admin_refetch(conn, wid, provider="claude_svg", now=ctx.now())
+    drain_images(ctx)
+    result = json.loads(job(conn, sid)["result_json"])
+    svg = svg_jobs(conn, wid)
+    assert result["status"] == "svg_queued" and len(svg) == 1 and svg[0]["id"] == result["svg_job_id"] and svg[0]["priority"] == 10
+    assert svg[0]["dedupe_key"] == f"svg:{wid}:req" and json.loads(svg[0]["payload_json"]) == {"word_id": wid, "requested": True}
+    fallback = queue.enqueue(conn, "generate_svg", {"word_id": wid}, dedupe_key=f"svg:{wid}", priority=20, now=ctx.now())
+    assert fallback != svg[0]["id"]  # an explicit request never folds into (or is swallowed by) a fallback job
+    assert worker.drain(ctx, ("generate_svg",)) == 2
+    assert active_image(conn, wid)["provider"] == "claude_svg" and image_meta(conn, wid)["kind"] == "svg"
+    assert conn.execute("SELECT status FROM word_images WHERE id=?", (photo["id"],)).fetchone()[0] == "superseded"
+    assert json.loads(job(conn, fallback)["result_json"]) == {"skipped": "photo_active"}  # the requested SVG is active now
+    assert [c["kind"] for c in ai_calls(conn)] == ["svg"]
+
+
 def test_provider_429_sets_a_cooldown_from_retry_after(ctx, conn, cfg, mock_http, pinned_dns):
     mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(429, text="slow down", headers={"Retry-After": "120"})
     wid = insert_word(conn, "apple")
@@ -357,6 +468,70 @@ def test_admin_refetch_payload_provider_and_query(ctx, conn, mock_http, pinned_d
     assert result["status"] == "svg_queued" and svg_jobs(conn, wid)[0]["id"] == result["svg_job_id"] and svg_jobs(conn, wid)[0]["priority"] == 10
 
 
+def test_merge_fetch_payloads():
+    merge = service.merge_fetch_payloads
+    assert merge({"word_id": 1}, {"word_id": 1}) == {"word_id": 1}
+    assert merge({"word_id": 1, "exclude": ["a"]}, {"word_id": 1, "exclude": ["b", "a"]}) == {"word_id": 1, "exclude": ["a", "b"]}
+    assert merge({"word_id": 1, "provider": "openverse", "query": "x"}, {"word_id": 1, "exclude": ["a"]}) == {"word_id": 1, "provider": "openverse", "query": "x", "exclude": ["a"]}
+    assert merge({"word_id": 1, "query": "x"}, {"word_id": 1, "provider": "wikimedia", "query": "y"}) == {"word_id": 1, "query": "y", "provider": "wikimedia"}
+
+
+def test_enqueue_fetch_merges_a_later_request_into_the_queued_job(ctx, conn, mock_http, pinned_dns):
+    """queue.enqueue's UPSERT keeps the live job's payload: an API.md 69 override or a 换一张 exclude that meets a
+    queued plain job must be folded into that job rather than silently dropped while the caller gets its id."""
+    distinct_photos(mock_http)
+    wid = insert_word(conn, "apple")
+    set_content(conn, wid, ["red apple"])
+    plain = enqueue(conn, wid)  # what the content handler enqueues: {"word_id"} only
+    jid = service.admin_refetch(conn, wid, provider="openverse", query="green apple", now=ctx.now())
+    assert jid == plain
+    j = job(conn, jid)
+    assert json.loads(j["payload_json"]) == {"word_id": wid, "provider": "openverse", "query": "green apple"} and j["priority"] == 10
+    queue.run_once(ctx)
+    assert mock_http.calls_to("commons.wikimedia.org") == [] and mock_http.calls_to("api.openverse.org")[0].url.params["q"] == "green apple"
+    first = active_image(conn, wid)
+    assert first["provider"] == "openverse" and first["query"] == "green apple"
+    # a 换一张 meeting a queued plain job (one requeued after a worker crash, say) adds its exclude list to it
+    stale = enqueue(conn, wid, now=ctx.now())
+    rid = request_refresh(conn, wid, now=ctx.now())
+    assert rid == stale and set(json.loads(job(conn, rid)["payload_json"])["exclude"]) == {first["provider_ref"], first["sha256"]}
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='fetch_image'").fetchone()[0] == 2
+    queue.run_once(ctx)
+    assert json.loads(job(conn, rid)["result_json"])["status"] == "ready" and active_image(conn, wid)["provider_ref"] != first["provider_ref"]
+
+
+def test_enqueue_fetch_queues_a_follow_up_behind_a_running_job(ctx, conn, mock_http, pinned_dns):
+    """A running job has already read its payload: a request it does not cover gets a follow-up on `image:<id>:r<n>`
+    (the IoWorker runs it next), a request it does cover keeps returning the running job's id (no duplicate fetch)."""
+    distinct_photos(mock_http)
+    wid = insert_word(conn, "apple")
+    enqueue(conn, wid)
+    queue.run_once(ctx)
+    first = active_image(conn, wid)
+    j1 = request_refresh(conn, wid, now=ctx.now())
+    claimed = queue.claim_batch(conn, "fetch_image", 1, ctx.locked_by, now=ctx.now())
+    assert [c.id for c in claimed] == [j1] and job(conn, j1)["status"] == "running"
+    assert request_refresh(conn, wid, now=ctx.now()) == j1  # the same exclude list is already covered
+    j2 = service.admin_refetch(conn, wid, provider="openverse", query="green apple", now=ctx.now())
+    follow = job(conn, j2)
+    assert j2 != j1 and follow["dedupe_key"] == f"image:{wid}:r1" and follow["status"] == "queued" and follow["priority"] == 10
+    assert json.loads(follow["payload_json"]) == {"word_id": wid, "exclude": [first["provider_ref"], first["sha256"]], "provider": "openverse", "query": "green apple"}
+    assert json.loads(job(conn, j1)["payload_json"]) == {"word_id": wid, "exclude": [first["provider_ref"], first["sha256"]]}  # the running job is left alone
+    # a third request while the first still runs folds into the queued follow-up (no r2)
+    assert service.admin_refetch(conn, wid, query="apple pie", now=ctx.now()) == j2
+    assert json.loads(job(conn, j2)["payload_json"])["query"] == "apple pie" and json.loads(job(conn, j2)["payload_json"])["provider"] == "openverse"
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='fetch_image'").fetchone()[0] == 3
+    # the running job finishes through its handler, then the follow-up runs with the override
+    registry.get_handler("fetch_image")(ctx, claimed)
+    assert job(conn, j1)["status"] == "done" and active_image(conn, wid)["provider_ref"] != first["provider_ref"]
+    seen = len(mock_http.calls_to("api.openverse.org"))
+    queue.run_once(ctx)
+    assert job(conn, j2)["status"] == "done" and [r.url.params["q"] for r in mock_http.calls_to("api.openverse.org")[seen:]] == ["apple pie"]
+    assert active_image(conn, wid)["provider"] == "openverse" and active_image(conn, wid)["query"] == "apple pie"
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='fetch_image' AND status IN ('queued','running')").fetchone()[0] == 0
+    assert job(conn, request_refresh(conn, wid, now=ctx.now()))["dedupe_key"] == f"image:{wid}"  # the primary key is free again
+
+
 def test_keywords_come_from_content_with_blocklist_and_shape_filter(ctx, conn, mock_http, pinned_dns):
     wid = insert_word(conn, "chart")
     set_content(conn, wid, ["bar chart", "http://evil", "", "x" * 60, "Stock market"])  # blocklist, bad shape, too long
@@ -395,6 +570,38 @@ def test_handler_crash_is_recorded_as_a_failed_attempt(ctx, conn, monkeypatch, m
     queue.run_once(ctx)
     j = job(conn, jid)
     assert j["status"] == "queued" and "provider exploded" in j["last_error"] and j["attempts"] == 1
+
+
+def test_malformed_candidate_urls_and_provider_crashes_never_kill_the_job(ctx, conn, mock_http, pinned_dns, monkeypatch):
+    """httpx.InvalidURL is not an HTTPError: a candidate URL carrying a C0/DEL byte used to escape download_and_store
+    and openverse.parse_search and crash the whole job (provider request uncounted, backoff, finally dead)."""
+    for page in mock_http.wikimedia["query"]["pages"].values():
+        page["imageinfo"][0]["thumburl"] = page["imageinfo"][0]["thumburl"].replace("/960px-", "/960px-\x7f")
+    mock_http.openverse["results"][0]["url"] = "https://live.staticflickr.com/8035/807\x7f4168006.jpg"
+    wid = insert_word(conn, "apple")
+    jid = enqueue(conn, wid)
+    queue.run_once(ctx)
+    j = job(conn, jid)
+    assert j["status"] == "done", j["last_error"]
+    result = json.loads(j["result_json"])
+    assert result["status"] == "ready" and result["provider"] == "openverse" and result["ref"] == "c4939b4c-aa73-4256-bb52-9b25962562d9"
+    assert mock_http.calls_to("thumb.wikimedia.org") == []  # both Commons thumbs refused before any request went out
+    assert quota.counts(conn, "wikimedia", ctx.now()) == (1, 1) and quota.counts(conn, "openverse", ctx.now()) == (1, 1)
+    assert image_state(conn, wid) == "ready"
+    # any other exception out of a provider is counted, recorded on the provider and the chain moves on
+    from wd.images.providers import WikimediaProvider
+
+    def boom(self, query, limit):
+        raise TypeError("unexpected response shape")
+
+    monkeypatch.setattr(WikimediaProvider, "search", boom)
+    wid2 = insert_word(conn, "pear")
+    jid2 = enqueue(conn, wid2, now=ctx.now())
+    queue.run_once(ctx)
+    assert json.loads(job(conn, jid2)["result_json"])["provider"] == "openverse"
+    assert quota.counts(conn, "wikimedia", ctx.now()) == (2, 2)
+    st = quota.state(conn, "wikimedia")
+    assert st["consecutive_errors"] == 1 and st["last_error"] == "TypeError: unexpected response shape" and st["cooldown_until"] is None
 
 
 # ------------------------------------------------------------------------------------------ svg + mix

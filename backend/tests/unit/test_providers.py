@@ -200,6 +200,14 @@ def test_openverse_never_uses_the_api_thumbnail_and_truncates_to_limit(settings,
     assert len(OpenverseProvider(settings, client_factory=factory).search("apple", 1)) == 1
 
 
+def test_openverse_skips_results_whose_url_httpx_refuses(ov_fixture):
+    data = copy.deepcopy(ov_fixture)
+    data["results"][0]["url"] = "https://live.staticflickr.com/8035/807\x7f4168006.jpg"  # a DEL byte: httpx.URL raises InvalidURL
+    assert [c.ref for c in openverse.parse_search(data)] == ["c4939b4c-aa73-4256-bb52-9b25962562d9"]
+    unusable = [{"id": "x", "url": "https://live.staticflickr.com/a\tb.jpg"}, {"id": "y", "url": "https://live.staticflickr.com:abc/b.jpg"}]
+    assert openverse.parse_search({"results": unusable}) == []
+
+
 def test_openverse_bearer_token_when_registered(settings, ov_fixture):
     cfg = replace(settings, openverse_client_id="cid", openverse_client_secret="sec")
     calls: list[httpx.Request] = []
