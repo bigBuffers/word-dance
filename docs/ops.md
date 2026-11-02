@@ -73,11 +73,17 @@ wd restore /home/sqin/word-dance-data/backups/word-dance-20261014-0330.db.gz --y
 sudo systemctl start word-dance
 ```
 
-What happens: the archive is gunzipped into `tmp/` and `integrity_check`ed first (a bad archive changes nothing);
-the current database is checkpointed and moved to `word-dance.db.bak-<ts>`, stale `-wal`/`-shm` files are removed,
-the verified copy is put in place (0600). Delete the `.bak-*` file when you are sure. Images are untouched (a
-restored database may reference images that were fetched later — they are simply re-fetched; or earlier — the
-files stay in `images/` until `wd images-prune`).
+What happens: the archive is gunzipped to `word-dance.db.restore-<ts>` next to the database and `integrity_check`ed
+first (a bad archive changes nothing); the current database is checkpointed — **restore also refuses (exit 2) while
+any other connection holds an open transaction on it** (a forgotten `BEGIN;` in a `sqlite3` shell, a DB browser, a
+long `wd stats`/`wd check`): SQLite then cannot fold the WAL and the `.bak` would silently miss the newest commits —
+then kept as `word-dance.db.bak-<ts>` (a hard link, so no extra space), its `-wal`/`-shm` files move next to it
+(`.bak-<ts>-wal`/`-shm`; SQLite recovers them when the `.bak` is opened, so the kept copy is complete even when the
+checkpoint failed on a damaged file), and the verified copy is swapped in with one atomic rename (0600) — the
+database path is never absent, and a failed swap leaves the current database untouched. The `.bak` is complete only
+when `wd restore` printed `previous database kept at …`; delete the `.bak-*` files when you are sure. Images are
+untouched (a restored database may reference images that were fetched later — they are simply re-fetched; or
+earlier — the files stay in `images/` until `wd images-prune`).
 
 ## 4. Upgrade and rollback
 
@@ -92,7 +98,11 @@ database or images. Downtime ≈ migration time + 3 s. In-flight jobs are recove
 call in flight gets up to `TimeoutStopSec=300` to finish.
 
 `--no-restart` keeps the service running while migrating — only for purely additive migrations (new tables,
-columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder.
+columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder. Without passwordless
+`sudo -n` the script cannot stop or restart the unit either: it prints the same NOTE plus `WARN: no passwordless
+sudo — the OLD version keeps serving …`, and its last line is `health OK, but the OLD process answered — … run: sudo
+systemctl restart word-dance` instead of a success message — run that restart yourself (or stop the unit before
+re-running the script when a migration is not additive).
 
 Rollback of the code: `git checkout <previous tag> && deploy/install.sh`. Rollback of a migration:
 

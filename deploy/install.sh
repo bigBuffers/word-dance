@@ -59,15 +59,18 @@ if [ ! -f "$DATA/.env" ]; then
   run sed -i "s|^WD_SECRET_KEY=.*|WD_SECRET_KEY=\"$(openssl rand -hex 32)\"|; s|^WD_CLAUDE_BIN=.*|WD_CLAUDE_BIN=\"$CLAUDE_BIN\"|; s|^WD_DATA_DIR=.*|WD_DATA_DIR=\"$DATA\"|; s|^WD_CONTACT_EMAIL=.*|WD_CONTACT_EMAIL=\"${CONTACT:-admin@localhost}\"|" "$DATA/.env"
   run chmod 0600 "$DATA/.env"
 fi
+# under --dry-run step 5 printed the cp but did not create the file: read the template it would have copied
+# (WD_PUBLIC_URL / WD_PORT are not among the keys step 5 rewrites); the `run sed -i` below still targets $DATA/.env
+ENV_READ=$DATA/.env; [ -f "$ENV_READ" ] || ENV_READ=$REPO/deploy/env.example
 if [ -n "$PROXY" ]; then
   run sed -i "s|^WD_HOST=.*|WD_HOST=\"127.0.0.1\"|; s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"https://$DOMAIN\"|; s|^WD_TRUST_PROXY=.*|WD_TRUST_PROXY=\"1\"|" "$DATA/.env"
-elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$DATA/.env"; then
+elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$ENV_READ"; then
   # no proxy and no public URL yet → the LAN URL, so e-mail buttons / webhook `url` fields have a target (DESIGN §6.5); the CSRF check
   # also accepts the Host-derived origin (API.md §1), so reaching the site by hostname keeps working
   # the address of the default route — `hostname -I` lists bridge addresses (docker0 / lxdbr0, often link-down) first
   LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i+1); exit}}')
   [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-  PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$DATA/.env"); PORT=${PORT:-8000}
+  PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$ENV_READ"); PORT=${PORT:-8000}
   [ -n "$LAN_IP" ] && run sed -i "s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"http://$LAN_IP:$PORT\"|" "$DATA/.env"
 fi
 if [ -f "$DATA/.env" ]; then
@@ -83,11 +86,15 @@ fi
 
 # 6. database: stop the live unit, migrate (pre-migrate backup inside) + seed + probe + admin --------------------
 log "migrate + seed"
-if [ "$HAVE_SUDO" = 1 ] && systemctl is-active --quiet word-dance.service 2>/dev/null; then
-  if [ "$NO_RESTART" = 0 ]; then
+ACTIVE=0; systemctl is-active --quiet word-dance.service 2>/dev/null && ACTIVE=1   # read-only probe, needs no sudo (same call as wd.backup.service_is_active)
+STALE=0                                                                            # 1: the OLD process keeps serving after this run (step 9 must not claim success)
+if [ "$ACTIVE" = 1 ]; then
+  if [ "$HAVE_SUDO" = 1 ] && [ "$NO_RESTART" = 0 ]; then
     run sudo -n systemctl stop word-dance.service        # an upgrade: the previous version must not keep serving while the schema changes,
   else                                                   # and the pre-migrate `VACUUM INTO` must not race live writes; step 7 starts it again
-    echo "NOTE: --no-restart: the running service is kept; pending migrations must be purely ADDITIVE (new tables/columns/indexes only) — DEPLOY §10"
+    if [ "$NO_RESTART" = 0 ]; then STALE=1; fi
+    echo "NOTE: the running service is kept; pending migrations must be purely ADDITIVE (new tables/columns/indexes only) — DEPLOY §10"
+    if [ "$STALE" = 1 ]; then echo "WARN: no passwordless sudo — the OLD version keeps serving during and after this run; afterwards run: sudo systemctl restart word-dance"; fi
   fi
 fi
 run "$REPO/.venv/bin/wd" migrate                                    # cli.py: db.run_migrations() records each NNNN file itself; snapshots first (§5)
@@ -111,7 +118,9 @@ if [ "$HAVE_SUDO" = 1 ]; then
   if [ "$NO_RESTART" = 1 ]; then run sudo -n systemctl start word-dance.service; else run sudo -n systemctl restart word-dance.service; fi
   run sudo -n systemctl start word-dance-backup.timer
 else
-  echo "run as root:"; echo "  install units from $REPO/deploy into /etc/systemd/system, then: systemctl daemon-reload && systemctl enable --now word-dance word-dance-backup.timer"
+  if [ "$ACTIVE" = 1 ]; then ROOT_STEPS="systemctl daemon-reload && systemctl restart word-dance && systemctl enable --now word-dance-backup.timer"   # `enable --now` is a no-op on an active unit
+  else ROOT_STEPS="systemctl daemon-reload && systemctl enable --now word-dance word-dance-backup.timer"; fi
+  echo "run as root:"; echo "  install units from $REPO/deploy into /etc/systemd/system, then: $ROOT_STEPS"
 fi
 
 # 8. optional reverse proxy -----------------------------------------------
@@ -131,6 +140,7 @@ if [ "$DRY" = 1 ]; then log "dry run complete — nothing was changed"; exit 0; 
 log "health"
 for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "http://127.0.0.1:${WD_PORT:-8000}/api/health"; echo
-if [ -n "${WD_PUBLIC_URL:-}" ]; then echo "word-Dance is running at $WD_PUBLIC_URL";
+if [ "$STALE" = 1 ]; then echo "health OK, but the OLD process answered — the new version is not running yet; run: sudo systemctl restart word-dance";
+elif [ -n "${WD_PUBLIC_URL:-}" ]; then echo "word-Dance is running at $WD_PUBLIC_URL";
 else echo "word-Dance is running at http://${LAN_IP:-$(hostname -I | awk '{print $1}')}:${WD_PORT:-8000}  (bind ${WD_HOST:-0.0.0.0})"; fi
 echo "registration mode: ${WD_REGISTRATION_MODE:-invite} — the first account registered becomes admin; afterwards create invite codes with: $REPO/.venv/bin/wd invite --uses 5 --days 7"
