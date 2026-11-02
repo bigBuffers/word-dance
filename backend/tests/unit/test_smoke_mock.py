@@ -74,6 +74,26 @@ def test_create_app_installs_the_mock_for_wd_serve(settings, frozen_clock):
         smoke_mock.uninstall()
 
 
+def test_cli_main_installs_the_mock_for_every_wd_subprocess(test_env, monkeypatch):
+    """`make smoke` drains the queue with `wd worker-once` subprocesses (and may run `wd fetch-image`): their process
+    must mock the providers like `wd serve` does, under the same WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1 gate."""
+    from wd import cli
+
+    monkeypatch.setenv("WD_SMOKE_MOCK_HTTP", "1")
+    monkeypatch.delenv("WD_DEV", raising=False)
+    try:
+        assert cli.main(["version"]) == 0
+        assert smoke_mock.active() is None  # the flag alone is refused: a production `wd` command never mocks itself
+        monkeypatch.setenv("WD_DEV", "1")
+        assert cli.main(["version"]) == 0
+        mock = smoke_mock.active()
+        assert mock is not None and isinstance(httpx.Client()._transport, httpx.MockTransport)
+        assert fetch.resolve_host("thumb.wikimedia.org") == [smoke_mock.PUBLIC_IP]  # the SSRF pin step needs no DNS either
+        assert cli.main(["worker-once"]) == 0 and smoke_mock.active() is mock  # the real smoke subcommand keeps the same mock
+    finally:
+        smoke_mock.uninstall()
+
+
 def test_missing_fixtures_degrade_to_empty_provider_answers(tmp_path):
     mock = smoke_mock.MockHttp(tmp_path)
     with httpx.Client(transport=mock.transport) as c:

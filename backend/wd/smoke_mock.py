@@ -9,9 +9,12 @@ header first so DNS-pinned IP URLs still hit): ``api.openverse.org/v1/images*`` 
 Pillow-generated 640×400 JPEG, everything else 404. Fixtures are read from ``WD_SMOKE_FIXTURES_DIR`` (default
 ``<backend>/tests/fixtures``; missing files degrade to empty provider answers with a warning).
 
-Honoured only together with ``WD_DEV=1`` (:func:`install_if_enabled`), so a production ``.env`` can never mock itself;
-``main.create_app`` calls it for ``wd serve`` and ``tests/conftest.py`` reuses :class:`MockHttp`, so the pytest fixture
-and the smoke run cannot diverge.
+Honoured only together with ``WD_DEV=1`` (:func:`install_if_enabled` / :func:`install_from_env`), so a production
+``.env`` can never mock itself. ``main.create_app`` calls it for ``wd serve`` **and** ``cli.main`` calls it for every
+other ``wd`` command, so the ``wd worker-once`` / ``wd tick --once`` / ``wd fetch-image`` subprocesses ``make smoke``
+spawns mock their providers exactly like the server (a worker process that forgot would hit the real providers, or
+silently fall back to the card). ``tests/conftest.py`` reuses :class:`MockHttp`, so the pytest fixture and the smoke
+run cannot diverge.
 """
 
 from __future__ import annotations

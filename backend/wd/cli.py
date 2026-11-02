@@ -180,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv_if_present()
+    # WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1 (a no-op otherwise): `make smoke` drains the queue with `wd worker-once` subprocesses,
+    # which must answer provider traffic from the fixtures exactly like `wd serve` (create_app) — local import on purpose
+    from .smoke_mock import install_from_env
+
+    install_from_env()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     func = getattr(args, "func", None)

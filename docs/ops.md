@@ -201,8 +201,11 @@ needs ≈ 1.1 GB free during extraction. Without it, words outside the seed are 
 * `make smoke` — `scripts/smoke.py`: boots a throwaway instance (temporary data dir, port 8010, fake claude,
   mocked image providers, registration open) and walks the whole product: first registration → invite → onboarding
   → browse/mark → bank add → jobs → batch → every grade kind → master/restore/re-add → export/import → history →
-  admin → logout. Safe next to the production service (different port and data dir). `--keep` keeps the data dir,
-  `--port` changes the port.
+  admin → logout. Safe next to the production service (different port and data dir) and offline: the script sets
+  `WD_SMOKE_MOCK_HTTP=1` + `WD_DEV=1` for the server **and** for every `wd` subprocess it spawns (`wd worker-once`,
+  `wd tick --once`), which `wd.cli.main` honours like `create_app` does, so Wikimedia/Openverse searches and image
+  downloads are answered from `backend/tests/fixtures` (`wd.smoke_mock`) and nothing leaves the box. `--keep`
+  keeps the data dir, `--port` changes the port.
 * `make dev` — `scripts/dev.sh`: backend with auto-reload on :8000 + Vite on :5173 using `./.dev-data`;
   `WD_DEV_REAL_CLAUDE=1 make dev` uses the real CLI (spends money). Vite binds `localhost` only (`::1` on this box):
   open `http://localhost:5173`, not `127.0.0.1:5173`; a phone on the LAN cannot reach it — run
