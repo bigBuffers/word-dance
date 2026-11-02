@@ -108,6 +108,51 @@ def test_valid_false_on_a_seed_word_is_an_anomaly_then_failed(ctx, seeded):
     assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'content_anomaly'").fetchone()[0] == 2
 
 
+def test_anomaly_on_the_last_attempt_leaves_the_word_failed_not_queued_for_ever(ctx, seeded):
+    """A seed anomaly on a job claimed at its last attempt: ``requeue_group(consume_attempt=True)`` marks it dead, so
+    the dead-job side effect must apply too — the card otherwise showed 「例句生成中…」 with no live job for 24–48 h."""
+    w = word(seeded, wid(seeded, "apple"))
+    job_id = queue.enqueue(seeded, "generate_content", {"word_id": w["id"]}, dedupe_key=f"content:{w['id']}", now=NOW)
+    seeded.execute("UPDATE jobs SET attempts = 2 WHERE id = ?", (job_id,))  # two earlier transient failures
+    seeded.execute("UPDATE words SET content_state = 'queued' WHERE id = ?", (w["id"],))
+    (job,) = queue.claim_batch(seeded, "generate_content", 1, "claude-1:test", now=NOW)
+    assert job.attempts == 3 == job.max_attempts
+    item = {**ITEMS["abandon"], "word": "apple", "valid": False, "meaning_zh": "这不是单词"}
+    assert apply(ctx, seeded, job, w, item).status == "anomaly"
+    content.handle_anomaly(ctx, seeded, job, w, now=NOW)
+    j = queue.get_job(seeded, job.id)
+    assert j.status == "dead" and j.payload["anomaly"] == 1 and j.payload["group_size"] == 1 and "anomaly" in j.last_error
+    assert word(seeded, w["id"])["content_state"] == "failed" and queue.live_job(seeded, f"content:{w['id']}") is None
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'content_anomaly'").fetchone()[0] == 1
+    assert bank.enqueue_content_if_needed(seeded, word(seeded, w["id"]), priority=20, now=NOW) is not None  # the failed word can be asked for again
+
+
+def test_dead_forced_regenerate_keeps_the_live_version_ready(ctx, seeded):
+    """``mark_failed`` keys on the presence of active content, not on the state string: a forced regenerate that dies
+    leaves the old version visible (``ready``) instead of ``failed`` + a 生成例句 button + another paid generation."""
+    w = word(seeded, wid(seeded, "abandon"))
+    job = make_job(seeded, w["id"])
+    first = apply(ctx, seeded, job, w, ITEMS["abandon"])
+    queue.finish(seeded, job.id, now=NOW)
+    queue.enqueue(seeded, "generate_content", {"word_id": w["id"], "force": True}, dedupe_key=f"content:{w['id']}:r1", priority=10, max_attempts=1, now=NOW)
+    (forced,) = queue.claim_batch(seeded, "generate_content", 1, "claude-1:test", now=NOW)
+    seeded.execute("UPDATE words SET content_state = 'queued' WHERE id = ?", (w["id"],))  # the state an older regenerate left behind
+    assert common.fail_job(seeded, forced, "boom", now=NOW, on_dead=content.on_dead_at(NOW)) == "dead"
+    row = word(seeded, w["id"])
+    assert (row["content_state"], row["active_content_id"]) == ("ready", first.content_id)
+    assert seeded.execute("SELECT status FROM word_contents WHERE id = ?", (first.content_id,)).fetchone()[0] == "active"
+    assert bank.enqueue_content_if_needed(seeded, row, priority=20, now=NOW) is None  # nothing re-spent on a word with content
+    # a word without content still goes failed …
+    other = word(seeded, wid(seeded, "ability"))
+    seeded.execute("UPDATE words SET content_state = 'queued' WHERE id = ?", (other["id"],))
+    content.mark_failed(seeded, other["id"], now=NOW)
+    assert word(seeded, other["id"])["content_state"] == "failed"
+    # … and a rejected word never comes back as ready on the strength of a stale version
+    seeded.execute("UPDATE words SET content_state = 'failed', is_valid_english = 0 WHERE id = ?", (w["id"],))
+    content.mark_failed(seeded, w["id"], now=NOW)
+    assert word(seeded, w["id"])["content_state"] == "failed"
+
+
 def test_valid_false_on_a_public_custom_word_rejects_and_hides_it(ctx, seeded, alice):
     bob = int(seeded.execute("INSERT INTO users(username, password_hash) VALUES ('bob', 'x')").lastrowid)
     carol = int(seeded.execute("INSERT INTO users(username, password_hash) VALUES ('carol', 'x')").lastrowid)

@@ -321,12 +321,13 @@ def ai_pause(
     now = _now(clock)
     with db.tx(conn):
         if body.paused:
+            # CLAUDE_INTEGRATION §7 "pause": only `kv.claude.paused_until` — jobs defer until then and AI resumes by itself
+            # when it elapses. The kill switch (`kv.claude.enabled='0'`, worker idles) is a separate guard and is not set here.
             until = to_iso(parse_iso(now) + MANUAL_PAUSE)
-            db.kv_set(conn, "claude.enabled", "0", now=now)
             db.kv_set(conn, "claude.paused_until", until, now=now)
             conn.execute("INSERT INTO system_events(kind, detail_json, created_at) VALUES ('claude_paused', ?, ?)", (json.dumps({"by": admin["username"], "until": until}), now))
             return {"paused": True, "paused_until": until}
-        db.kv_set(conn, "claude.enabled", "1", now=now)
+        db.kv_set(conn, "claude.enabled", "1", now=now)  # resume also lifts a hand-set kill switch
         db.kv_delete(conn, "claude.paused_until")
         conn.execute("INSERT INTO system_events(kind, detail_json, created_at) VALUES ('claude_resumed', ?, ?)", (json.dumps({"by": admin["username"]}), now))
     return {"paused": False, "paused_until": None}
@@ -387,7 +388,10 @@ def regenerate(
     with db.tx(conn):
         n = 1 + int(conn.execute("SELECT COUNT(*) FROM jobs WHERE dedupe_key LIKE ?", (f"content:{wid}:r%",)).fetchone()[0])
         job_id = queue.enqueue(conn, "generate_content", {"word_id": wid, "force": True}, dedupe_key=f"content:{wid}:r{n}", priority=REGENERATE_PRIORITY, now=now)
-        conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
+        # Only a word without content moves to `queued` (the rule of every other enqueue site). A `ready` word keeps its
+        # state and its visible version until the forced job stores the next one — `content.select_jobs` honours `force`
+        # regardless of the state, and a dead forced job then correctly keeps the old version (`content.mark_failed`).
+        conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ? AND content_state IN ('none','failed')", (now, wid))
     return {"job_id": job_id}
 
 

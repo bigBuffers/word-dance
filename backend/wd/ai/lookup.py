@@ -8,17 +8,21 @@ transaction per word (:func:`apply_item`):
    (never auto-applied).
 2. a headword that fails :func:`wd.services.words.validate_headword` → the row is kept as typed, dictionary fields
    filled, and an open ``fix_spelling`` suggestion is stored per holder (the proposal is visible only as a suggestion).
-3. a validated headword with a different lemma → **merge** into the existing target (holders repointed with their
-   SRS state, duplicate holders' rows set to ``removed`` — never deleted —, ``word_forms(alt)``, ``merged_into_word_id``,
-   the source word's content job cancelled, open-batch ``push_items`` rewritten, 7-day ``auto`` undo rows) or
-   **rename** of the provisional row when no target exists.
-4. NULL/empty dictionary fields filled, ``is_valid_english=1``, ``is_public = safe_for_sharing``; a resolvable
-   ``suggested_correction`` → ``suggested_word_id`` + 「是否改为 “…”？」 without changing anything else.
+3. a validated headword with a different lemma → **merge** into the existing target — an exact headword or the unique
+   ``word_forms`` target of the lemma (DESIGN §5.2 steps 1–2: ``children`` is a form of ``child``, never a new
+   headword) — (holders repointed with their SRS state, duplicate holders' rows set to ``removed`` — never deleted —,
+   ``word_forms(alt)``, ``merged_into_word_id``, the source word's content job cancelled, open-batch ``push_items``
+   rewritten, 7-day ``auto`` undo rows); an ambiguous form (``axes`` → ax / axe / axis) is handled like step 2; a
+   **rename** of the provisional row only when the lemma is neither a headword nor a known form (DESIGN §3.2 guard).
+4. NULL/empty dictionary fields filled, ``is_valid_english=1``, ``is_public = safe_for_sharing`` (also for a merge
+   target that was itself still unvalidated); a resolvable ``suggested_correction`` → ``suggested_word_id`` +
+   「是否改为 “…”？」 on the typed string's own bank rows (the rows a merge repointed), nothing else changed.
 5. ``generate_content`` (priority 10) enqueued once for the final word when it lacks content — the single content
    trigger for custom words; pending attention flags cleared.
 
-A job that ends ``dead`` (or AI being disabled) leaves the word unvalidated and flags its bank rows with
-「暂时无法校验，请稍后重试或检查拼写」 (UI buttons 修改 / 重试 / 保留 / 删除, API.md 36).
+A job that ends ``dead`` leaves the word unvalidated and flags its bank rows with 「暂时无法校验，请稍后重试或检查拼写」
+(UI buttons 修改 / 重试 / 保留 / 删除, API.md 36); while AI is disabled the Claude worker applies the same flag to the
+rows behind every queued lookup (:func:`flag_queued_lookups`) and the jobs wait untouched.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import json
 import logging
 import sqlite3
 from datetime import timedelta
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import db
 from ..clock import parse_iso, to_iso
@@ -175,6 +179,22 @@ def set_dead_attention(conn: sqlite3.Connection, word_id: int, *, now: str) -> i
         return int(cur.rowcount)
 
 
+def flag_queued_lookups(conn: sqlite3.Connection, *, now: str) -> int:
+    """§6.5 while AI is disabled: the bank rows behind every queued ``lookup_word`` job get 「暂时无法校验」, so the learner
+    sees the 修改 / 重试 / 保留 / 删除 buttons instead of an endless 待校验 badge. The jobs stay untouched and run when AI
+    resumes (step 5 then clears the flag, or the handler re-flags it). Idempotent; returns the rows flagged. Rows already
+    carrying a message keep it; a 重新校验中 row (``attention_msg`` NULL) gets the message back."""
+    with db.maybe_tx(conn):
+        cur = conn.execute(
+            "UPDATE user_words SET needs_attention = 1, attention_msg = ?, updated_at = ? "
+            "WHERE state IN ('new','learning') AND (needs_attention = 0 OR attention_msg IS NULL) "
+            "AND word_id IN (SELECT json_extract(payload_json, '$.word_id') FROM jobs WHERE type = 'lookup_word' AND status = 'queued') "
+            "AND EXISTS (SELECT 1 FROM words w WHERE w.id = user_words.word_id AND w.is_valid_english IS NULL)",
+            (MSG_DEAD, now),
+        )
+        return int(cur.rowcount)
+
+
 # --------------------------------------------------------------------------------------- merge
 def merge_into(conn: sqlite3.Connection, source: Mapping[str, Any], target: Mapping[str, Any], *, note_zh: str, now: str) -> dict[str, Any]:
     """§6.5 step 3 (target exists): repoint every holder of W onto L, park duplicates as ``removed``, mark W merged."""
@@ -217,13 +237,45 @@ def merge_into(conn: sqlite3.Connection, source: Mapping[str, Any], target: Mapp
     return refreshed
 
 
-def rename_word(conn: sqlite3.Connection, word: Mapping[str, Any], norm: words.Normalised, *, now: str) -> dict[str, Any]:
-    """§6.5 step 3 (no target): the provisional row becomes the headword; the typed string stays reachable as a form."""
+def headword_target(conn: sqlite3.Connection, lemma: str, *, created_by: int | None) -> tuple[dict[str, Any] | None, bool, str | None]:
+    """§6.5 step 3 "target exists" = DESIGN §5.2 steps 1–2 for the validated headword: the exact ``words`` row (merges
+    followed) or the unique ``word_forms`` target of the lemma. Returns ``(row, ambiguous, lemma_note_zh)``;
+    ``(None, True, None)`` when the lemma is an ambiguous form (``axes`` → ax / axe / axis), ``(None, False, None)``
+    when it is unknown. Never creates rows (the ECDICT step is not run here)."""
+    row = words.word_by_lemma(conn, lemma)
+    if row is not None:
+        final, _ = words.follow_merge(conn, row)
+        return final, False, None
+    res = words._resolve_forms(conn, lemma, int(created_by or 0))
+    if res is None:
+        return None, False, None
+    if res.ambiguous or res.word_id is None:
+        return None, True, None
+    return words.word_row(conn, int(res.word_id)), False, res.lemma_note_zh
+
+
+def rename_word(conn: sqlite3.Connection, word: Mapping[str, Any], norm: words.Normalised, *, now: str) -> dict[str, Any] | None:
+    """§6.5 step 3 (no target): the provisional row becomes the headword; the typed string stays reachable as a form.
+
+    Headword guard (DESIGN §3.2, the mirror of :func:`wd.services.words.add_form`): a lemma that is a ``word_forms`` row
+    of another live word is never made a headword — it would shadow that word's form resolution for every user — so
+    nothing is changed and None is returned (the caller falls back to step 2). Form rows pointing at the word itself
+    are dropped: a headword is never its own form."""
     wid = int(word["id"])
+    own_form_rows: list[int] = []
+    for (holder_id,) in conn.execute("SELECT word_id FROM word_forms WHERE form = ?", (norm.lemma,)).fetchall():
+        holder = words.word_row(conn, int(holder_id))
+        final = words.follow_merge(conn, holder)[0] if holder is not None else None
+        if final is not None and int(final["id"]) != wid:
+            log.warning("lookup: %r is a form of %r; not renaming %r onto it", norm.lemma, final["lemma"], word["lemma"])
+            return None
+        own_form_rows.append(int(holder_id))
     conn.execute(
         "UPDATE words SET lemma = ?, display = ?, kind = ?, updated_at = ? WHERE id = ?",
         (norm.lemma, norm.display, norm.kind, now, wid),
     )
+    if own_form_rows:
+        conn.execute(f"DELETE FROM word_forms WHERE form = ? AND word_id IN ({','.join('?' * len(own_form_rows))})", (norm.lemma, *own_form_rows))
     conn.execute("INSERT OR IGNORE INTO word_forms(form, word_id, kind) VALUES (?, ?, 'alt')", (word["lemma"], wid))
     refreshed = words.word_row(conn, wid)
     assert refreshed is not None
@@ -236,7 +288,12 @@ def _text(item: Mapping[str, Any], key: str, max_len: int = FIELD_MAX) -> str:
 
 
 def fill_fields(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping[str, Any], *, now: str, own_row: bool) -> list[str]:
-    """§6.5 step 4: fill NULL/empty dictionary fields, validate the word, apply the sharing verdict; returns the columns set."""
+    """§6.5 step 4: fill NULL/empty dictionary fields, validate the word, apply the sharing verdict; returns the columns set.
+
+    ``is_public = safe_for_sharing`` (and ``source='claude'``) apply whenever this item is the one validating the row:
+    its own word, or a merge target that was still unvalidated (``is_valid_english != 1``) — otherwise a word Claude
+    vouched for would stay private for ever, since the target's own lookup job is then skipped as ``already_validated``.
+    A merge into an already public seed/ECDICT headword never touches its ``is_public`` or ``kind``."""
     sets: dict[str, Any] = {}
     meaning_zh = _text(item, "meaning_zh")
     if not word.get("translation") and meaning_zh and common.has_cjk(meaning_zh):
@@ -259,7 +316,8 @@ def fill_fields(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping
     safe = 1 if item.get("safe_for_sharing") is True else 0
     sets["is_valid_english"] = 1
     sets["safe_for_sharing"] = safe
-    if own_row:
+    validating = own_row or word.get("is_valid_english") != 1
+    if validating:
         sets["is_public"] = safe
         if word.get("source") == "user":
             sets["source"] = "claude"
@@ -313,17 +371,20 @@ def _suggest_fix_spelling(conn: sqlite3.Connection, word: Mapping[str, Any], pro
     return count
 
 
-def _apply_correction(conn: sqlite3.Connection, final: Mapping[str, Any], source_id: int, item: Mapping[str, Any], *, now: str) -> int | None:
-    """Step 4 ``suggested_correction``: a ``did-you-mean`` target on the holders' rows, nothing else changed."""
+def _apply_correction(conn: sqlite3.Connection, final: Mapping[str, Any], source_id: int, item: Mapping[str, Any], *, row_ids: Sequence[int], now: str) -> int | None:
+    """Step 4 ``suggested_correction``: a ``did-you-mean`` target on the typed string's own bank rows (``row_ids`` — after a
+    merge these are the rows repointed onto L, never L's other holders, who did not mistype anything), nothing else changed."""
     correction = _text(item, "suggested_correction", 48)
-    if not correction:
+    if not correction or not row_ids:
         return None
     suggested = resolve_existing(conn, correction, created_by=final.get("created_by_user_id"), now=now)
     if suggested is None or int(suggested["id"]) in (int(final["id"]), source_id):
         return None
+    marks = ",".join("?" * len(row_ids))
     conn.execute(
-        "UPDATE user_words SET suggested_word_id = ?, needs_attention = 1, attention_msg = ?, updated_at = ? WHERE word_id = ? AND state IN ('new','learning')",
-        (int(suggested["id"]), MSG_SUGGEST.format(display=suggested["display"]), now, int(final["id"])),
+        f"UPDATE user_words SET suggested_word_id = ?, needs_attention = 1, attention_msg = ?, updated_at = ? "
+        f"WHERE id IN ({marks}) AND word_id = ? AND state IN ('new','learning')",
+        (int(suggested["id"]), MSG_SUGGEST.format(display=suggested["display"]), now, *[int(i) for i in row_ids], int(final["id"])),
     )
     return int(suggested["id"])
 
@@ -349,6 +410,7 @@ def apply_item(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping[
         if item.get("is_english") is not True or item.get("kind") == "invalid":
             suggested = _flag_invalid(conn, fresh, item, now=now)
             return {"outcome": "invalid", "word_id": wid, "suggested_word_id": suggested}
+        own_rows = [int(r["id"]) for r in holders(conn, wid)]  # the typed string's bank rows — what a merge repoints
         headword = item.get("headword") if isinstance(item.get("headword"), str) else ""
         norm = common.validate_target(conn, headword, str(fresh["lemma"]))
         final: dict[str, Any] = fresh
@@ -360,19 +422,25 @@ def apply_item(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping[
                 detail["suggestions"] = _suggest_fix_spelling(conn, fresh, proposed, item, now=now)
                 outcome = "kept"
         elif norm.lemma != str(fresh["lemma"]):
-            target = words.word_by_lemma(conn, norm.lemma)
-            if target is not None:
-                target, _ = words.follow_merge(conn, target)
+            target, ambiguous, form_note = headword_target(conn, norm.lemma, created_by=fresh.get("created_by_user_id"))
+            renamed: dict[str, Any] | None = None
             if target is not None and int(target["id"]) != wid:
-                final = merge_into(conn, fresh, target, note_zh=_text(item, "form_note_zh", NOTE_MAX), now=now)
+                final = merge_into(conn, fresh, target, note_zh=_text(item, "form_note_zh", NOTE_MAX) or form_note or "", now=now)
                 outcome = "merged"
             else:
-                final = rename_word(conn, fresh, norm, now=now)
-                outcome = "renamed"
+                if not ambiguous:
+                    renamed = rename_word(conn, fresh, norm, now=now)
+                if renamed is None:
+                    # an ambiguous form (axes → ax / axe / axis) or a form of another live word never becomes a headword: step 2
+                    detail["suggestions"] = _suggest_fix_spelling(conn, fresh, norm.display, item, now=now)
+                    outcome = "kept"
+                else:
+                    final = renamed
+                    outcome = "renamed"
         own_row = int(final["id"]) == wid
         filled = fill_fields(conn, final, item, now=now, own_row=own_row)
         final = words.word_row(conn, int(final["id"])) or final
-        suggested = _apply_correction(conn, final, wid, item, now=now)
+        suggested = _apply_correction(conn, final, wid, item, row_ids=own_rows, now=now)
         job_id = bank.enqueue_content_if_needed(conn, final, priority=CONTENT_PRIORITY, now=now)
         _clear_pending(conn, int(final["id"]), now=now)
         if not own_row:
@@ -477,7 +545,9 @@ __all__ = [
     "apply_item",
     "build_user_prompt",
     "fill_fields",
+    "flag_queued_lookups",
     "handle_lookup_word",
+    "headword_target",
     "insert_suggestion",
     "merge_into",
     "rename_word",

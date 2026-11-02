@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wd import cli, db
-from wd.ai import budget
+from wd.ai import budget, lookup
 from wd.deps import hash_token
 from wd.jobs import lease, queue, registry, worker
 from wd.jobs.queue import CLAUDE_TYPES
@@ -145,6 +145,39 @@ def test_claude_worker_idles_while_ai_is_disabled(seeded, ctx):
     db.kv_set(seeded, "claude.enabled", "1")
     assert w.step() is True and all(queue.get_job(seeded, j).status == "done" for j in ids)
     assert w.processed == 2 and worker.IoWorker(ctx).gate() is None
+
+
+def test_disabled_ai_flags_queued_lookups_as_unverifiable_and_resumes_cleanly(seeded, ctx):
+    """CLAUDE_INTEGRATION §6.5: while the kill switch is off a pasted word must not sit at 待校验 for ever — its bank row
+    gets 「暂时无法校验」 (buttons 修改 / 重试 / 保留 / 删除) while the job itself waits untouched for AI to resume."""
+    alice, _ = make_user(seeded, "alice")
+    bob, _ = make_user(seeded, "bob")
+    db.kv_set(seeded, "claude.enabled", "0")
+    (res,) = bank.add_custom_words(seeded, alice, "flibbertigibbetx", None, False, NOW, "Asia/Shanghai")
+    assert res.status == "pending_ai"
+    bank.apply_action(seeded, bob, res.word_id, "add_custom", origin="custom", context="api", input_text="flibbertigibbetx", now=NOW, tz="Asia/Shanghai")
+    sync_lookups(seeded)
+    (valid,) = bank.add_custom_words(seeded, alice, "abandon", None, False, NOW, "Asia/Shanghai")  # a validated word is never flagged
+    w = worker.ClaudeWorker(ctx)
+    assert w.step() is False  # still inside the 20-s debounce: the sweep does not wait for the job to become runnable
+    for uid in (alice, bob):
+        row = bank.my_row(seeded, uid, res.word_id)
+        assert row["needs_attention"] == 1 and row["attention_msg"] == lookup.MSG_DEAD == "暂时无法校验，请稍后重试或检查拼写"
+        assert bank.attention_count(seeded, uid) == 1
+    assert bank.my_row(seeded, alice, valid.word_id)["needs_attention"] == 0
+    job = queue.live_job(seeded, f"lookup:{res.word_id}")
+    assert job.status == "queued" and job.attempts == 0 and job.run_after == "2026-10-14T00:00:20Z"  # the job itself is untouched
+    assert w.step() is False and lookup.flag_queued_lookups(seeded, now=NOW) == 0  # idempotent
+    bank.set_attention(seeded, bob, res.word_id, "retry", NOW)  # 重试 while still disabled → the message comes back on the next sweep
+    assert bank.my_row(seeded, bob, res.word_id)["attention_msg"] is None
+    assert w.step() is False and bank.my_row(seeded, bob, res.word_id)["attention_msg"] == lookup.MSG_DEAD
+    db.kv_set(seeded, "claude.enabled", "1")
+    ctx.clock.advance(seconds=20)
+    assert w.step() is True  # the lookup runs against the ok fake and clears the flags
+    assert words.word_row(seeded, res.word_id)["is_valid_english"] == 1
+    for uid in (alice, bob):
+        row = bank.my_row(seeded, uid, res.word_id)
+        assert row["needs_attention"] == 0 and row["attention_msg"] is None
 
 
 def test_lease_blocks_worker_once(seeded, settings, test_env, monkeypatch, capsys):

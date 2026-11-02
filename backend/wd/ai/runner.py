@@ -10,11 +10,15 @@
 * :func:`run_claude` — ledger row **before** the spawn, ``Popen`` + ``communicate(timeout)`` +
   ``os.killpg(proc.pid, SIGKILL)`` + a second ``communicate()`` (never ``subprocess.run``), ``stdin=DEVNULL``,
   the empty ``WD_DATA_DIR/claude-cwd`` as cwd, raw stdout/stderr saved under ``claude-logs/YYYY-MM-DD/<id>.json``.
+  An argv element of :data:`MAX_ARG_BYTES` or more (Linux ``MAX_ARG_STRLEN``) is refused before the spawn, and the
+  kernel's own ``E2BIG`` / ``ENAMETOOLONG`` is classified the same way: a per-call ``error`` (the job backs off and
+  eventually dies alone), never ``spawn_error`` (which means the binary is missing and pauses AI for everyone).
 * :func:`parse_and_classify` — the §3 status table.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -59,6 +63,10 @@ PASSTHROUGH_ENV: tuple[str, ...] = (
 OUTPUT_CAP_BYTES = 10_000_000
 STDERR_EXCERPT_CHARS = 1000
 FLAG_ERROR_EVENT_WINDOW = timedelta(hours=1)
+#: Linux ``MAX_ARG_STRLEN`` (32 pages): ``execve`` rejects a single argv string of this many bytes or more with E2BIG
+MAX_ARG_BYTES = 131_072
+#: spawn ``OSError`` values that are about the argv we built (an input-dependent, per-call error), not about the binary
+ARG_SIZE_ERRNOS: tuple[int, ...] = (errno.E2BIG, errno.ENAMETOOLONG)
 
 AUTH_RE = re.compile(r"not logged in|log ?in|authentication|unauthori[sz]ed|\b401\b|invalid api key|credential", re.IGNORECASE)
 BUDGET_RE = re.compile(r"max.?budget|budget", re.IGNORECASE)
@@ -139,6 +147,12 @@ def build_argv(cfg: Settings, tier: str, system_prompt: str, user_prompt: str, s
     if cfg.ai_extra_args:
         argv += shlex.split(cfg.ai_extra_args)
     return argv
+
+
+def oversized_arg(argv: list[str]) -> int | None:
+    """Byte length of the largest argv element when ``execve`` would refuse it (``>= MAX_ARG_BYTES``), else None."""
+    biggest = max((len(os.fsencode(a)) for a in argv), default=0)
+    return biggest if biggest >= MAX_ARG_BYTES else None
 
 
 def claude_env(cfg: Settings, environ: dict[str, str] | None = None) -> dict[str, str]:
@@ -407,9 +421,15 @@ def run_claude(
             now=now,
         )
     env = claude_env(cfg)
+    started = time.perf_counter()
+    too_big = oversized_arg(argv)
+    if too_big is not None:
+        # the kernel would answer E2BIG; this is the prompt's fault (per-call `error`), not a missing binary
+        parsed = Parsed(status="error", error=f"argument too long: {too_big} bytes in one argv element (Linux limit {MAX_ARG_BYTES}); the prompt must be trimmed")
+        log.error("claude %s call %s refused: %s", kind, call_id, parsed.error, extra={"event": "claude_call"})
+        return _finish(conn, call_id, parsed, stdout_path=None, started=started, now=now)
     for hook in list(SPAWN_HOOKS):
         hook(conn, call_id, argv)
-    started = time.perf_counter()
     try:
         proc = subprocess.Popen(
             argv,
@@ -422,8 +442,13 @@ def run_claude(
             start_new_session=True,
         )
     except OSError as e:
-        parsed = Parsed(status="spawn_error", error=f"{e.__class__.__name__}: {e}"[:STDERR_EXCERPT_CHARS])
-        log.error("claude spawn failed: %s", e, extra={"event": "claude_spawn_error"})
+        detail = f"{e.__class__.__name__}: {e}"[:STDERR_EXCERPT_CHARS]
+        if e.errno in ARG_SIZE_ERRNOS:
+            parsed = Parsed(status="error", error=detail)
+            log.error("claude %s call %s refused by the kernel (argv too large): %s", kind, call_id, e, extra={"event": "claude_call"})
+        else:
+            parsed = Parsed(status="spawn_error", error=detail)
+            log.error("claude spawn failed: %s", e, extra={"event": "claude_spawn_error"})
         return _finish(conn, call_id, parsed, stdout_path=None, started=started, now=now)
     try:
         out, err = proc.communicate(timeout=timeout_s)
@@ -508,6 +533,8 @@ class Runner:
 
 
 __all__ = [
+    "ARG_SIZE_ERRNOS",
+    "MAX_ARG_BYTES",
     "PASSTHROUGH_ENV",
     "Parsed",
     "Runner",
@@ -520,6 +547,7 @@ __all__ = [
     "format_budget",
     "load_prompt",
     "load_schema",
+    "oversized_arg",
     "parse_and_classify",
     "prune_logs",
     "run_claude",

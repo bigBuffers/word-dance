@@ -3,8 +3,9 @@
 * :class:`ClaudeWorker` (threads ``claude-N``, ``WD_AI_CONCURRENCY`` of them) takes the **head job across all Claude
   job types** (``queue.head_type`` over ``generate_content / lookup_word / consolidate_bank / generate_svg /
   prewarm_plan`` ordered ``priority, run_after, id``), so a priority-10 lookup is never stuck behind priority-20/90
-  content jobs; it idles while the kill switch is off (jobs untouched). Budget / pause checks run inside the
-  handlers (``wd.ai.common.claude_call``), so a synchronous drain applies exactly the same rules.
+  content jobs; it idles while the kill switch is off (jobs untouched — only the bank rows behind queued lookups are
+  flagged 「暂时无法校验」, CLAUDE_INTEGRATION §6.5). Budget / pause checks run inside the handlers
+  (``wd.ai.common.claude_call``), so a synchronous drain applies exactly the same rules.
 * :class:`IoWorker` (``io-1``) drains ``fetch_image / send_email / send_webhook`` one job at a time.
 * Both sweep stale ``running`` jobs every five minutes (``queue.requeue_stale(boot_id)``); the Claude worker also
   prunes ``claude-logs`` older than ``WD_AI_LOG_KEEP_DAYS``.
@@ -216,16 +217,20 @@ class BaseWorker(threading.Thread):
 
 
 class ClaudeWorker(BaseWorker):
-    """``claude-N``: the five Claude job types, head job across types; idles while AI is disabled."""
+    """``claude-N``: the five Claude job types, head job across types; idles while AI is disabled (flagging the bank
+    rows of queued lookups 「暂时无法校验」 so learners get the 修改 / 重试 / 保留 / 删除 buttons, §6.5)."""
 
     types = CLAUDE_TYPES
 
     def gate(self) -> float | None:
-        from ..ai import budget  # local import: ai → jobs must not become a module cycle at import time
+        from ..ai import budget, lookup  # local import: ai → jobs must not become a module cycle at import time
 
         conn = self.ctx.db()
         try:
             if not budget.ai_enabled(conn, self.ctx.cfg):
+                flagged = lookup.flag_queued_lookups(conn, now=self.ctx.now())
+                if flagged:
+                    log.info("AI disabled: flagged %d bank row(s) of queued lookups as 暂时无法校验", flagged, extra={"worker": self.worker_id, "event": "lookup_flagged_disabled"})
                 return DISABLED_WAIT_S
         finally:
             conn.close()

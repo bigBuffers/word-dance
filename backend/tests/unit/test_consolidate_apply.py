@@ -10,7 +10,7 @@ import logging
 import pytest
 
 from wd import db
-from wd.ai import consolidate
+from wd.ai import consolidate, runner
 from wd.jobs import queue, registry
 from wd.jobs.registry import JobContext
 from wd.services import bank, words
@@ -82,6 +82,89 @@ def test_inputs_and_prompt(seeded, alice):
     data = json.loads(prompt.split("<items>\n", 1)[1].split("\n</items>", 1)[0])
     assert data["bank_headwords"] == ["abandon"] and data["items"][0]["id"] == p["id"]
     assert "note" not in consolidate.prompt_item({**items[0], "note": None})
+
+
+def quoted_token(lemma: str, length: int = 4000) -> str:
+    """A 4,000-char bank token the API accepts: the surrounding quotes are stripped by ``normalise_input`` (status
+    ``added``) while ``user_words.input_text`` keeps all 4,000 characters."""
+    return '"' * 1990 + lemma + '"' * (length - 1990 - len(lemma))
+
+
+def test_prompt_never_carries_raw_input_text_and_the_run_succeeds(seeded, alice, ctx):
+    """Review blocker: 40 rows whose raw ``input_text`` is 4,000 chars made a 324 KB ``-p`` argument → ``E2BIG`` →
+    ``spawn_error`` → AI paused for every user, re-armed every 30 minutes. The prompt (and any suggestion payload)
+    carries the normalised display only; the run then completes like any other."""
+    lemmas = [str(r[0]) for r in seeded.execute("SELECT lemma FROM words WHERE source = 'seed' AND lemma NOT LIKE '% %' ORDER BY lemma LIMIT 40")]
+    for lemma in lemmas:
+        (res,) = bank.add_custom_words(seeded, alice, quoted_token(lemma), None, False, NOW, TZ)
+        assert res.status == "added" and res.word_id == wid(seeded, lemma), lemma
+    assert seeded.execute("SELECT MAX(LENGTH(input_text)), COUNT(*) FROM user_words").fetchone()[:] == (4000, 40)
+    items = consolidate.select_items(seeded, alice, since=None)
+    prompt_items = [consolidate.prompt_item(r) for r in items]
+    assert len(prompt_items) == 40 and all(len(p["input"]) <= words.MAX_CHARS and p["input"].lower() == p["headword"].lower() for p in prompt_items)
+    prompt, sent_headwords, sent_items = consolidate.fit_prompt(consolidate.bank_headwords(seeded, alice), prompt_items)
+    assert len(prompt.encode("utf-8")) < 8_000 and len(sent_headwords) == 40 and sent_items == prompt_items
+    assert '""' not in prompt
+    # input_display: a token that does not normalise is still bounded; an empty one falls back to the headword
+    assert consolidate.input_display({"input_text": "中文" * 100, "display": "abandon"}) == "中文" * 24
+    assert consolidate.input_display({"input_text": "  ", "display": "abandon"}) == "abandon" and consolidate.input_display({"display": "Go"}) == "Go"
+    # the suggestion payload echoes the same bounded form, never the raw column
+    uw = bank.my_row(seeded, alice, wid(seeded, "absolute"))
+    _, _, summary = run_apply(seeded, alice, {"items": [item(uw["id"], "fix_spelling", "absolutely", "拼写")], "confusable_groups": [], "difficulty_tags": []})
+    assert summary.suggestions == 1 and json.loads(suggestions(seeded, alice)[0]["payload_json"])["from"] == "absolute"
+    # end to end against the fake: one successful call, the run done, nothing paused
+    seeded.execute("DELETE FROM consolidation_runs")
+    job_id = consolidate.enqueue_for_user(seeded, alice, trigger="nightly", now=NOW)
+    (job,) = queue.claim_batch(seeded, "consolidate_bank", 1, "claude-1:test", now=NOW)
+    consolidate.handle_consolidate_bank(ctx, [job])
+    done = queue.get_job(seeded, job_id)
+    assert done.status == "done" and done.result["examined"] == 40 and "items_deferred" not in done.result
+    assert [tuple(r) for r in seeded.execute("SELECT kind, status FROM ai_calls")] == [("consolidate", "success")]
+    assert db.kv_get(seeded, "claude.paused_until") is None and db.kv_get(seeded, "claude.available") is None
+
+
+def test_fit_prompt_trims_headwords_then_items_to_the_byte_budget():
+    """The design caps alone (2000 × 48-char phrases + 80 items with 120-char notes) exceed the per-argument limit once
+    the system prompt is folded in; the budget trims the context (headwords) first and the work (items) last."""
+    headwords = [f"{'w' * 43}{i:04d}" for i in range(consolidate.MAX_HEADWORDS)]
+    items = [{"id": i, "input": "x" * 48, "headword": "x" * 48, "has_dictionary_data": False, "difficulty": None, "note": "备" * 120} for i in range(consolidate.MAX_ITEMS)]
+    assert len(consolidate.build_user_prompt(headwords, items).encode("utf-8")) > consolidate.PROMPT_MAX_BYTES
+    prompt, sent_headwords, sent_items = consolidate.fit_prompt(headwords, items)
+    assert len(prompt.encode("utf-8")) <= consolidate.PROMPT_MAX_BYTES and sent_items == items and 0 < len(sent_headwords) < len(headwords)
+    folded = runner.fold_system_prompt(runner.load_prompt("consolidate_system"), prompt)
+    assert runner.oversized_arg([folded]) is None and len(folded.encode("utf-8")) < runner.MAX_ARG_BYTES - 20_000
+    data = json.loads(prompt.split("<items>\n", 1)[1].split("\n</items>", 1)[0])
+    assert data["bank_headwords"] == sent_headwords and [it["id"] for it in data["items"]] == list(range(consolidate.MAX_ITEMS))
+    # items go only once the headwords are gone, and never the last one
+    prompt, sent_headwords, sent_items = consolidate.fit_prompt([], items, max_bytes=10_000)
+    assert sent_headwords == [] and 1 <= len(sent_items) < len(items) and len(prompt.encode("utf-8")) <= 10_000 and sent_items == items[: len(sent_items)]
+    prompt, _, sent_items = consolidate.fit_prompt(["abandon"], items[:1], max_bytes=10)
+    assert sent_items == items[:1] and len(prompt.encode("utf-8")) > 10
+    # a normal bank is untouched
+    small_hw, small_items = ["abandon", "ability"], items[:2]
+    assert consolidate.fit_prompt(small_hw, small_items) == (consolidate.build_user_prompt(small_hw, small_items), small_hw, small_items)
+
+
+def test_an_oversized_prompt_fails_only_that_job_and_never_pauses_ai(seeded, alice, ctx, monkeypatch):
+    """Should a prompt ever reach the kernel limit, the runner answers a per-call ``error``: the job backs off and dies
+    alone after three attempts — no 30-minute pause, no ``claude.available='0'``, no 「Claude CLI 未登录」 event."""
+    mark(seeded, alice, "abandon")
+    huge = "Examine this learner's word bank.\n<items>\n" + '{"bank_headwords": ["' + "x" * runner.MAX_ARG_BYTES + '"], "items": []}' + "\n</items>"
+    monkeypatch.setattr(consolidate, "fit_prompt", lambda headwords, items, **kw: (huge, headwords, items))
+    job_id = consolidate.enqueue_for_user(seeded, alice, trigger="manual", now=NOW)
+    statuses = []
+    for _ in range(3):
+        (job,) = queue.claim_batch(seeded, "consolidate_bank", 1, "claude-1:test", now=ctx.now())
+        consolidate.handle_consolidate_bank(ctx, [job])
+        statuses.append(queue.get_job(seeded, job_id).status)
+        ctx.clock.advance(minutes=61)
+    assert statuses == ["queued", "queued", "dead"]
+    dead = queue.get_job(seeded, job_id)
+    assert dead.attempts == 3 and "argument too long" in dead.last_error and str(runner.MAX_ARG_BYTES) in dead.last_error
+    assert [tuple(r) for r in seeded.execute("SELECT kind, status FROM ai_calls")] == [("consolidate", "error")] * 3
+    assert [str(r[0]) for r in seeded.execute("SELECT status FROM consolidation_runs ORDER BY id")] == ["failed"] * 3
+    assert db.kv_get(seeded, "claude.paused_until") is None and db.kv_get(seeded, "claude.available") is None
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'claude_auth'").fetchone()[0] == 0
 
 
 def test_enqueue_uses_the_trigger_key(seeded, alice):

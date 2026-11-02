@@ -4,6 +4,7 @@ cost recorded on budget failures, raw logs and their pruning."""
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
@@ -262,6 +263,38 @@ def test_spawn_error_when_the_binary_is_missing(conn, settings, tmp_path):
     assert result.status == "spawn_error" and not result.ok
     row = ledger.get_call(conn, result.call_id)
     assert row["status"] == "spawn_error" and "FileNotFoundError" in row["error"]
+
+
+def test_an_oversized_argv_is_a_per_call_error_not_a_spawn_error(conn, cfg_for, monkeypatch):
+    """A ≥ 128 KiB argv element makes ``execve`` fail with E2BIG. Classifying that ``spawn_error`` paused AI for every
+    user (30-min pause + ``claude.available='0'`` + 「Claude CLI 未登录」) and re-armed for ever, since the same prompt
+    came back each time; it is the prompt's fault, so it is an ordinary ``error`` for that job only."""
+    huge = content.build_user_prompt([{"word": "x" * runner.MAX_ARG_BYTES, "dictionary_hint": "", "pos_hint": "", "stages": []}])
+    spawned: list[list[str]] = []
+    real_popen = runner.subprocess.Popen
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda argv, **kw: spawned.append(argv) or real_popen(argv, **kw))
+    result = run(conn, cfg_for("ok"), prompt=huge)
+    assert result.status == "error" and not result.ok and spawned == []  # refused before any spawn
+    row = ledger.get_call(conn, result.call_id)
+    assert row["status"] == "error" and "argument too long" in row["error"] and str(runner.MAX_ARG_BYTES) in row["error"] and row["finished_at"] == NOW
+    # the kernel's own refusal (E2BIG / ENAMETOOLONG) is classified the same way …
+    def e2big(argv, **kw):
+        raise OSError(errno.E2BIG, "Argument list too long", argv[0])
+
+    monkeypatch.setattr(runner.subprocess, "Popen", e2big)
+    result = run(conn, cfg_for("ok"))
+    assert result.status == "error" and "Argument list too long" in ledger.get_call(conn, result.call_id)["error"]
+    # … while a missing / unusable binary stays a spawn_error
+    def enoent(argv, **kw):
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(runner.subprocess, "Popen", enoent)
+    assert run(conn, cfg_for("ok")).status == "spawn_error"
+    assert [r[0] for r in conn.execute("SELECT status FROM ai_calls ORDER BY id")] == ["error", "error", "spawn_error"]
+    # the limit itself: one byte under passes, the limit fails (Linux MAX_ARG_STRLEN = 32 pages, NUL included)
+    assert runner.oversized_arg(["x" * (runner.MAX_ARG_BYTES - 1), "-p"]) is None
+    assert runner.oversized_arg(["-p", "x" * runner.MAX_ARG_BYTES]) == runner.MAX_ARG_BYTES
+    assert runner.oversized_arg(["中" * (runner.MAX_ARG_BYTES // 3 + 1)]) == 3 * (runner.MAX_ARG_BYTES // 3 + 1)  # bytes, not characters
 
 
 # ------------------------------------------------------------------------------------------- parsing
