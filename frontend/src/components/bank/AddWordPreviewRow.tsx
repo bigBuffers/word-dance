@@ -9,8 +9,11 @@ import { StateBadge } from '@/components/word/StateBadge';
 import { zh } from '@/i18n/zh';
 import './bank.css';
 
+/** Server statuses plus the client-only `validated` (a pending-AI row whose poll saw the AI check finish — FRONTEND §5.6). */
+export type AddBadgeStatus = AddResult['status'] | 'validated';
+
 /** Status badge of an `AddResult` / import row (zh.bank.status.*), shared by the add-words page and the import result sheet. */
-export function AddStatusBadge({ status }: { status: AddResult['status'] }) {
+export function AddStatusBadge({ status }: { status: AddBadgeStatus }) {
   return <span className={`status-badge status-badge--${status}`}>{zh.bank.status[status]}</span>;
 }
 
@@ -129,6 +132,7 @@ export function AddWordPreviewRow({ input, preview, loading = false, invalidMess
         <span className="preview-row__status">{status}</span>
       </div>
       {detail && <div className="preview-row__detail">{detail}</div>}
+      {duplicate && <div className="preview-row__detail preview-row__duplicate">{zh.bank.preview.duplicate}</div>}
       {chips}
     </li>
   );

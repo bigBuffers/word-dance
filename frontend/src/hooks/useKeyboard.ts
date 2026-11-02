@@ -33,6 +33,15 @@ function dialogOpen(): boolean {
   return typeof document !== 'undefined' && document.querySelector('dialog[open]') !== null;
 }
 
+/**
+ * A focused `<button>` / `<summary>` activates natively on Space (keyup click / details toggle); calling
+ * `preventDefault()` on that keydown would cancel the activation, so the Space shortcut yields to it.
+ * Links do not activate on Space and Enter is never mapped, so only these two tags matter.
+ */
+export function isActivatableTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.closest('button, summary') !== null;
+}
+
 export function useKeyboard(map: KeyMap, options: UseKeyboardOptions = {}): void {
   const { enabled = true, allowInInputs = false } = options;
   const mapRef = useRef(map);
@@ -47,7 +56,9 @@ export function useKeyboard(map: KeyMap, options: UseKeyboardOptions = {}): void
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (!allowInInputs && isEditableTarget(event.target)) return;
       if (dialogOpen()) return;
-      const handler = mapRef.current[normalizeKey(event)];
+      const key = normalizeKey(event);
+      if (key === 'Space' && isActivatableTarget(event.target)) return;
+      const handler = mapRef.current[key];
       if (!handler) return;
       event.preventDefault();
       handler(event);

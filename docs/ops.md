@@ -222,16 +222,19 @@ the P0 "migrate twice" and WP1 full-seed acceptance green). Left open deliberate
   dev mode.
 * The register throttle (5/h per IP) also applies to the test client's IP: a test that registers more than five users
   on one app must advance the frozen clock or insert users directly.
-* Onboarding screening card: Space reveals the translation through a window keydown handler; a focused button may
-  additionally activate on keyup in some browsers (keys 1/2/S are unaffected).
+* Screening / study keyboard shortcuts go through `hooks/useKeyboard` (also on the onboarding card since the
+  fix(frontend) commit): auto-repeat keydowns are dropped (a held `1` judges one card), and Space yields to a focused
+  `<button>`/`<summary>` so the native activation still happens (Chrome suppresses the click when that keydown is
+  cancelled; keys 1/2/S never activate buttons and keep working there). Button / swipe verdicts are ignored for
+  250 ms after a card advanced (`hooks/useTapLock`), so a double tap cannot judge the next card.
 
 **Deferred clean-ups (no behaviour change)**
 
 * Frontend: WP8's date helpers live in `utils/srsPreview.ts` next to WP7's `utils/date.ts`; content polling is
-  inlined in the study pages instead of `hooks/usePolling.ts`. Copy-pass candidates without their own `zh.ts` key:
-  queued test e-mail toast (reuses 测试成功), validated add result shows 已识别 (spec 已校验), 重置进度 confirmation
-  text, duplicate-line hint in the add-words preview, admin table headers (DTO field names), heat-strip tooltip,
-  `i/n` card counter, 推荐词 认识 toast, WaitingPanel label.
+  inlined in the study pages instead of `hooks/usePolling.ts`. Copy-pass candidate without its own `zh.ts` key:
+  WaitingPanel label (the queued test e-mail toast, validated add result, reset / remove confirmations, duplicate-line
+  hint, admin labels, heat-strip tooltip, card counter and the 推荐词 认识 toast received keys in the fix(frontend)
+  commit, ratified in FRONTEND §8).
 * Tests: the full-seed acceptance (`backend/tests/unit/test_seed.py` + the `@full_seed` vocab test) is skipped by
   `make test`; run it after `wd import-seed` into a scratch data dir with
   `WD_FULL_SEED_DB=<that DB> PYTHONPATH=backend .venv/bin/pytest -q backend/tests -m full_seed`.

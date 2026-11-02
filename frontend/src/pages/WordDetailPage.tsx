@@ -18,13 +18,14 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { cx } from '@/components/ui/cx';
-import { formatDue, StateBadge, stateLabel } from '@/components/word/StateBadge';
+import { formatDueSentence, StateBadge, stateLabel } from '@/components/word/StateBadge';
 import { WordHeader } from '@/components/word/WordHeader';
 import { useApi } from '@/hooks/useApi';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { UNDO_LIST_MS, UNDO_MASTER_MS, useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
+import { formatPos } from '@/utils/pos';
 import { formatDateTime } from '@/utils/srsPreview';
 import './WordDetailPage.css';
 
@@ -348,7 +349,8 @@ export default function WordDetailPage() {
   const deferred = data.content_deferred_until !== null;
   const canRequestContent = (data.content_state === 'none' || data.content_state === 'failed') && !deferred && word.is_valid_english !== null;
   const timeZone = settings?.timezone;
-  const dueLabel = mine && state === 'learning' ? formatDue(mine.srs.due_at, mine.srs.step) : null;
+  const dueSentence = mine && state === 'learning' ? formatDueSentence(mine.srs.due_at, mine.srs.step) : null;
+  const pos = formatPos(word.pos);
 
   return (
     <section className="page word-detail">
@@ -393,9 +395,9 @@ export default function WordDetailPage() {
 
       <section className="word-detail__section card" aria-label={zh.study.dictionary}>
         <h2 className="word-detail__section-title">{zh.study.dictionary}</h2>
-        {word.pos && (
+        {pos && (
           <p className="muted word-detail__pos" lang="en">
-            {word.pos}
+            {pos}
           </p>
         )}
         {dictLines.length > 0 ? (
@@ -521,12 +523,12 @@ export default function WordDetailPage() {
           <dl className="word-detail__srs">
             <div>
               <dt>{zh.bank.tabs[mine.state]}</dt>
-              <dd>{zh.study.srsLine(mine.srs.repetitions, mine.srs.interval_days)}</dd>
+              <dd>{mine.srs.repetitions > 0 ? zh.study.srsLine(mine.srs.repetitions, mine.srs.interval_days) : zh.study.srsNew}</dd>
             </div>
-            {dueLabel && (
+            {dueSentence && (
               <div>
                 <dt>{zh.bank.sort.due}</dt>
-                <dd>{zh.bank.dueIn(dueLabel)}</dd>
+                <dd>{dueSentence}</dd>
               </div>
             )}
             <div>
@@ -564,7 +566,8 @@ export default function WordDetailPage() {
 
       <ConfirmDialog
         open={confirm !== null}
-        message={confirm === 'mastered' ? zh.study.masterConfirm : confirm === 'remove' ? zh.word.remove : zh.word.reset}
+        title={confirm === 'remove' ? zh.word.remove : confirm === 'reset' ? zh.word.reset : undefined}
+        message={confirm === 'mastered' ? zh.study.masterConfirm : confirm === 'remove' ? zh.word.removeConfirm : zh.word.resetConfirm}
         confirmLabel={confirm === 'mastered' ? zh.study.master : confirm === 'remove' ? zh.word.remove : zh.word.reset}
         danger={confirm === 'remove' || confirm === 'reset'}
         busy={acting}

@@ -1,7 +1,8 @@
 // AdminPage — `/admin` (FRONTEND 5.8, API.md endpoints 54-74): tabs overview / users & invites / jobs /
 // AI / reports / events / config. Overview tiles show users, spend today/month vs caps, the SVG budget,
 // the word image mix (photo / claude svg / card only), queue, provider quotas, scheduler and health.
-// Admin copy may show raw field names and error codes; UI labels come from zh.admin.
+// Admin copy may show error codes (FRONTEND §5.8) — job types, status tags, config keys; every heading, table
+// header, form label and tile caption comes from zh.admin / zh.admin.labels.
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { errorMessage, type ApiError } from '@/api/client';
@@ -27,6 +28,8 @@ import { formatBytes, formatInt, formatPercent, formatUsd, truncate } from '@/ut
 import './AdminPage.css';
 
 type AdminTab = keyof typeof zh.admin.tabs;
+/** Column / field / tile labels (zh-CN) for the raw DTO fields the admin tables show. */
+const L = zh.admin.labels;
 const TABS: readonly AdminTab[] = ['overview', 'users', 'jobs', 'ai', 'reports', 'events', 'config'];
 const PAGE_SIZE = 50;
 const JOB_STATUSES = ['queued', 'running', 'done', 'failed', 'dead', 'cancelled'] as const;
@@ -139,7 +142,7 @@ function ImageMix({ words }: { words: AdminOverview['words'] }) {
         ))}
       </ul>
       <p className="admin__footnote">
-        with_content {formatInt(words.with_content)} · total {formatInt(words.total)} · user_added {formatInt(words.user_added)} · pending_validation{' '}
+        {L.withContent} {formatInt(words.with_content)} · {L.total} {formatInt(words.total)} · {L.userAdded} {formatInt(words.user_added)} · {L.pendingValidation}{' '}
         {formatInt(words.pending_validation)}
       </p>
     </section>
@@ -149,37 +152,37 @@ function ImageMix({ words }: { words: AdminOverview['words'] }) {
 function HealthCard({ h, tz }: { h: AdminHealth; tz: string | undefined }) {
   return (
     <section className="card admin__card" aria-labelledby="admin-health">
-      <h2 id="admin-health">health</h2>
+      <h2 id="admin-health">{L.health}</h2>
       <dl className="kv">
-        <dt>db</dt>
+        <dt>{L.db}</dt>
         <dd>
-          <StatusTag status={h.db_ok ? 'ok' : 'error'} /> {formatBytes(h.db_size_bytes)} · disk free {formatBytes(h.disk_free_bytes)}
+          <StatusTag status={h.db_ok ? 'ok' : 'error'} /> {formatBytes(h.db_size_bytes)} · {L.diskFree} {formatBytes(h.disk_free_bytes)}
         </dd>
-        <dt>data_dir</dt>
+        <dt>{L.dataDir}</dt>
         <dd>
           <code>{h.data_dir}</code>
         </dd>
-        <dt>threads</dt>
+        <dt>{L.threads}</dt>
         <dd>
-          scheduler <StatusTag status={h.scheduler_alive ? 'ok' : 'error'} /> claude <StatusTag status={h.claude_worker_alive ? 'ok' : 'error'} /> io{' '}
+          {L.scheduler} <StatusTag status={h.scheduler_alive ? 'ok' : 'error'} /> {L.claudeWorker} <StatusTag status={h.claude_worker_alive ? 'ok' : 'error'} /> {L.ioWorker}{' '}
           <StatusTag status={h.io_worker_alive ? 'ok' : 'error'} />
         </dd>
         <dt>{zh.admin.lastTick}</dt>
         <dd>
           <When iso={h.scheduler_last_tick_at} tz={tz} />
         </dd>
-        <dt>claude_bin</dt>
+        <dt>{L.claudeBin}</dt>
         <dd>
           <StatusTag status={h.claude_bin.ok ? 'ok' : 'error'} /> <code>{h.claude_bin.path}</code> {h.claude_bin.version ?? ''} · {zh.admin.flagTier} {h.claude_bin.flag_tier} ·{' '}
           <When iso={h.claude_bin.last_probe_at} tz={tz} />
         </dd>
-        <dt>seed_version</dt>
+        <dt>{L.seedVersion}</dt>
         <dd>
-          <code>{h.seed_version ? truncate(h.seed_version, 16) : '—'}</code> · migrations {h.migrations_version}
+          <code>{h.seed_version ? truncate(h.seed_version, 16) : '—'}</code> · {L.migrations} {h.migrations_version}
         </dd>
-        <dt>worker_lease</dt>
+        <dt>{L.workerLease}</dt>
         <dd>{h.worker_lease ? `${h.worker_lease.instance} · ${formatDateTime(h.worker_lease.expires_at, tz)}` : '—'}</dd>
-        <dt>last_backup</dt>
+        <dt>{L.lastBackup}</dt>
         <dd>{h.last_backup ? `${h.last_backup.file} · ${formatDateTime(h.last_backup.at, tz)} · ${formatBytes(h.last_backup.bytes)}` : '—'}</dd>
       </dl>
     </section>
@@ -193,10 +196,10 @@ function EventsTable({ events, tz }: { events: SystemEvent[]; tz: string | undef
       <table className="admin-table">
         <thead>
           <tr>
-            <th>id</th>
-            <th>kind</th>
-            <th>created_at</th>
-            <th>detail</th>
+            <th>{L.id}</th>
+            <th>{L.kind}</th>
+            <th>{L.createdAt}</th>
+            <th>{L.detail}</th>
           </tr>
         </thead>
         <tbody>
@@ -231,15 +234,19 @@ function OverviewTab() {
   return (
     <div className="admin__stack">
       <div className="tiles">
-        <Tile label={zh.admin.tabs.users} value={formatInt(d.users.total)} sub={`active_7d ${formatInt(d.users.active_7d)} · bank_entries ${formatInt(d.bank_entries)} · batches_today ${formatInt(d.batches_today)}`} />
-        <Tile label={zh.admin.spendToday} value={formatUsd(ai.today_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.daily_budget_usd)} · calls ${formatInt(ai.calls_today)}`} meter={{ part: ai.today_usd, total: ai.daily_budget_usd }} />
+        <Tile
+          label={zh.admin.tabs.users}
+          value={formatInt(d.users.total)}
+          sub={`${L.active7d} ${formatInt(d.users.active_7d)} · ${L.bankEntries} ${formatInt(d.bank_entries)} · ${L.batchesToday} ${formatInt(d.batches_today)}`}
+        />
+        <Tile label={zh.admin.spendToday} value={formatUsd(ai.today_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.daily_budget_usd)} · ${L.calls} ${formatInt(ai.calls_today)}`} meter={{ part: ai.today_usd, total: ai.daily_budget_usd }} />
         <Tile label={zh.admin.spendMonth} value={formatUsd(ai.month_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.monthly_budget_usd)}`} meter={{ part: ai.month_usd, total: ai.monthly_budget_usd }} />
         <Tile label={zh.admin.images.svgBudget} value={formatUsd(ai.svg_today_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.svg_daily_budget_usd)}`} meter={{ part: ai.svg_today_usd, total: ai.svg_daily_budget_usd }} />
-        <Tile label={zh.admin.queue} value={formatInt(d.jobs.queued)} sub={`running ${formatInt(d.jobs.running)} · dead ${formatInt(d.jobs.dead)}`} tone={d.jobs.dead > 0 ? 'bad' : undefined} />
+        <Tile label={zh.admin.queue} value={formatInt(d.jobs.queued)} sub={`${L.running} ${formatInt(d.jobs.running)} · ${L.dead} ${formatInt(d.jobs.dead)}`} tone={d.jobs.dead > 0 ? 'bad' : undefined} />
         <Tile
           label={zh.admin.lastTick}
           value={d.scheduler.last_tick_at ? formatDateTime(d.scheduler.last_tick_at, tz) : '—'}
-          sub={d.scheduler.alive ? 'scheduler alive' : 'scheduler stopped'}
+          sub={`${L.scheduler} ${d.scheduler.alive ? L.alive : L.stopped}`}
           tone={d.scheduler.alive ? 'good' : 'bad'}
         />
       </div>
@@ -247,7 +254,7 @@ function OverviewTab() {
       <section className="card admin__card" aria-labelledby="admin-ai">
         <h2 id="admin-ai">{zh.admin.tabs.ai}</h2>
         <dl className="kv">
-          <dt>enabled</dt>
+          <dt>{L.status}</dt>
           <dd>
             <StatusTag status={ai.enabled ? 'ok' : 'error'} />
             {ai.paused_until && (
@@ -259,9 +266,9 @@ function OverviewTab() {
           </dd>
           <dt>{zh.admin.flagTier}</dt>
           <dd>{ai.flag_tier}</dd>
-          <dt>avg_cost_per_word_7d</dt>
+          <dt>{L.avgCostPerWord7d}</dt>
           <dd>{ai.avg_cost_per_word_7d === null ? '—' : formatUsd(ai.avg_cost_per_word_7d)}</dd>
-          <dt>last_error</dt>
+          <dt>{L.lastError}</dt>
           <dd>{ai.last_error ? <code>{truncate(ai.last_error, 160)}</code> : '—'}</dd>
         </dl>
       </section>
@@ -285,7 +292,7 @@ function OverviewTab() {
       </section>
 
       <section className="card admin__card" aria-labelledby="admin-providers">
-        <h2 id="admin-providers">images.providers</h2>
+        <h2 id="admin-providers">{L.providers}</h2>
         {d.images.providers.length === 0 ? (
           <p className="admin__empty">{zh.common.none}</p>
         ) : (
@@ -293,10 +300,10 @@ function OverviewTab() {
             <table className="admin-table">
               <thead>
                 <tr>
-                  <th>provider</th>
-                  <th className="num">minute</th>
-                  <th className="num">day</th>
-                  <th>cooldown_until</th>
+                  <th>{L.provider}</th>
+                  <th className="num">{L.perMinute}</th>
+                  <th className="num">{L.perDay}</th>
+                  <th>{L.cooldownUntil}</th>
                 </tr>
               </thead>
               <tbody>
@@ -424,14 +431,14 @@ function UsersTab() {
           <table className="admin-table">
             <thead>
               <tr>
-                <th>id</th>
+                <th>{L.id}</th>
                 <th>{zh.auth.username}</th>
                 <th>{zh.settings.displayName}</th>
-                <th>role</th>
-                <th>is_active</th>
-                <th>last_login_at</th>
-                <th className="num">bank_size</th>
-                <th className="num">streak_days</th>
+                <th>{L.role}</th>
+                <th>{L.active}</th>
+                <th>{L.lastLogin}</th>
+                <th className="num">{L.bankSize}</th>
+                <th className="num">{L.streak}</th>
                 <th>{zh.word.actions}</th>
               </tr>
             </thead>
@@ -478,9 +485,9 @@ function UsersTab() {
       <section className="card admin__card" aria-labelledby="admin-invites">
         <h2 id="admin-invites">{zh.admin.invite}</h2>
         <form className="admin__form" onSubmit={createInvite}>
-          <Field label="max_uses">{(c) => <input {...c} type="number" min={1} max={100} value={maxUses} onChange={(e) => setMaxUses(e.target.value)} />}</Field>
-          <Field label="expires_in_days">{(c) => <input {...c} type="number" min={1} max={365} value={expiresDays} onChange={(e) => setExpiresDays(e.target.value)} />}</Field>
-          <Field label="note">{(c) => <input {...c} type="text" maxLength={120} value={inviteNote} onChange={(e) => setInviteNote(e.target.value)} />}</Field>
+          <Field label={L.maxUses}>{(c) => <input {...c} type="number" min={1} max={100} value={maxUses} onChange={(e) => setMaxUses(e.target.value)} />}</Field>
+          <Field label={L.expiresInDays}>{(c) => <input {...c} type="number" min={1} max={365} value={expiresDays} onChange={(e) => setExpiresDays(e.target.value)} />}</Field>
+          <Field label={L.note}>{(c) => <input {...c} type="text" maxLength={120} value={inviteNote} onChange={(e) => setInviteNote(e.target.value)} />}</Field>
           <Button type="submit" variant="primary" loading={creating}>
             {zh.admin.invite}
           </Button>
@@ -500,12 +507,12 @@ function UsersTab() {
             <table className="admin-table">
               <thead>
                 <tr>
-                  <th>id</th>
-                  <th className="num">uses</th>
-                  <th>expires_at</th>
-                  <th>note</th>
-                  <th>created_at</th>
-                  <th>created_by</th>
+                  <th>{L.id}</th>
+                  <th className="num">{L.uses}</th>
+                  <th>{L.expiresAt}</th>
+                  <th>{L.note}</th>
+                  <th>{L.createdAt}</th>
+                  <th>{L.createdBy}</th>
                 </tr>
               </thead>
               <tbody>
@@ -600,14 +607,16 @@ function JobsTab() {
       <h2 id="admin-jobs-tab">{zh.admin.tabs.jobs}</h2>
       <div className="admin__toolbar">
         <select
-          aria-label="status"
+          aria-label={L.status}
           value={status}
           onChange={(e) => {
             setStatus(e.target.value);
             jobs.reset();
           }}
         >
-          <option value="">status: {zh.common.all}</option>
+          <option value="">
+            {L.status}: {zh.common.all}
+          </option>
           {JOB_STATUSES.map((s) => (
             <option key={s} value={s}>
               {s}
@@ -620,8 +629,8 @@ function JobsTab() {
             setType(v.trim());
             jobs.reset();
           }}
-          placeholder="type"
-          aria-label="type"
+          placeholder={L.type}
+          aria-label={L.type}
         />
         <span className="admin__spacer" />
         <Button size="sm" loading={busy} onClick={() => void requeueDead()}>
@@ -638,15 +647,15 @@ function JobsTab() {
         <table className="admin-table">
           <thead>
             <tr>
-              <th>id</th>
-              <th>type</th>
-              <th>status</th>
-              <th className="num">priority</th>
-              <th className="num">attempts</th>
-              <th>run_after</th>
-              <th>locked_by</th>
-              <th>payload</th>
-              <th>last_error</th>
+              <th>{L.id}</th>
+              <th>{L.type}</th>
+              <th>{L.status}</th>
+              <th className="num">{L.priority}</th>
+              <th className="num">{L.attempts}</th>
+              <th>{L.runAfter}</th>
+              <th>{L.lockedBy}</th>
+              <th>{L.payload}</th>
+              <th>{L.lastError}</th>
               <th>{zh.word.actions}</th>
             </tr>
           </thead>
@@ -740,7 +749,7 @@ function AiTab() {
         limit: Math.max(1, Math.min(2000, Number(limit) || 1)),
         max_budget_usd: Math.max(0.1, Math.min(50, Number(budget) || 0.1)),
       });
-      toast.success(`${zh.admin.prewarm} · ${formatInt(res.planned)} · job ${res.job_id}`);
+      toast.success(`${zh.admin.prewarm} · ${formatInt(res.planned)} · ${zh.admin.tabs.jobs} ${res.job_id}`);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -757,9 +766,9 @@ function AiTab() {
           <div className="tiles">
             <Tile label={zh.admin.spendToday} value={formatUsd(calls.data?.today_usd ?? ai.today_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.daily_budget_usd)}`} meter={{ part: ai.today_usd, total: ai.daily_budget_usd }} />
             <Tile label={zh.admin.spendMonth} value={formatUsd(calls.data?.month_usd ?? ai.month_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.monthly_budget_usd)}`} meter={{ part: ai.month_usd, total: ai.monthly_budget_usd }} />
-            <Tile label={zh.admin.flagTier} value={ai.flag_tier} sub={ai.enabled ? 'enabled' : 'disabled'} tone={ai.enabled ? 'good' : 'bad'} />
+            <Tile label={zh.admin.flagTier} value={ai.flag_tier} sub={ai.enabled ? L.enabled : L.disabled} tone={ai.enabled ? 'good' : 'bad'} />
             <Tile
-              label="avg_cost_per_word_7d"
+              label={L.avgCostPerWord7d}
               value={(calls.data?.avg_cost_per_word_7d ?? ai.avg_cost_per_word_7d) === null ? '—' : formatUsd(calls.data?.avg_cost_per_word_7d ?? ai.avg_cost_per_word_7d ?? 0)}
             />
           </div>
@@ -789,8 +798,8 @@ function AiTab() {
               </select>
             )}
           </Field>
-          <Field label="limit">{(c) => <input {...c} type="number" min={1} max={2000} value={limit} onChange={(e) => setLimit(e.target.value)} />}</Field>
-          <Field label="max_budget_usd">{(c) => <input {...c} type="number" min={0.1} max={50} step={0.1} value={budget} onChange={(e) => setBudget(e.target.value)} />}</Field>
+          <Field label={L.limit}>{(c) => <input {...c} type="number" min={1} max={2000} value={limit} onChange={(e) => setLimit(e.target.value)} />}</Field>
+          <Field label={L.maxBudgetUsd}>{(c) => <input {...c} type="number" min={0.1} max={50} step={0.1} value={budget} onChange={(e) => setBudget(e.target.value)} />}</Field>
           <Button type="submit" variant="primary" loading={busy === 'prewarm'}>
             {zh.admin.prewarm}
           </Button>
@@ -798,23 +807,23 @@ function AiTab() {
       </section>
 
       <section className="card admin__card" aria-labelledby="admin-ledger">
-        <h2 id="admin-ledger">ai_calls</h2>
+        <h2 id="admin-ledger">{L.ledger}</h2>
         {calls.error && <ErrorBox error={calls.error} onRetry={() => void calls.reload()} />}
         <div className="table-scroll">
           <table className="admin-table">
             <thead>
               <tr>
-                <th>id</th>
-                <th>kind</th>
-                <th>status</th>
-                <th>model</th>
-                <th className="num">tier</th>
-                <th className="num">words</th>
-                <th className="num">cost_usd</th>
-                <th className="num">duration_ms</th>
-                <th className="num">tokens</th>
-                <th>started_at</th>
-                <th>error</th>
+                <th>{L.id}</th>
+                <th>{L.kind}</th>
+                <th>{L.status}</th>
+                <th>{L.model}</th>
+                <th className="num">{L.tier}</th>
+                <th className="num">{L.words}</th>
+                <th className="num">{L.cost}</th>
+                <th className="num">{L.durationMs}</th>
+                <th className="num">{L.tokens}</th>
+                <th>{L.startedAt}</th>
+                <th>{L.error}</th>
               </tr>
             </thead>
             <tbody>
@@ -876,7 +885,7 @@ function ReportsTab() {
       <h2 id="admin-reports">{zh.admin.tabs.reports}</h2>
       <div className="admin__toolbar">
         <select
-          aria-label="status"
+          aria-label={L.status}
           value={status}
           onChange={(e) => {
             setStatus(e.target.value as ReportStatusFilter);
@@ -896,14 +905,14 @@ function ReportsTab() {
         <table className="admin-table">
           <thead>
             <tr>
-              <th>id</th>
-              <th>word</th>
-              <th>user</th>
-              <th>target</th>
+              <th>{L.id}</th>
+              <th>{L.word}</th>
+              <th>{L.user}</th>
+              <th>{L.target}</th>
               <th>{zh.word.report}</th>
-              <th>note</th>
-              <th>created_at</th>
-              <th>status</th>
+              <th>{L.note}</th>
+              <th>{L.createdAt}</th>
+              <th>{L.status}</th>
               <th>{zh.word.actions}</th>
             </tr>
           </thead>
@@ -987,9 +996,9 @@ function ConfigTab() {
           <table className="admin-table">
             <thead>
               <tr>
-                <th>key</th>
-                <th>value</th>
-                <th>source</th>
+                <th>{L.key}</th>
+                <th>{L.value}</th>
+                <th>{L.source}</th>
               </tr>
             </thead>
             <tbody>

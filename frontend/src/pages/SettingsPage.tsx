@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { useNavigate } from 'react-router';
 import { errorMessage } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
-import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate } from '@/api/endpoints';
+import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
 import type { ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
@@ -41,6 +41,16 @@ export async function buildImportBody(file: { name: string; text(): Promise<stri
     return data ? { format: 'json', data } : null;
   }
   return text.trim() ? { format: 'csv', data: text } : null;
+}
+
+/**
+ * zh cause + action for a failed webhook test (DESIGN §0.3: no raw transport text for non-admins). The server's
+ * `error` string is an English diagnostic ("request failed: ConnectError: …", "rejected: …", "HTTP 404"), kept for
+ * the admin job ledger; the user sees the HTTP status when the target answered, otherwise the connection advice.
+ */
+export function webhookFailureReason(res: Pick<WebhookTestResponse, 'http_status' | 'error'>): string {
+  if (res.http_status !== null && res.http_status !== undefined) return zh.settings.webhookFailHttp(res.http_status);
+  return zh.settings.webhookFailConnect;
 }
 
 /** Toggles a stage keeping the list non-empty and `current_stage` inside it (canonical order). */
@@ -210,8 +220,8 @@ function PushSection({ settings, user }: { settings: Settings; user: User }) {
   };
   const sendTestEmail = async () => {
     try {
-      await endpoints.testEmail();
-      toast.success(zh.settings.webhookOk);
+      await endpoints.testEmail(); // 202 {queued}: the SMTP send happens later on the io worker (API.md 18)
+      toast.success(zh.settings.emailTestQueued);
     } catch (e) {
       toast.error(errorMessage(e));
     }
@@ -233,7 +243,7 @@ function PushSection({ settings, user }: { settings: Settings; user: User }) {
     try {
       const res = await endpoints.testWebhook();
       if (res.ok) toast.success(zh.settings.webhookOk);
-      else toast.error(zh.settings.webhookFail(res.error ?? (res.http_status !== null ? String(res.http_status) : '')));
+      else toast.error(zh.settings.webhookFail(webhookFailureReason(res)));
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
@@ -366,9 +376,11 @@ function PushSection({ settings, user }: { settings: Settings; user: User }) {
         </select>
       </div>
       <div className="settings__buttons">
-        <Button size="sm" loading={testingWebhook} disabled={!settings.webhook_url} onClick={() => void sendTestWebhook()}>
+        {/* the server test requires the switch on AND a saved URL (routers/settings.py); mirror both, like the e-mail test above */}
+        <Button size="sm" loading={testingWebhook} disabled={!settings.webhook_enabled || !settings.webhook_url} onClick={() => void sendTestWebhook()}>
           {zh.settings.webhookTest}
         </Button>
+        {!settings.webhook_enabled && settings.webhook_url && <span className="settings__hint">{zh.settings.webhookEnableFirst}</span>}
       </div>
     </Section>
   );

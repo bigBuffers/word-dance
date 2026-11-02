@@ -2,7 +2,8 @@
 // immediately with a `client_event_id`; the 5-s undo toast (key U) is the server undo
 // `POST /api/words/{id}/mark {action:'restore', context:'screen_page'}` after which the card returns to
 // the front of the deck (409 undo_expired → errors.undoExpired). Batches of 30 with zh.screen.another.
-// Title: `screening · cet4`.
+// Title: `screening · cet4`. Button / swipe verdicts go through `useTapLock` so a double tap cannot judge
+// the card that advanced under the finger; keyboard verdicts are unlocked (`useKeyboard` drops auto-repeat).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { errorMessage } from '@/api/client';
@@ -18,6 +19,7 @@ import { useKeyboard } from '@/hooks/useKeyboard';
 import { writePref } from '@/hooks/useLocalPref';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { speak } from '@/hooks/useSpeech';
+import { useTapLock } from '@/hooks/useTapLock';
 import { UNDO_LIST_MS, useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
@@ -44,6 +46,7 @@ export default function ScreenRunPage() {
   const [screened, setScreened] = useState(0);
   const [peeked, setPeeked] = useState(false);
   const lastUndo = useRef<(() => Promise<void>) | null>(null);
+  const tapLock = useTapLock();
 
   const fetchMore = useCallback(async () => {
     if (!stage) return;
@@ -88,6 +91,7 @@ export default function ScreenRunPage() {
     async (word: WordBrief, v: ScreenVerdict) => {
       const stored = v !== 'skip';
       setDeck((d) => (d[0]?.word.id === word.id ? d.slice(1) : d));
+      tapLock.arm();
       if (stored) {
         setRemaining((r) => (r === null ? r : Math.max(0, r - 1)));
         setScreened((n) => n + 1);
@@ -95,8 +99,7 @@ export default function ScreenRunPage() {
       try {
         const res = await postScreenVerdict({ client_event_id: newClientEventId(), word_id: word.id, verdict: v, context: 'screen_page' });
         if (!stored || res.duplicate) return;
-        const message =
-          v === 'known' ? `${word.display} · ${zh.study.known}` : res.added_to_today ? zh.screen.addedToday : res.today ? zh.screen.addedTomorrow : zh.screen.addedBank;
+        const message = v === 'known' ? zh.screen.markedKnown(word.display) : res.added_to_today ? zh.screen.addedToday : res.today ? zh.screen.addedTomorrow : zh.screen.addedBank;
         const undo = async () => {
           try {
             await markWord(word.id, { action: 'restore', context: 'screen_page' });
@@ -125,8 +128,14 @@ export default function ScreenRunPage() {
         putBack(word, stored);
       }
     },
-    [putBack, toast],
+    [putBack, tapLock, toast],
   );
+
+  /** ScreenCard button / swipe verdicts: dropped for a moment after the deck advanced (double tap). */
+  const tapVerdict = (word: WordBrief, v: ScreenVerdict) => {
+    if (tapLock.locked()) return;
+    void verdict(word, v);
+  };
 
   useKeyboard(
     {
@@ -159,7 +168,7 @@ export default function ScreenRunPage() {
       </header>
 
       {current ? (
-        <ScreenCard key={current.word.id} word={current.word} onVerdict={(v) => void verdict(current.word, v)} peeked={peeked} onPeek={() => setPeeked(true)} accent={settings?.accent} />
+        <ScreenCard key={current.word.id} word={current.word} onVerdict={(v) => tapVerdict(current.word, v)} peeked={peeked} onPeek={() => setPeeked(true)} accent={settings?.accent} />
       ) : fetching ? (
         <div className="screen-run__loading" aria-busy="true">
           <Skeleton height={200} />
@@ -167,10 +176,10 @@ export default function ScreenRunPage() {
       ) : fetchError ? (
         <EmptyState title={fetchError} action={{ label: zh.common.retry, onClick: () => void fetchMore() }} />
       ) : exhausted || remaining === 0 ? (
-        <EmptyState title={zh.screen.allDone} description={zh.bank.counts(screened)} action={{ label: zh.today.goVocab, to: routePaths.vocab }} />
+        <EmptyState title={zh.screen.allDone} description={screened > 0 ? zh.screen.screenedCount(screened) : undefined} action={{ label: zh.today.goVocab, to: routePaths.vocab }} />
       ) : (
         <div className="screen-run__between card">
-          <p className="screen-run__between-text">{zh.bank.counts(screened)}</p>
+          <p className="screen-run__between-text">{zh.screen.screenedCount(screened)}</p>
           <Button variant="primary" size="lg" onClick={() => void fetchMore()}>
             {zh.screen.another}
           </Button>

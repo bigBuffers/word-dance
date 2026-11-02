@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
@@ -67,6 +67,25 @@ describe('RegisterPage', () => {
     renderRegister();
     expect(await screen.findByRole('button', { name: zh.auth.register })).toBeTruthy();
     expect(screen.queryByLabelText(inviteLabel)).toBeNull();
+  });
+
+  it('a malformed e-mail shows errors.invalidEmail under the field (not the field label) and nothing is posted', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'open' }) });
+    renderRegister();
+    await screen.findByRole('button', { name: zh.auth.register });
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.auth.username}`)), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.auth.password}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.auth.password2}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    const email = screen.getByLabelText(new RegExp(`^${zh.auth.email}`)) as HTMLInputElement;
+    fireEvent.change(email, { target: { value: 'foo@' } });
+    fireEvent.click(screen.getByRole('button', { name: zh.auth.register }));
+    const error = await screen.findByText(zh.errors.invalidEmail);
+    expect(error.getAttribute('role')).toBe('alert');
+    expect(email.getAttribute('aria-invalid')).toBe('true');
+    expect(email.getAttribute('aria-describedby')).toBe(error.id);
+    expect(screen.queryByText(zh.auth.email, { selector: '.field__error' })).toBeNull();
+    const posted = vi.mocked(fetch).mock.calls.map((c) => (typeof c[0] === 'string' ? c[0] : String(c[0])));
+    expect(posted.some((u) => u.includes('/api/auth/register'))).toBe(false);
   });
 });
 

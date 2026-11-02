@@ -31,7 +31,7 @@ export function dayRowText(d: DayStats): string {
   const date = formatMonthDay(d.date);
   if (d.offline) return `${date} · ${zh.history.offline}`;
   if (d.batch_total !== null) return `${date} · ${zh.history.completed(d.batch_done ?? 0, d.batch_total)}${dayGoalMet(d) ? ' 🔥' : ''}`;
-  return `${date} · ${zh.common.total(d.graded)}`;
+  return `${date} · ${zh.history.gradedCount(d.graded)}`;
 }
 
 /** Days worth a row: a batch, an offline gap or any grading — newest first. */

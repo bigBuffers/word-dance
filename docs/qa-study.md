@@ -116,7 +116,7 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 
 ## 5. 记录 (`/history`, `/history/:batchId`)
 
-- [ ] 12-week heat strip (12 × 7, Monday first, 5 levels, ring on goal-met days, tooltip 「10月12日 · 共 N 个词」),
+- [ ] 12-week heat strip (12 × 7, Monday first, 5 levels, ring on goal-met days, tooltip 「10月12日 · 学习 N 个」),
       「连续学习 N 天」 and 「最长连续 N 天」.
 - [ ] Day rows 「10月13日 · 完成 41/41 🔥」 link to the batch; a day without a batch overlapping a recorded
       downtime shows 「10月11日 · 服务器离线」 (`DayStats.offline`).

@@ -71,7 +71,7 @@ export default function RegisterPage() {
   const usernameError = touched && !usernameOk ? zh.auth.usernameHint : null;
   const passwordError = touched && strength === 1 ? zh.errors.weakPassword : null;
   const mismatch = touched && password2 !== password ? zh.auth.mismatch : null;
-  const emailError = touched && !emailOk ? zh.auth.email : null;
+  const emailError = touched && !emailOk ? zh.errors.invalidEmail : null;
   const inviteError = touched && !inviteOk ? zh.errors.invalidInvite : null;
 
   const submit = async (e: FormEvent) => {

@@ -215,14 +215,14 @@ export default function VocabPage() {
       <div className="vocab__controls">
         <SearchBox value={q} onChange={onSearch} placeholder={zh.vocab.searchPlaceholder} />
         <div className="vocab__filters">
-          <select aria-label={zh.vocab.status.all} value={status} onChange={(e) => onStatus(e.target.value as VocabStatusFilter)}>
+          <select aria-label={zh.common.status} value={status} onChange={(e) => onStatus(e.target.value as VocabStatusFilter)}>
             {STATUSES.map((s) => (
               <option key={s} value={s}>
                 {zh.vocab.status[s]}
               </option>
             ))}
           </select>
-          <select aria-label={zh.vocab.sort.freq} value={sort} onChange={(e) => onSort(e.target.value as VocabSort)}>
+          <select aria-label={zh.common.sort} value={sort} onChange={(e) => onSort(e.target.value as VocabSort)}>
             {SORTS.map((s) => (
               <option key={s} value={s}>
                 {zh.vocab.sort[s]}
