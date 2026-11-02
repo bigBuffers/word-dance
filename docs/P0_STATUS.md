@@ -59,8 +59,14 @@ by `make setup`. Inside a Claude Code session the variable `CLAUDECODE=1` is inh
 
 ## 3. Deviations from / extensions of the contract documents (implementers must read)
 
-Everything below is additive or keyword-only; nothing in TASKS §I was renamed or removed. The integrator will fold the
-ratified items into the design documents in the "contract change" commit.
+Everything below is additive or keyword-only; nothing in TASKS §I was renamed or removed. The integrator folds the
+ratified items into the design documents in "contract change" commits. **Ratified on 2026-11-02 (`fix(docs)`)**: item 1 →
+TASKS P0 step 4 (`run_migrations` signature); item 3 → API.md §1.1 (`method_not_allowed` 405, `payload_too_large` 413);
+item 4 → TASKS §I + DESIGN §7.1 (`on_action` `prev_state`, return value, `undone.item_kind`); item 8 → DEPLOY §4
+(`WD_FRONTEND_DIST`); item 9 → DEPLOY §3 (`access_log=False`, `os.umask`); item 16 → FRONTEND §8 (the three keys);
+item 23 → DEPLOY §8 / ops.md §8 / qa-study.md (Vite binds `localhost`; `--host` for LAN devices).
+`backend/tests/unit/test_docs_contract.py` and `frontend/src/i18n/zh.contract.test.ts` keep those documents aligned
+with the code. The remaining items stay documented here only.
 
 ### Backend (`backend/wd`)
 

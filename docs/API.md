@@ -35,6 +35,7 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 | `registration_closed` / `invalid_invite` | 403 | registration policy |
 | `csrf_rejected` | 403 | missing `X-WD-Request` or Origin mismatch |
 | `not_found` / `word_not_found` / `batch_not_found` | 404 | — (foreign ids also yield 404, never 403) |
+| `method_not_allowed` | 405 | wrong HTTP method on an existing route (transport-level: Starlette's `HTTPException` is mapped through `errors._STATUS_TO_CODE`; a mutation still passes the CSRF check first, so without `X-WD-Request` it is 403 `csrf_rejected`) |
 | `username_taken` / `email_taken` | 409 | uniqueness |
 | `onboarding_required` | 409 | `O` endpoint before onboarding is done |
 | `invalid_transition` | 409 | state machine refuses the action (`details.from`, `details.action`); also returned when grading a stale push item (its `user_words` row left `new`/`learning`, its word was merged, or a screen word already has a `user_words` row — DESIGN §6.3); by `PATCH /api/bank/{id} {attention:'retry'}` when the word is already validated (`is_valid_english IS NOT NULL`); and by `POST /api/onboarding/complete` while `onboarding_state='pending'` (step 1 not done) |
@@ -46,6 +47,7 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 | `already_resolved` / `undo_expired` | 409 | suggestions; `undo_expired` is also returned by `mark {action:"restore"}` when the word has no eligible `master`/`known`/∅→`unfamiliar` log row by this user within the last 15 minutes (endpoint 26) |
 | `import_too_large` | 400 | `POST /api/bank/import` with more than 2,000 rows or an unparsable file (`details.rows`) |
 | `last_admin` | 409 | disabling/demoting/deleting the last active admin |
+| `payload_too_large` | 413 | request body larger than `WD_MAX_BODY_BYTES` (rejected from `Content-Length` before the body is read, or while streaming it; `details.max_bytes`) |
 | `account_locked` | 423 | login lockout (`details.retry_after_s`) |
 | `rate_limited` | 429 | throttle (`Retry-After` header, `details.retry_after_s`) |
 | `ai_disabled` | 503 | admin AI action while `WD_AI_ENABLED=0` / paused |
