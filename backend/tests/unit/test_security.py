@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -152,6 +153,38 @@ def test_lockout_persisted_and_reset(conn: sqlite3.Connection):
     assert conn.execute("SELECT count FROM auth_throttle WHERE key = 'login:user:bob'").fetchone()[0] == 2
     security.record_login_failure(conn, "bob", NOW + timedelta(days=2))
     assert conn.execute("SELECT count FROM auth_throttle WHERE key = 'login:user:bob'").fetchone()[0] == 1
+
+
+def test_account_password_recheck_has_its_own_budget(conn: sqlite3.Connection):
+    uid = make_user(conn)
+    user = security.load_user(conn, uid)
+    key = security.password_check_key(uid)
+    for _ in range(security.PASSWORD_CHECK_LIMIT):
+        with pytest.raises(ApiError) as e:
+            security.verify_account_password(conn, user, "wrong-password-1", now=NOW)
+        assert e.value.code == "invalid_credentials"
+    assert conn.execute("SELECT count FROM auth_throttle WHERE key = ?", (key,)).fetchone()[0] == 10  # wrong guesses stay counted
+    with pytest.raises(ApiError) as e:
+        security.verify_account_password(conn, user, "Correct-Horse-7", now=NOW + timedelta(seconds=1))  # even the right password
+    assert e.value.code == "rate_limited" and e.value.status == 429 and e.value.details == {"retry_after_s": 899}
+    assert conn.execute("SELECT COUNT(*) FROM auth_throttle WHERE key = ?", (security.lockout_key("alice"),)).fetchone()[0] == 0  # not the login lockout
+    security.verify_account_password(conn, user, "Correct-Horse-7", now=NOW + timedelta(seconds=900))  # a new window
+    assert conn.execute("SELECT COUNT(*) FROM auth_throttle WHERE key = ?", (key,)).fetchone()[0] == 0  # cleared by the correct password
+    with pytest.raises(ApiError):
+        security.verify_account_password(conn, user, "typo-password-1", now=NOW + timedelta(seconds=901))
+    security.verify_account_password(conn, user, "Correct-Horse-7", now=NOW + timedelta(seconds=902))
+    assert conn.execute("SELECT COUNT(*) FROM auth_throttle WHERE key = ?", (key,)).fetchone()[0] == 0  # a typo never accumulates
+
+
+def test_mutation_throttle_300_per_minute_per_user(conn: sqlite3.Connection):
+    for i in range(security.MUTATION_LIMIT):
+        security.throttle_mutation(conn, 7, NOW + timedelta(seconds=i % 60))
+    with pytest.raises(ApiError) as e:
+        security.throttle_mutation(conn, 7, NOW + timedelta(seconds=59))
+    assert e.value.code == "rate_limited" and e.value.status == 429 and e.value.details == {"retry_after_s": 1}
+    security.throttle_mutation(conn, 8, NOW + timedelta(seconds=59))  # users are independent
+    security.throttle_mutation(conn, 7, NOW + timedelta(seconds=60))  # the next window
+    assert conn.execute("SELECT count FROM auth_throttle WHERE key = 'mutate:user:7'").fetchone()[0] == 1
 
 
 # --------------------------------------------------------------------------------- invite codes
@@ -375,6 +408,52 @@ def test_cli_create_admin_set_password_promote_demote_invite(settings, monkeypat
     finally:
         c.close()
     assert cli.main(["invite", "--uses", "0"]) == 2 and cli.main(["invite", "--days", "400"]) == 2
+
+
+def test_cli_set_password_never_takes_the_admin_password_implicitly(settings, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The bootstrap secret often lingers in ``$WD_DATA_DIR/.env`` (``cli.main`` loads it into the environment): only
+    ``create-admin`` may read ``WD_ADMIN_PASSWORD``; ``set-password`` prompts, or needs an explicit ``--password-env``."""
+    assert cli.main(["migrate"]) == 0
+    monkeypatch.setenv("WD_ADMIN_USERNAME", "root1")
+    monkeypatch.setenv("WD_ADMIN_PASSWORD", "Adm1n-Secret-Pw")
+    assert cli.main(["create-admin", "--if-none"]) == 0  # the unattended install.sh form still reads the variable …
+    out, err = capsys.readouterr()
+    assert "created admin root1" in out and "WD_ADMIN_PASSWORD" in err  # … and says so
+    c = db.connect(settings.db_path)
+    try:
+        bob = make_user(c, "bob", "Bobs-Own-Pw-1")
+    finally:
+        c.close()
+
+    def bob_hash() -> str:
+        c = db.connect(settings.db_path)
+        try:
+            return str(c.execute("SELECT password_hash FROM users WHERE id = ?", (bob,)).fetchone()[0])
+        finally:
+            c.close()
+
+    # non-interactive (pytest's stdin is not a tty) with WD_ADMIN_PASSWORD still set: refused, nothing changed
+    assert cli.main(["set-password", "bob"]) == 2
+    err = capsys.readouterr().err
+    assert "--password-env" in err and "WD_ADMIN_PASSWORD" not in err
+    assert security.verify_password("Bobs-Own-Pw-1", bob_hash()) and not security.verify_password("Adm1n-Secret-Pw", bob_hash())
+    # interactive: prompts twice even though WD_ADMIN_PASSWORD is set
+    prompts: list[str] = []
+    answers = ["Fresh-Horse-9", "Fresh-Horse-9", "Fresh-Horse-9", "Other-Horse-9"]
+    monkeypatch.setattr(security.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(security.getpass, "getpass", lambda prompt="": (prompts.append(prompt), answers.pop(0))[1])
+    assert cli.main(["set-password", "bob"]) == 0
+    assert prompts == ["password for bob: ", "repeat password: "]
+    assert "password updated for bob" in capsys.readouterr().out
+    assert security.verify_password("Fresh-Horse-9", bob_hash()) and not security.verify_password("Adm1n-Secret-Pw", bob_hash())
+    assert cli.main(["set-password", "bob"]) == 2  # mismatching repeat
+    assert "do not match" in capsys.readouterr().err
+    assert security.verify_password("Fresh-Horse-9", bob_hash())
+    # an explicit variable is still honoured (and named)
+    monkeypatch.setenv("NEW_PW", "Newer-Horse-10")
+    assert cli.main(["set-password", "bob", "--password-env", "NEW_PW"]) == 0
+    assert "NEW_PW" in capsys.readouterr().err
+    assert security.verify_password("Newer-Horse-10", bob_hash())
 
 
 def test_cli_commands_are_registered(settings):

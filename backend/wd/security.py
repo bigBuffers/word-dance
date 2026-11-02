@@ -9,6 +9,8 @@
   (:func:`gc_sessions` is also callable from the hourly scheduler GC).
 * **Throttle / lockout** (persistent ``auth_throttle`` rows): fixed windows (:func:`rate_limit`) and the login
   lockout schedule — 10 failures per username → 15 min, doubling every further 5 failures, max 24 h, reset on success.
+  :func:`verify_account_password` gives the password re-checks of API.md 7–8 their own budget (10 per 15 min per
+  user) and :func:`throttle_mutation` is DESIGN §10's 300 mutations/min per user (called from ``deps.current_user``).
 * **Invite codes**: shown once, stored as ``sha256``; consumed atomically with the SCHEMA.sql UPDATE.
 * **E-mail codes**: 6 digits, 15 min, 5 attempts, ``code_hash = HMAC-SHA256(WD_SECRET_KEY, code:user_id)``.
 * :func:`is_safe_https_url`: the webhook host check (https, no raw IPs, no local names).
@@ -71,6 +73,8 @@ LOGIN_IP_LIMIT, LOGIN_IP_WINDOW_S = 20, 600
 REGISTER_IP_LIMIT, REGISTER_IP_WINDOW_S = 5, 3600
 EMAIL_CODE_LIMIT, EMAIL_CODE_WINDOW_S = 3, 3600
 TEST_SEND_LIMIT, TEST_SEND_WINDOW_S = 1, 600  # webhook / e-mail test sends: 1 per 10 min
+PASSWORD_CHECK_LIMIT, PASSWORD_CHECK_WINDOW_S = 10, 900  # re-checks of the account password (API.md 7–8), per user
+MUTATION_LIMIT, MUTATION_WINDOW_S = 300, 60  # every authenticated non-GET request, per user
 LOCKOUT_AFTER = 10
 LOCKOUT_STEP = 5
 LOCKOUT_BASE_S = 15 * 60
@@ -333,6 +337,40 @@ def record_login_failure(conn: sqlite3.Connection, username: str, now: datetime)
 
 def clear_login_failures(conn: sqlite3.Connection, username: str) -> None:
     conn.execute("DELETE FROM auth_throttle WHERE key = ?", (lockout_key(username),))
+
+
+def password_check_key(user_id: int) -> str:
+    return f"pwcheck:user:{int(user_id)}"
+
+
+def verify_account_password(conn: sqlite3.Connection, user: Mapping[str, Any], password: str, *, now: datetime) -> None:
+    """Re-check the logged-in user's password before a sensitive action (API.md 7 change password, 8 delete account).
+
+    The login lockout guards ``/api/auth/login`` only, so these checks get their own budget: more than
+    :data:`PASSWORD_CHECK_LIMIT` attempts per :data:`PASSWORD_CHECK_WINDOW_S` per user → 429 ``rate_limited``
+    (``details.retry_after_s``), which bounds online guessing with a stolen session cookie to a few attempts and
+    keeps the single process from burning a bcrypt check per guess. A wrong password raises 401
+    ``invalid_credentials`` and stays counted — call this **outside** any open transaction (like
+    :func:`verify_email_code`) so the caller's rollback cannot undo the count; a correct password clears the counter,
+    so a few typos never lock a legitimate user out of their own account page.
+    """
+    key = password_check_key(int(user["id"]))
+    retry = throttle_hit(conn, key, limit=PASSWORD_CHECK_LIMIT, window_s=PASSWORD_CHECK_WINDOW_S, now=now)
+    if retry is not None:
+        log.warning("password re-check throttled for user %s", user["id"], extra={"event": "password_check_throttled", "user_id": user["id"]})
+        raise ApiError("rate_limited", details={"retry_after_s": retry})
+    if not verify_password(password, user["password_hash"]):
+        raise ApiError("invalid_credentials")
+    conn.execute("DELETE FROM auth_throttle WHERE key = ?", (key,))
+
+
+def mutation_key(user_id: int) -> str:
+    return f"mutate:user:{int(user_id)}"
+
+
+def throttle_mutation(conn: sqlite3.Connection, user_id: int, now: datetime) -> None:
+    """DESIGN §10 "mutations 300/min per user": count one authenticated non-GET request; 429 ``rate_limited`` over the limit."""
+    rate_limit(conn, mutation_key(user_id), limit=MUTATION_LIMIT, window_s=MUTATION_WINDOW_S, now=now)
 
 
 # --------------------------------------------------------------------------------- invite codes
@@ -662,13 +700,24 @@ def _cli_conn(cfg: Settings) -> sqlite3.Connection:
     return conn
 
 
-def _cli_password(args: argparse.Namespace, cfg: Settings, *, username: str) -> str | None:
-    """Password from ``--password-env VAR`` (default ``WD_ADMIN_PASSWORD``) or an interactive prompt."""
-    var = getattr(args, "password_env", None) or "WD_ADMIN_PASSWORD"
-    password = os.environ.get(var) or (cfg.admin_password if var == "WD_ADMIN_PASSWORD" else "")
-    if not password:
+def _cli_password(args: argparse.Namespace, cfg: Settings, *, username: str, default_env: str | None = None) -> str | None:
+    """Password from ``--password-env VAR``, else from ``default_env`` when the command names one, else a prompt.
+
+    Only ``create-admin`` passes ``default_env="WD_ADMIN_PASSWORD"`` (the unattended install.sh form). ``set-password``
+    must never pick that variable up implicitly: the bootstrap secret commonly lingers in ``$WD_DATA_DIR/.env``
+    (loaded into the environment by ``cli.main``), and silently copying the admin's password onto another user's
+    account — with no prompt and exit 0 — is exactly what the operator does not expect from "(default: prompt)".
+    """
+    var = getattr(args, "password_env", None) or default_env
+    password = ""
+    if var:
+        password = os.environ.get(var) or (cfg.admin_password if var == "WD_ADMIN_PASSWORD" else "")
+    if password:
+        print(f"wd: password taken from ${var}", file=sys.stderr)
+    else:
         if not sys.stdin.isatty():
-            print(f"wd: no password: set {var} (or pass --password-env VAR) when running non-interactively", file=sys.stderr)
+            source = f"set {var} (or pass --password-env VAR)" if var else "pass --password-env VAR"
+            print(f"wd: no password: {source} when running non-interactively", file=sys.stderr)
             return None
         password = getpass.getpass(f"password for {username}: ")
         again = getpass.getpass("repeat password: ")
@@ -704,7 +753,7 @@ def cmd_create_admin(args: argparse.Namespace) -> int:
         if username_taken(conn, username):
             print(f"wd create-admin: user {username!r} already exists (use `wd promote` or `wd set-password`)", file=sys.stderr)
             return 1
-        password = _cli_password(args, cfg, username=username)
+        password = _cli_password(args, cfg, username=username, default_env="WD_ADMIN_PASSWORD")
         if password is None:
             return 2
         now = SYSTEM_CLOCK.now_utc()
@@ -725,7 +774,7 @@ def cmd_set_password(args: argparse.Namespace) -> int:
         if user is None:
             print(f"wd set-password: no such user {args.username!r}", file=sys.stderr)
             return 1
-        password = _cli_password(args, cfg, username=user["username"])
+        password = _cli_password(args, cfg, username=user["username"])  # no default_env: prompt, or an explicit --password-env
         if password is None:
             return 2
         set_password(conn, int(user["id"]), hash_password(password), SYSTEM_CLOCK.now_utc())
@@ -795,7 +844,7 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("set-password", help="set a user's password (revokes all sessions)")
     p.add_argument("username")
-    p.add_argument("--password-env", metavar="VAR", help="environment variable holding the new password (default: prompt)")
+    p.add_argument("--password-env", metavar="VAR", help="environment variable holding the new password (default: prompt; required when non-interactive)")
     p.set_defaults(func=cmd_set_password)
 
     p = sub.add_parser("promote", help="make a user an admin")
