@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import logging
 import sqlite3
 import time as _time
@@ -151,6 +152,56 @@ def test_late_but_not_stale_publish_still_delivers(settings, seeded):
     tick(conn, settings, datetime(2026, 10, 14, 5, 59, tzinfo=UTC))  # 5 h 59 late
     (b,) = batches_of(conn, uid)
     assert b["email_status"] == "queued" and b["trigger"] == "catchup"
+
+
+def test_restart_on_a_later_day_before_its_push_time_publishes_and_delivers_at_push_time(settings, seeded):
+    """An outage covered yesterday's 08:00 push and the service is back at 07:00 today: today's batch is built in
+    its own window, NOT published at once with 'skipped' deliveries, and goes out with e-mail + webhook at 08:00."""
+    conn = seeded
+    uid = make_user(conn, "alice", next_push_at="2026-10-13T00:00:00Z", email=True, webhook=True)  # 08:00 Shanghai on 10-13, missed
+    mark(conn, uid, "apple", datetime(2026, 10, 12, 1, 0, tzinfo=UTC))
+    conn.execute("DELETE FROM jobs")
+    r = tick(conn, settings, datetime(2026, 10, 13, 23, 0, tzinfo=UTC), startup=True)  # 07:00 local on 10-14
+    (b,) = batches_of(conn, uid)
+    assert r.built == [b["id"]] and r.published == []
+    assert (b["local_date"], b["trigger"], b["status"], b["published_at"]) == ("2026-10-14", "scheduled", "building", None)
+    assert next_push(conn, uid) == "2026-10-14T00:00:00Z"  # re-anchored to today's own push instant
+    assert [j for j in jobs(conn) if j["type"] in ("send_email", "send_webhook")] == []
+    r = tick(conn, settings, datetime(2026, 10, 13, 23, 30, tzinfo=UTC))
+    assert not r.built and not r.published
+    r = tick(conn, settings, datetime(2026, 10, 14, 0, 0, tzinfo=UTC))  # 08:00 local: the user's real push time
+    (b,) = batches_of(conn, uid)
+    assert r.published == [b["id"]]
+    assert (b["status"], b["published_at"], b["email_status"], b["webhook_status"]) == ("published", "2026-10-14T00:00:00Z", "queued", "queued")
+    delivery = sorted((j["type"], j["dedupe_key"]) for j in jobs(conn) if j["type"] in ("send_email", "send_webhook"))
+    assert delivery == [("send_email", f"email:{b['id']}"), ("send_webhook", f"webhook:{b['id']}")]
+    assert next_push(conn, uid) == "2026-10-15T00:00:00Z"
+    assert not tick(conn, settings, datetime(2026, 10, 14, 0, 1, tzinfo=UTC)).published and len(batches_of(conn, uid)) == 1
+
+
+def test_restart_on_a_later_day_long_before_its_push_time_waits_for_the_prebuild_window(settings, seeded):
+    conn = seeded
+    uid = make_user(conn, "alice", next_push_at="2026-10-13T00:00:00Z", email=True)
+    mark(conn, uid, "apple", datetime(2026, 10, 12, 1, 0, tzinfo=UTC))
+    conn.execute("DELETE FROM jobs")
+    r = tick(conn, settings, datetime(2026, 10, 13, 17, 0, tzinfo=UTC), startup=True)  # 01:00 local on 10-14
+    assert not r.built and not r.published and batches_of(conn, uid) == []
+    assert next_push(conn, uid) == "2026-10-14T00:00:00Z"
+    assert not tick(conn, settings, datetime(2026, 10, 13, 20, 59, tzinfo=UTC)).built
+    r = tick(conn, settings, datetime(2026, 10, 13, 21, 0, tzinfo=UTC))  # push − 3 h, as on any normal day
+    (b,) = batches_of(conn, uid)
+    assert r.built == [b["id"]] and b["trigger"] == "scheduled" and b["built_at"] == "2026-10-13T21:00:00Z"
+    r = tick(conn, settings, datetime(2026, 10, 14, 0, 0, tzinfo=UTC))
+    assert r.published == [b["id"]] and batches_of(conn, uid)[0]["email_status"] == "queued"
+    assert next_push(conn, uid) == "2026-10-15T00:00:00Z"
+
+
+def test_push_instant_matches_compute_next_push_across_dst():
+    from wd.clock import compute_next_push
+
+    for tz, day in ((NY, datetime(2026, 11, 1).date()), (NY, datetime(2026, 3, 8).date()), (SH, datetime(2026, 10, 14).date())):
+        before = scheduler.push_instant(day, tz, "00:00") - timedelta(seconds=1)
+        assert scheduler.push_instant(day, tz, "08:00") == compute_next_push(before, tz, "08:00")
 
 
 def test_push_disabled_users_get_nothing(settings, seeded):
@@ -362,6 +413,65 @@ def test_maintenance_requeues_dead_jobs_once_and_prunes_logs(settings, seeded, m
     assert scheduler.requeue_dead_once(conn, datetime(2026, 10, 16, 19, 30, tzinfo=UTC)) == 1
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (old,)).fetchone()[0] == "dead"
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (fresh,)).fetchone()[0] == "queued"
+
+
+def _dead(conn, type_: str, word_id: int, key: str, finished: str = "2026-09-30T01:00:00Z") -> int:
+    jid = queue.enqueue(conn, type_, {"word_id": word_id}, dedupe_key=key, now="2026-09-30T00:00:00Z")
+    conn.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = ? WHERE id = ?", (finished, jid))
+    return jid
+
+
+def test_requeue_dead_once_skips_keys_held_by_live_jobs_and_duplicate_dead_rows(seeded):
+    """One collision with ``ux_jobs_dedupe_live`` must never abort the whole night's requeue (the old single UPDATE did)."""
+    conn = seeded
+    now = datetime(2026, 10, 14, 19, 30, tzinfo=UTC)
+    dead = [_dead(conn, "generate_content", i, f"content:{i}") for i in range(1, 5)]
+    live = queue.enqueue(conn, "generate_content", {"word_id": 1}, dedupe_key="content:1", run_after="2026-10-15T00:05:00Z", now="2026-10-14T10:00:00Z")  # a fresh, budget-deferred request
+    assert live not in dead
+    assert scheduler.requeue_dead_once(conn, now) == 3
+    state = {j["id"]: (j["status"], json.loads(j["payload_json"]).get("requeued_at")) for j in jobs(conn, "generate_content")}
+    assert state[dead[0]] == ("dead", None)  # its key is held by the live job: skipped and NOT stamped
+    assert all(state[j] == ("queued", "2026-10-14T19:30:00Z") for j in dead[1:])
+    assert state[live][0] == "queued"
+    # two dead rows sharing one key (a dead job and its re-enqueued, also-dead successor) and no live job at all
+    conn.execute("DELETE FROM jobs")
+    a = _dead(conn, "generate_content", 7, "content:7")
+    b = _dead(conn, "generate_content", 7, "content:7")
+    c = _dead(conn, "lookup_word", 8, "lookup:8")
+    assert a != b
+    assert scheduler.requeue_dead_once(conn, now) == 2
+    assert {j["id"]: j["status"] for j in jobs(conn)} == {a: "queued", b: "dead", c: "queued"}
+    assert json.loads(conn.execute("SELECT payload_json FROM jobs WHERE id = ?", (b,)).fetchone()[0]).get("requeued_at") is None
+    # the next night, once the requeued twin is finished, the skipped row gets its one requeue
+    queue.finish(conn, a, {"ok": True}, now="2026-10-14T20:00:00Z")
+    assert scheduler.requeue_dead_once(conn, now + timedelta(days=1)) == 1
+    assert conn.execute("SELECT status FROM jobs WHERE id = ?", (b,)).fetchone()[0] == "queued"
+
+
+def test_maintenance_requeues_dead_jobs_when_prefetch_just_made_one_of_their_keys_live(settings, seeded, monkeypatch, caplog):
+    """maintenance() runs prefetch BEFORE the dead requeue: a failed-content word in tomorrow's selection gets a live
+    priority-30 job first; the unrelated dead rows must still be requeued in the same night."""
+    conn = seeded
+    FakeBudget(spent=1.0).install(monkeypatch)
+    alice = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_new_count=10, daily_screen_count=0)
+    t = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
+    for lemma in ("apple", "dog"):
+        mark(conn, alice, lemma, t)
+    conn.execute("DELETE FROM jobs")
+    dog, cat = wid(conn, "dog"), wid(conn, "cat")
+    conn.execute("UPDATE words SET content_state = 'failed' WHERE id = ?", (dog,))  # its content job died two weeks ago
+    conn.execute("UPDATE words SET content_state = 'ready' WHERE lemma = 'apple'")
+    dead_dog = _dead(conn, "generate_content", dog, f"content:{dog}")
+    dead_lookup = _dead(conn, "lookup_word", cat, f"lookup:{cat}")
+    assert dog in batches.preview_selection(conn, alice, "2026-10-15", t)
+    with caplog.at_level(logging.INFO, logger="wd.jobs.scheduler"):
+        r = tick(conn, settings, datetime(2026, 10, 14, 19, 30, tzinfo=UTC))  # 03:30 WD_TZ
+    assert r.maintenance is True and r.prefetched == 1
+    live = queue.live_job(conn, f"content:{dog}")
+    assert live is not None and live.id != dead_dog and live.priority == 30  # prefetch holds the key now
+    assert conn.execute("SELECT status FROM jobs WHERE id = ?", (dead_dog,)).fetchone()[0] == "dead"  # its work is already queued
+    assert conn.execute("SELECT status FROM jobs WHERE id = ?", (dead_lookup,)).fetchone()[0] == "queued"  # the unrelated row got its requeue
+    assert "dead-job requeue failed" not in caplog.text and "requeued 1 dead job(s)" in caplog.text
 
 
 # ------------------------------------------------------------------------------------------ finalize

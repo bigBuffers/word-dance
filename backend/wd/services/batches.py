@@ -1,7 +1,8 @@
 """Daily batches (WP4): composition, publication, grading and the today/batch DTOs.
 
 Contracts: DESIGN §6.3 (composition steps 1–9, ``interleave`` / ``spread_similar`` pinned by
-``tests/fixtures/batch_order.json``, stale items, late sessions, word uniqueness per ``(batch_id, word_id, kind)``),
+``tests/fixtures/batch_order.json``, stale and superseded items, late sessions, word uniqueness per
+``(batch_id, word_id, kind)``),
 DESIGN §7 (final vs intermediate grades), API.md §7 (endpoints 43–47, 50) and endpoint 74 (``push_now``), TASKS §I.
 
 Every function takes an open ``sqlite3.Connection`` (``row_factory = sqlite3.Row``) and composes with a caller's
@@ -48,6 +49,13 @@ SIMILAR_WINDOW = 3
 STUBBORN_TIMES_ADDED = 3
 
 _COUNT_COLUMN = {"review": "review_count", "new": "new_count", "screen": "screen_count", "extra": "extra_count"}
+# DESIGN §6.3 superseded items: a study row of batch ``pb`` whose word has a review/new/extra row in a NEWER batch of the
+# same user (yesterday's leftover re-selected into today's batch). Aliases ``pi`` (push_items) / ``pb`` (push_batches)
+# are those of the two item queries below; the newest row is the single gradable one, older ungraded copies are hidden.
+_SUPERSEDED_SQL = (
+    "EXISTS(SELECT 1 FROM push_items pj JOIN push_batches pbj ON pbj.id = pj.batch_id WHERE pbj.user_id = pb.user_id "
+    "AND pbj.local_date > pb.local_date AND pj.word_id = pi.word_id AND pj.kind IN ('review','new','extra')) AS superseded"
+)
 # DESIGN §6.3 step 4: 0 for the 主攻阶段, then higher stages, then lower
 _STAGE_DISTANCE = "CASE WHEN w.stage_min = :cur THEN 0 WHEN w.stage_min > :cur THEN 2 * (w.stage_min - :cur) - 1 ELSE 2 * (:cur - w.stage_min) END"
 _SCREEN_ORDER = f"{_STAGE_DISTANCE}, (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma"
@@ -410,10 +418,12 @@ def _something_coming(conn: sqlite3.Connection, batch: Mapping[str, Any], *, ima
 def hide_stale(items: Iterable[Mapping[str, Any]], states: Mapping[int, str | None]) -> list[dict[str, Any]]:
     """DESIGN §6.3 stale-item rule, shared by :func:`today_response` and :func:`grade_item`.
 
-    ``items`` are ``push_items`` rows (``kind``, ``result``, ``word_id``; optionally ``merged_into_word_id``);
-    ``states`` maps ``word_id`` → the user's ``user_words.state`` (absent = no row). Hidden: an ungraded
-    review/new/extra item whose row is no longer ``new``/``learning``, an ungraded screen item whose word now has a
-    row, and any item whose word was merged. Graded items always stay.
+    ``items`` are ``push_items`` rows (``kind``, ``result``, ``word_id``; optionally ``merged_into_word_id`` and the
+    ``superseded`` flag :func:`batch_items` computes); ``states`` maps ``word_id`` → the user's ``user_words.state``
+    (absent = no row). Hidden: an ungraded review/new/extra item whose row is no longer ``new``/``learning``, an
+    ungraded review/new/extra item that is *superseded* (the same word has a study row in a newer batch of the user —
+    yesterday's leftover re-selected into today's batch is studied once, in today's batch), an ungraded screen item
+    whose word now has a row, and any item whose word was merged. Graded items always stay.
     """
     out: list[dict[str, Any]] = []
     for raw in items:
@@ -423,7 +433,7 @@ def hide_stale(items: Iterable[Mapping[str, Any]], states: Mapping[int, str | No
         if it.get("result") is None:
             wid = int(it["word_id"])
             state = states.get(wid)
-            if it["kind"] in STUDY_KINDS and state not in bank.BANK_STATES:
+            if it["kind"] in STUDY_KINDS and (state not in bank.BANK_STATES or it.get("superseded")):
                 continue
             if it["kind"] == "screen" and wid in states and state is not None:
                 continue
@@ -432,11 +442,13 @@ def hide_stale(items: Iterable[Mapping[str, Any]], states: Mapping[int, str | No
 
 
 def batch_items(conn: sqlite3.Connection, user_id: int, batch_id: int) -> tuple[list[dict[str, Any]], dict[int, str | None]]:
-    """All ``push_items`` of a batch (joined with the word's merge/content state) and the user's word states."""
+    """All ``push_items`` of a batch (joined with the word's merge/content state and the ``superseded`` flag) and the
+    user's word states."""
     rows = _rows(
         conn,
-        "SELECT pi.*, w.merged_into_word_id, w.content_state, uw.state AS uw_state FROM push_items pi "
-        "JOIN words w ON w.id = pi.word_id LEFT JOIN user_words uw ON uw.user_id = ? AND uw.word_id = pi.word_id "
+        f"SELECT pi.*, w.merged_into_word_id, w.content_state, uw.state AS uw_state, {_SUPERSEDED_SQL} FROM push_items pi "
+        "JOIN push_batches pb ON pb.id = pi.batch_id JOIN words w ON w.id = pi.word_id "
+        "LEFT JOIN user_words uw ON uw.user_id = ? AND uw.word_id = pi.word_id "
         "WHERE pi.batch_id = ? ORDER BY pi.position, pi.id",
         (int(user_id), int(batch_id)),
     )
@@ -508,7 +520,11 @@ def batch_progress(conn: sqlite3.Connection, user_id: int, batch_id: int) -> tup
 
 # ----------------------------------------------------------------------------------- today DTO
 def previous_open_batch(conn: sqlite3.Connection, user_id: int, yesterday: str) -> dict[str, Any] | None:
-    """API.md 43: yesterday's batch while it has ungraded, non-stale review/new/extra items."""
+    """API.md 43: yesterday's batch while it has ungraded, non-stale review/new/extra items.
+
+    Leftovers that today's batch re-selected are superseded (hidden by :func:`hide_stale`), so ``remaining`` counts
+    only the words the user can still study in yesterday's batch alone.
+    """
     row = bank.today_batch(conn, user_id, yesterday)
     if row is None:
         return None
@@ -738,10 +754,12 @@ def grade_item(
 
     Idempotent on ``client_event_id`` (the stored outcome comes back with ``duplicate:true``). Items must belong
     to today's or yesterday's batch (404 ``batch_not_found`` otherwise); 400 ``invalid_grade`` for a grade the
-    kind does not allow; 409 ``invalid_transition`` for a stale item (DESIGN §6.3); 409 ``item_already_graded``
-    when a *different* event grades an item whose ``result IS NOT NULL`` (``skip`` exempt). Only a FINAL grade
-    (``master``, a screen verdict, or an again/hard/good leaving ``step = 0``) writes ``push_items.result``; an
-    intermediate grade returns ``requeue_at`` with ``result:null`` and leaves the item gradable (DESIGN §7).
+    kind does not allow; 409 ``invalid_transition`` for a stale item (``reason:'stale_item'``) or for yesterday's
+    ungraded copy of a word that today's batch re-selected (``reason:'superseded_item'``, DESIGN §6.3 — the word is
+    graded once, in today's batch); 409 ``item_already_graded`` when a *different* event grades an item whose
+    ``result IS NOT NULL`` (``skip`` exempt). Only a FINAL grade (``master``, a screen verdict, or an
+    again/hard/good leaving ``step = 0``) writes ``push_items.result``; an intermediate grade returns
+    ``requeue_at`` with ``result:null`` and leaves the item gradable (DESIGN §7).
     """
     now_dt, now_s = bank.coerce_now(now)
     uid = int(user_id)
@@ -752,7 +770,7 @@ def grade_item(
         s, tz, today, yesterday = _user_dates(conn, uid, now_dt)
         item = _row(
             conn,
-            "SELECT pi.*, pb.user_id AS batch_user_id, pb.local_date AS batch_local_date FROM push_items pi "
+            f"SELECT pi.*, pb.user_id AS batch_user_id, pb.local_date AS batch_local_date, {_SUPERSEDED_SQL} FROM push_items pi "
             "JOIN push_batches pb ON pb.id = pi.batch_id WHERE pi.id = ?",
             (int(item_id),),
         )
@@ -767,6 +785,11 @@ def grade_item(
             raise ApiError(
                 "invalid_transition",
                 details={"reason": "stale_item", "item_id": int(item_id), "from": None if uw is None else uw["state"], "action": grade},
+            )
+        if item.get("result") is None and kind in STUDY_KINDS and item.get("superseded"):
+            raise ApiError(
+                "invalid_transition",
+                details={"reason": "superseded_item", "item_id": int(item_id), "from": None if uw is None else uw["state"], "action": grade},
             )
         if item.get("result") is not None and grade != "skip":
             raise ApiError("item_already_graded", details={"item_id": int(item_id), "result": item["result"]})

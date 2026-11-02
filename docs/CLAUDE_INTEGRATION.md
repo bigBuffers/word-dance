@@ -335,7 +335,7 @@ claim_batch(type, limit):                              # one BEGIN IMMEDIATE
 | `auth` | `kv.claude.paused_until = now + 30 min`; `system_events('claude_auth')`; admin banner 「Claude CLI 未登录，请以 sqin 身份运行 claude 完成登录」; jobs stay `queued` (no attempt consumed); the UI keeps working on dictionary data |
 | `spawn_error` | same as `auth` (binary missing) + `kv.claude.available='0'` |
 
-`fail(attempt)`: `attempts` was already incremented at claim; if `attempts >= max_attempts` → `status='dead'`, `last_error`; else `status='queued'`, `run_after = now + backoff(attempts)`. Nightly maintenance requeues up to 50 `dead` content and lookup jobs older than 24 h once (`attempts=0`, `group_size=1`).
+`fail(attempt)`: `attempts` was already incremented at claim; if `attempts >= max_attempts` → `status='dead'`, `last_error`; else `status='queued'`, `run_after = now + backoff(attempts)`. Nightly maintenance requeues up to 50 `dead` content and lookup jobs older than 24 h once (`attempts=0`, `group_size=1`), row by row: a dead row whose dedupe key is held by a live job (a 重试, a fresh batch/prefetch enqueue) is skipped — not stamped, so it stays eligible — and one `ux_jobs_dedupe_live` collision never aborts the rest of the night's requeue.
 
 ### 6.4 Applying `generate_content` (`content.apply_item`)
 
