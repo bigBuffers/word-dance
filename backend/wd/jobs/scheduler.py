@@ -423,14 +423,26 @@ def run_tick(conn: sqlite3.Connection, now: datetime, *, cfg: Any, boot_id: str 
 
 
 class Scheduler(threading.Thread):
-    """The tick thread (``interfaces.BackgroundThread``): ``Scheduler(ctx).start()``, ``stop()``, ``join(timeout)``."""
+    """The tick thread (``interfaces.BackgroundThread``): ``Scheduler(ctx).start()``, ``stop()``, ``join(timeout)``.
 
-    def __init__(self, ctx: JobContext):
+    ``lease_lost`` (the ``LeaseKeeper.lost`` event, see ``jobs.lease``) fences the thread: no tick runs while it is set,
+    because another instance holds the worker lease and runs its own scheduler — two tickers would build/publish twice
+    (idempotent, but wasteful) and ``hourly_gc``'s stale sweep would requeue the holder's running jobs.
+    """
+
+    def __init__(self, ctx: JobContext, *, lease_lost: threading.Event | None = None):
         super().__init__(name=ctx.worker_id or "scheduler", daemon=True)
         self.ctx = ctx
+        self.lease_lost = lease_lost
         self._stop_event = threading.Event()
         self._first = True
+        self._was_fenced = False
         self.last_result: TickResult | None = None
+
+    @property
+    def fenced(self) -> bool:
+        """True while the lease keeper reports the worker lease held by another instance."""
+        return self.lease_lost is not None and self.lease_lost.is_set()
 
     def tick(self, now: datetime) -> None:
         conn = self.ctx.db()
@@ -440,13 +452,26 @@ class Scheduler(threading.Thread):
             conn.close()
         self._first = False
 
+    def step(self) -> bool:
+        """One loop iteration: a tick unless fenced. Returns True when a tick ran (exceptions are logged, not raised)."""
+        if self.fenced:
+            if not self._was_fenced:
+                self._was_fenced = True
+                self.ctx.log.warning("scheduler: worker lease held by another instance; ticks suspended", extra={"worker": self.ctx.worker_id, "event": "lease_fenced"})
+            return False
+        if self._was_fenced:
+            self._was_fenced = False
+            self.ctx.log.info("scheduler: worker lease re-acquired; ticks resumed", extra={"worker": self.ctx.worker_id, "event": "lease_resumed"})
+        try:
+            self.tick(self.ctx.clock.now_utc())
+        except Exception:
+            self.ctx.log.exception("scheduler tick failed", extra={"worker": self.ctx.worker_id})
+        return True
+
     def run(self) -> None:
         interval = max(1, int(getattr(self.ctx.cfg, "tick_seconds", 60) or 60))
         while not self._stop_event.is_set():
-            try:
-                self.tick(self.ctx.clock.now_utc())
-            except Exception:
-                self.ctx.log.exception("scheduler tick failed", extra={"worker": self.ctx.worker_id})
+            self.step()
             if self._stop_event.wait(interval):
                 break
 

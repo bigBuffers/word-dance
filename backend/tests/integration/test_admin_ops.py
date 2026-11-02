@@ -133,7 +133,7 @@ def test_health(client: TestClient, seeded, admin, settings):
     assert h["db_ok"] is True and h["db_size_bytes"] > 0 and h["disk_free_bytes"] > 0 and h["data_dir"] == str(settings.data_dir)
     assert h["scheduler_alive"] is False and h["scheduler_last_tick_at"] is None and h["claude_worker_alive"] is False and h["io_worker_alive"] is False
     assert h["claude_bin"] == {"path": settings.claude_bin, "version": "2.1.299", "ok": True, "flag_tier": 0, "last_probe_at": NOW}
-    assert h["seed_version"] == "abc" and h["migrations_version"] == 1 and h["worker_lease"] is None
+    assert h["seed_version"] == "abc" and h["migrations_version"] == db.list_migration_files()[-1].version and h["worker_lease"] is None
     assert h["last_backup"] == {"file": "word-dance-20261014-0330.db.gz", "at": NOW, "bytes": 12345}
 
 

@@ -33,19 +33,26 @@ def test_connect_pragmas_and_autocommit(settings):
         c.close()
 
 
-def test_fresh_migration_creates_schema_and_one_bookkeeping_row(settings):
+def shipped_migrations() -> list[tuple[int, str]]:
+    """``(version, name)`` of every file in ``backend/wd/migrations`` — what a fresh database applies."""
+    return [(f.version, f.name) for f in db.list_migration_files()]
+
+
+def test_fresh_migration_creates_schema_and_one_bookkeeping_row_per_file(settings):
+    shipped = shipped_migrations()
+    assert shipped[0] == (1, "init") and (8, "fk_child_indexes") in shipped
     c = db.connect(settings.db_path)
     try:
         result = db.run_migrations(c)
-        assert result.applied == [(1, "init")]
-        assert result.from_version == 0 and result.to_version == 1
+        assert result.applied == shipped
+        assert result.from_version == 0 and result.to_version == shipped[-1][0]
         tables = set(db.table_names(c))
         assert tables == EXPECTED_TABLES
         assert len(tables) == 25
         assert db.view_names(c) == ["v_bank"]
-        rows = c.execute("SELECT version, name FROM schema_migrations").fetchall()
-        assert [tuple(r) for r in rows] == [(1, "init")]
-        assert db.current_version(c) == 1
+        rows = c.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchall()
+        assert [tuple(r) for r in rows] == shipped  # one row per file, written by the runner
+        assert db.current_version(c) == shipped[-1][0]
         assert db.kv_get(c, "schema.created_at") is not None  # written by the file itself (§10)
         assert not c.in_transaction
     finally:
@@ -55,14 +62,14 @@ def test_fresh_migration_creates_schema_and_one_bookkeeping_row(settings):
 def test_second_run_has_nothing_pending(conn):
     result = db.run_migrations(conn)
     assert result.applied == [] and result.pending == []
-    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(shipped_migrations())
 
 
 def test_dry_run_lists_pending_without_applying(settings):
     c = db.connect(settings.db_path)
     try:
         result = db.run_migrations(c, dry_run=True)
-        assert result.pending == [(1, "init")] and result.applied == []
+        assert result.pending == shipped_migrations() and result.applied == []
         assert db.table_names(c) == []
     finally:
         c.close()
@@ -84,6 +91,7 @@ def test_broken_migration_rolls_back_file_and_bookkeeping(settings, tmp_path: Pa
         assert info.value.version == 99 and info.value.name == "broken"
         assert calls == [(0, 99)]  # once, before the first pending file, with (from, to)
         assert not c.in_transaction
+        assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # enforcement restored on the error path too
         versions = [r[0] for r in c.execute("SELECT version FROM schema_migrations ORDER BY version")]
         assert versions == [1]  # 0001 committed on its own; 0099 left no row
         assert "half_done" not in db.table_names(c)
@@ -115,6 +123,160 @@ def test_pre_hook_not_called_when_nothing_pending(conn):
     called = []
     db.run_migrations(conn, pre_hook=lambda a, b: called.append((a, b)))
     assert called == []
+
+
+# ------------------------------------------------------------------ foreign keys during a migration (table rebuilds)
+# SQLite cannot ALTER a CHECK list, so widening e.g. users.role means the official rebuild: new table, copy, DROP the old
+# one, RENAME. With foreign_keys=ON the DROP runs an implicit DELETE and every ON DELETE CASCADE / SET NULL child of
+# users is wiped — the runner therefore disables enforcement around each file and runs foreign_key_check instead.
+REBUILD_USERS_SQL = """
+PRAGMA foreign_keys=OFF;  -- a no-op inside the runner's transaction; kept to show a file cannot rely on it
+CREATE TABLE users_new (
+  id                INTEGER PRIMARY KEY,
+  username          TEXT NOT NULL COLLATE NOCASE,
+  email             TEXT COLLATE NOCASE,
+  email_verified_at TEXT,
+  display_name      TEXT,
+  password_hash     TEXT NOT NULL,
+  role              TEXT NOT NULL DEFAULT 'user'    CHECK (role IN ('user','admin','guest')),
+  is_active         INTEGER NOT NULL DEFAULT 1      CHECK (is_active IN (0,1)),
+  onboarding_state  TEXT NOT NULL DEFAULT 'pending' CHECK (onboarding_state IN ('pending','screen','done')),
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  last_login_at     TEXT
+);
+INSERT INTO users_new SELECT * FROM users;
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;
+CREATE UNIQUE INDEX ux_users_username ON users(username);
+CREATE UNIQUE INDEX ux_users_email    ON users(email) WHERE email IS NOT NULL;
+"""
+
+USER_CHILD_TABLES = ("user_settings", "sessions", "user_words", "review_logs", "daily_stats", "push_batches", "push_items", "email_codes")
+
+
+def _migrations_dir_with(tmp_path: Path, second_file: str, sql: str) -> Path:
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", mig / "0001_init.sql")
+    (mig / second_file).write_text(sql, encoding="utf-8")
+    return mig
+
+
+def _seed_user_with_history(conn: sqlite3.Connection) -> None:
+    with db.tx(conn):
+        conn.execute("INSERT INTO users(id, username, password_hash) VALUES (1, 'alice', '$2b$12$x')")
+        conn.execute("INSERT INTO user_settings(user_id, next_push_at) VALUES (1, '2026-10-29T00:00:00Z')")
+        conn.execute("INSERT INTO sessions(token_hash, user_id, expires_at) VALUES ('tok', 1, '2026-11-27T00:00:00Z')")
+        conn.execute("INSERT INTO words(id, lemma, display, source) VALUES (1, 'abandon', 'abandon', 'seed')")
+        conn.execute("INSERT INTO user_words(id, user_id, word_id, state, origin) VALUES (1, 1, 1, 'learning', 'browse')")
+        conn.execute("INSERT INTO review_logs(user_id, word_id, user_word_id, action, context, local_date) VALUES (1, 1, 1, 'good', 'today', '2026-10-28')")
+        conn.execute("INSERT INTO daily_stats(user_id, local_date, graded) VALUES (1, '2026-10-28', 1)")
+        conn.execute("INSERT INTO push_batches(id, user_id, local_date, timezone, trigger) VALUES (1, 1, '2026-10-28', 'Asia/Shanghai', 'scheduled')")
+        conn.execute("INSERT INTO push_items(batch_id, word_id, user_word_id, kind, position) VALUES (1, 1, 1, 'review', 1)")
+        conn.execute("INSERT INTO email_codes(user_id, email, code_hash, expires_at) VALUES (1, 'a@b.c', 'h', '2026-10-28T01:00:00Z')")
+        conn.execute("INSERT INTO invite_codes(code_hash, created_by) VALUES ('ic', 1)")
+
+
+def _counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("users", *USER_CHILD_TABLES)}
+
+
+def test_migration_rebuilding_a_parent_table_keeps_every_child_row(settings, tmp_path: Path):
+    mig = _migrations_dir_with(tmp_path, "0002_rebuild_users.sql", REBUILD_USERS_SQL)
+    stash = (mig / "0002_rebuild_users.sql").rename(tmp_path / "stash.sql")  # apply 0001 alone first, then seed data
+    c = db.connect(settings.db_path)
+    try:
+        assert db.run_migrations(c, migrations_dir=mig).applied == [(1, "init")]
+        _seed_user_with_history(c)
+        before = _counts(c)
+        assert set(before.values()) == {1}
+        stash.rename(mig / "0002_rebuild_users.sql")
+
+        result = db.run_migrations(c, migrations_dir=mig)  # the same call as `wd migrate` / the service startup
+
+        assert result.applied == [(2, "rebuild_users")]
+        assert _counts(c) == before  # DROP TABLE users did not cascade: the learning history survived
+        assert c.execute("SELECT created_by FROM invite_codes").fetchone()[0] == 1  # ON DELETE SET NULL did not fire either
+        assert "'guest'" in c.execute("SELECT sql FROM sqlite_master WHERE name = 'users'").fetchone()[0]  # the new CHECK is in place
+        assert [r[0] for r in c.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2]
+        assert not c.in_transaction
+        assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # enforcement is back on the (reused) connection …
+        with pytest.raises(sqlite3.IntegrityError):  # … and live against the rebuilt table
+            with db.tx(c):
+                c.execute("INSERT INTO sessions(token_hash, user_id, expires_at) VALUES ('bad', 999, '2026-12-01T00:00:00Z')")
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        c.close()
+
+
+def test_migration_leaving_dangling_foreign_keys_is_rolled_back(settings, tmp_path: Path):
+    mig = _migrations_dir_with(
+        tmp_path,
+        "0002_orphans.sql",
+        "INSERT INTO kv(key, value) VALUES ('orphan.marker', '1');\n"
+        "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES ('orphan', 999, '2026-12-01T00:00:00Z');\n",  # no user 999
+    )
+    c = db.connect(settings.db_path)
+    try:
+        with pytest.raises(db.MigrationError) as info:
+            db.run_migrations(c, migrations_dir=mig)
+        assert info.value.version == 2 and info.value.name == "orphans"
+        assert "1 foreign-key violation(s): sessions rowid" in str(info.value)  # reported by foreign_key_check, before COMMIT
+        assert [r[0] for r in c.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1]
+        assert c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+        assert db.kv_get(c, "orphan.marker") is None  # the whole file rolled back, not just the offending statement
+        assert not c.in_transaction
+        assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        c.close()
+
+
+# ----------------------------------------------------------------------------------- 0008: FK child indexes
+def test_upgrade_from_the_baseline_schema_applies_the_later_files(settings, tmp_path: Path):
+    """An existing deployment sits at version 1 (0001 only): the next `wd migrate` applies 0008 … on top of its data."""
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", baseline / "0001_init.sql")
+    hooks: list[tuple[int, int]] = []
+    c = db.connect(settings.db_path)
+    try:
+        assert db.run_migrations(c, migrations_dir=baseline).applied == [(1, "init")]
+        _seed_user_with_history(c)
+        before = _counts(c)
+        result = db.run_migrations(c, pre_hook=lambda a, b: hooks.append((a, b)))
+        shipped = shipped_migrations()
+        assert result.applied == shipped[1:] and (8, "fk_child_indexes") in result.applied
+        assert hooks == [(1, shipped[-1][0])]  # → backups/pre-migrate-1-to-<latest>.db.gz
+        assert _counts(c) == before
+        assert {"ix_push_items_user_word", "ix_push_items_word", "ix_bank_suggestions_user_word"} <= {
+            r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert db.run_migrations(c).applied == []  # idempotent
+    finally:
+        c.close()
+
+
+def _leading_index_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    cols = set()
+    for ix in conn.execute(f"PRAGMA index_list({table})"):
+        first = conn.execute(f"PRAGMA index_info({ix['name']})").fetchone()  # seqno 0 = the leading column
+        if first is not None:
+            cols.add(first["name"])
+    return cols
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "action"),
+    [("push_items", "user_word_id", "SET NULL"), ("push_items", "word_id", "CASCADE"), ("bank_suggestions", "user_word_id", "CASCADE")],
+)
+def test_fk_child_columns_of_the_account_deletion_cascade_are_indexed(conn, table, column, action):
+    """Without a leading index each deleted user_words/words row scans the child table in full inside `DELETE FROM users`."""
+    fks = {r["from"]: r for r in conn.execute(f"PRAGMA foreign_key_list({table})")}
+    assert fks[column]["on_delete"] == action
+    assert column in _leading_index_columns(conn, table), f"{table}.{column} has no leading index (0008_fk_child_indexes.sql)"
+    plan = " ".join(str(r["detail"]) for r in conn.execute(f"EXPLAIN QUERY PLAN SELECT id FROM {table} WHERE {column} = 1"))
+    assert "SCAN" not in plan and "INDEX" in plan, plan
 
 
 def test_list_migration_files_rejects_duplicates(tmp_path: Path):

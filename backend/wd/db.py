@@ -12,6 +12,15 @@
   the first pending file; each file is executed inside one explicit ``BEGIN IMMEDIATE`` and the
   runner itself inserts ``schema_migrations(version, name)`` in that transaction, ``COMMIT``s, and
   ``ROLLBACK``s everything on any error. Migration files never self-register.
+  The runner also owns foreign-key enforcement around each file: ``PRAGMA foreign_keys=OFF`` *before*
+  ``BEGIN`` (the PRAGMA is a silent no-op inside a transaction), ``PRAGMA foreign_key_check`` before the
+  bookkeeping row (any violation fails the file), ``PRAGMA foreign_keys=ON`` again afterwards on both
+  paths. That is SQLite's own table-rebuild recipe (`ALTER TABLE` cannot change a CHECK list; the
+  parent table is re-created and the old one dropped) — with enforcement ON, ``DROP TABLE users``
+  would cascade-delete every child row and the runner would commit the loss as a successful
+  migration. A file must therefore not toggle ``PRAGMA foreign_keys`` itself, must delete child rows
+  explicitly when it deletes parents (there are no ON DELETE actions during a migration), and
+  ``PRAGMA defer_foreign_keys`` / rename-first orderings are not alternatives (see test_db.py).
 * :func:`kv_get` / :func:`kv_set` wrap the ``kv`` table.
 """
 
@@ -210,18 +219,31 @@ def run_migrations(
 
     for mf in pending:
         sql = mf.path.read_text(encoding="utf-8")
-        begin(conn, immediate=True)
+        # Foreign-key enforcement is switched off OUTSIDE the transaction (inside one the PRAGMA is a silent no-op):
+        # SQLite's table-rebuild recipe (CREATE new → INSERT … SELECT → DROP old → RENAME) is the only way to change a
+        # CHECK list, and with enforcement ON the DROP runs an implicit DELETE whose ON DELETE CASCADE / SET NULL
+        # actions empty every child table — committed below as a successful migration. foreign_key_check rejects a
+        # file that leaves real orphans instead, so a data migration deleting parents must delete their children too.
+        conn.execute("PRAGMA foreign_keys=OFF")
         try:
-            conn.executescript(sql)  # runs inside OUR transaction: autocommit=True ⇒ no implicit COMMIT
-            if not conn.in_transaction:
-                # a file that COMMITs itself breaks the atomicity rule; refuse loudly rather than record it
-                raise sqlite3.IntegrityError(f"{mf.path.name} ended the transaction itself (COMMIT/ROLLBACK inside a migration file is forbidden)")
-            conn.execute("INSERT INTO schema_migrations(version, name) VALUES (?, ?)", (mf.version, mf.name))
-            conn.execute("COMMIT")
-        except BaseException as e:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise MigrationError(mf.version, mf.name, e) from e
+            begin(conn, immediate=True)
+            try:
+                conn.executescript(sql)  # runs inside OUR transaction: autocommit=True ⇒ no implicit COMMIT
+                if not conn.in_transaction:
+                    # a file that COMMITs itself breaks the atomicity rule; refuse loudly rather than record it
+                    raise sqlite3.IntegrityError(f"{mf.path.name} ended the transaction itself (COMMIT/ROLLBACK inside a migration file is forbidden)")
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    shown = "; ".join(f"{r[0]} rowid {r[1]} → {r[2]}" for r in violations[:5])
+                    raise sqlite3.IntegrityError(f"{mf.path.name} leaves {len(violations)} foreign-key violation(s): {shown}")
+                conn.execute("INSERT INTO schema_migrations(version, name) VALUES (?, ?)", (mf.version, mf.name))
+                conn.execute("COMMIT")
+            except BaseException as e:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise MigrationError(mf.version, mf.name, e) from e
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")  # the transaction is over on both paths; the connection is reused by cli/main/worker
         result.applied.append((mf.version, mf.name))
         log.info("applied migration %04d_%s", mf.version, mf.name, extra={"event": "migration"})
     return result

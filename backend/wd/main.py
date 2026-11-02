@@ -379,7 +379,7 @@ def _start_workers(app: FastAPI, conn, instance: str) -> None:
         count = cfg.ai_concurrency if role == "claude" else 1
         for i in range(count):
             worker_id = "scheduler" if role == "scheduler" else f"{role}-{i + 1}"
-            thread = cls(ctx.for_worker(worker_id))
+            thread = cls(ctx.for_worker(worker_id), lease_lost=keeper.lost)  # fenced while another instance holds the lease
             thread.start()
             threads.append(thread)
             log.info("started %s (%s)", cls.__name__, worker_id, extra={"worker": worker_id})

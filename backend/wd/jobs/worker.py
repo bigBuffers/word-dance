@@ -9,6 +9,10 @@
 * :class:`IoWorker` (``io-1``) drains ``fetch_image / send_email / send_webhook`` one job at a time.
 * Both sweep stale ``running`` jobs every five minutes (``queue.requeue_stale(boot_id)``); the Claude worker also
   prunes ``claude-logs`` older than ``WD_AI_LOG_KEEP_DAYS``.
+* Both are fenced by the worker lease: constructed with ``lease_lost=keeper.lost`` (``lease.LeaseKeeper``), a worker
+  neither claims nor sweeps while that event is set — another instance holds the lease and its sweep would otherwise
+  requeue our running jobs (and ours its) so every job runs twice. When the keeper re-acquires the lease the worker
+  sweeps once immediately (the other instance may have died with jobs ``running``) and resumes.
 * :func:`drain` is the synchronous loop behind ``wd worker-once`` and ``POST /api/admin/jobs/run-once``.
   ``wd worker-once`` refuses to run (exit 2 + the DEPLOY §9 hint) while ``kv.worker_lease`` is live: a second
   claimer next to the service would have its jobs swept and re-run.
@@ -146,20 +150,26 @@ def requeue_dead_jobs(
 
 # ------------------------------------------------------------------------------------- threads
 class BaseWorker(threading.Thread):
-    """Loop: gate → periodic sweep → :func:`process_next`; idles ``idle_wait`` seconds when nothing is runnable."""
+    """Loop: lease fence → gate → periodic sweep → :func:`process_next`; idles ``idle_wait`` seconds when nothing is runnable.
+
+    ``lease_lost`` is the ``LeaseKeeper.lost`` event of this process (None for ``wd worker-once`` and tests without a
+    lease): while it is set the worker is *fenced* — :meth:`step` claims nothing and :meth:`maybe_sweep` is a no-op.
+    """
 
     types: tuple[str, ...] = ()
 
-    def __init__(self, ctx: JobContext, *, idle_wait: float = IDLE_WAIT_S):
+    def __init__(self, ctx: JobContext, *, idle_wait: float = IDLE_WAIT_S, lease_lost: threading.Event | None = None):
         super().__init__(name=ctx.worker_id, daemon=True)
         self.ctx = ctx
         self.worker_id = ctx.worker_id
         self.idle_wait = idle_wait
+        self.lease_lost = lease_lost
         self.processed = 0
         self.last_error: str | None = None
         self.last_active_at: str | None = None
         self._stop_event = threading.Event()
         self._last_sweep = 0.0
+        self._was_fenced = False
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -167,6 +177,11 @@ class BaseWorker(threading.Thread):
     @property
     def stopping(self) -> bool:
         return self._stop_event.is_set()
+
+    @property
+    def fenced(self) -> bool:
+        """True while the lease keeper reports the worker lease held by another instance."""
+        return self.lease_lost is not None and self.lease_lost.is_set()
 
     def gate(self) -> float | None:
         """Seconds to idle instead of claiming (None = go ahead)."""
@@ -178,8 +193,8 @@ class BaseWorker(threading.Thread):
             log.info("requeued %d stale running job(s)", swept, extra={"worker": self.worker_id, "event": "stale_sweep"})
 
     def maybe_sweep(self) -> None:
-        if time.monotonic() - self._last_sweep < SWEEP_INTERVAL_S:
-            return
+        if self.fenced or time.monotonic() - self._last_sweep < SWEEP_INTERVAL_S:
+            return  # a fenced instance must never requeue the lease holder's running jobs
         self._last_sweep = time.monotonic()
         conn = self.ctx.db()
         try:
@@ -189,6 +204,15 @@ class BaseWorker(threading.Thread):
 
     def step(self) -> bool:
         """One iteration; True when something was handled (no idle wait afterwards)."""
+        if self.fenced:
+            if not self._was_fenced:
+                self._was_fenced = True
+                log.warning("%s: worker lease held by another instance; claiming suspended", self.worker_id, extra={"worker": self.worker_id, "event": "lease_fenced"})
+            return False  # the run loop idles idle_wait seconds; the keeper clears the event once the lease is ours again
+        if self._was_fenced:
+            self._was_fenced = False
+            self._last_sweep = 0.0  # sweep at once: the instance that held the lease meanwhile may have died with jobs running
+            log.info("%s: worker lease re-acquired; claiming resumed", self.worker_id, extra={"worker": self.worker_id, "event": "lease_resumed"})
         wait = self.gate()
         if wait is not None:
             self._stop_event.wait(wait)

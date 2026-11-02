@@ -539,6 +539,25 @@ def test_scheduler_thread_start_stop(settings, connect, frozen_clock, seeded):
     assert db.kv_get(seeded, "last_tick_at") == "2026-10-14T00:00:00Z"
 
 
+def test_scheduler_is_fenced_while_the_lease_is_lost(settings, connect, frozen_clock, seeded):
+    import threading
+
+    lost = threading.Event()
+    ctx = JobContext(db=connect, cfg=settings, clock=frozen_clock, enqueue=queue.enqueue, log=logging.getLogger("test"), worker_id="scheduler", boot_id="thread")
+    job = queue.enqueue(seeded, "generate_content", {"word_id": 1}, dedupe_key="content:1", now="2026-10-14T00:00:00Z")
+    seeded.execute("UPDATE jobs SET status = 'running', locked_by = 'claude-1:other-boot', locked_at = '2026-10-14T00:00:00Z' WHERE id = ?", (job,))
+    s = scheduler.Scheduler(ctx, lease_lost=lost)
+    assert not s.fenced and scheduler.Scheduler(ctx).fenced is False  # no keeper (wd tick) → never fenced
+    lost.set()
+    assert s.fenced and s.step() is False
+    assert s.last_result is None and db.kv_get(seeded, "last_tick_at") is None
+    assert seeded.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()[0] == "running"  # hourly_gc did not sweep the holder's job
+    lost.clear()
+    assert s.step() is True and s.last_result is not None
+    assert db.kv_get(seeded, "last_tick_at") == "2026-10-14T00:00:00Z"
+    assert seeded.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()[0] == "queued"  # back in charge: the sweep ran
+
+
 def test_tick_cli_refuses_while_the_lease_is_live(settings, seeded, capsys):
     from wd.cli import LEASE_HINT
 

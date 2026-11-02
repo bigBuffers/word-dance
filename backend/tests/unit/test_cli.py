@@ -24,7 +24,8 @@ def test_migrate_twice(settings, capsys):
     assert "0 pending" in out
     c = db.connect(settings.db_path)
     try:
-        assert [tuple(r) for r in c.execute("SELECT version, name FROM schema_migrations")] == [(1, "init")]
+        shipped = [(f.version, f.name) for f in db.list_migration_files()]
+        assert [tuple(r) for r in c.execute("SELECT version, name FROM schema_migrations ORDER BY version")] == shipped  # one row per file, runner-written
         assert len(db.table_names(c)) == 25 and db.view_names(c) == ["v_bank"]
     finally:
         c.close()

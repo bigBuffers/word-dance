@@ -9,6 +9,7 @@ import json
 import logging
 import secrets
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -178,6 +179,55 @@ def test_disabled_ai_flags_queued_lookups_as_unverifiable_and_resumes_cleanly(se
     for uid in (alice, bob):
         row = bank.my_row(seeded, uid, res.word_id)
         assert row["needs_attention"] == 0 and row["attention_msg"] is None
+
+
+def test_fenced_worker_neither_claims_nor_sweeps_and_sweeps_once_on_resume(seeded, ctx):
+    lost = threading.Event()
+    w = worker.ClaudeWorker(ctx, lease_lost=lost)
+    assert not w.fenced
+    mine = enqueue_content(seeded, seed_words(seeded, 3))
+    theirs = mine.pop()  # in flight on the instance that holds the lease
+    seeded.execute("UPDATE jobs SET status = 'running', locked_by = 'claude-1:boot-b', locked_at = ? WHERE id = ?", (NOW, theirs))
+    lost.set()
+    assert w.fenced
+    assert w.step() is False
+    assert all(queue.get_job(seeded, j).status == "queued" and queue.get_job(seeded, j).attempts == 0 for j in mine)  # untouched
+    w._last_sweep = 0.0
+    w.maybe_sweep()
+    assert queue.get_job(seeded, theirs).status == "running" and queue.get_job(seeded, theirs).locked_by == "claude-1:boot-b"  # not swept
+    assert calls(seeded) == [] and w.processed == 0
+    lost.clear()
+    assert w.step() is True
+    # the resume sweep returned the (now stale, foreign-boot) job to queued and the claim took all three in one call
+    assert all(queue.get_job(seeded, j).status == "done" for j in (*mine, theirs))
+    assert w.processed == 3 and len(calls(seeded)) == 1
+
+
+def test_worker_lost_lease_is_fenced_until_the_keeper_reacquires(seeded, ctx, connect):
+    from datetime import timedelta
+
+    t0 = ctx.clock.now_utc()
+    assert lease.acquire(seeded, "A", t0)
+    keeper = lease.LeaseKeeper(connect, "A", ctx.clock.now_utc, interval_s=0.05)
+    w = worker.ClaudeWorker(ctx, lease_lost=keeper.lost)
+    ids = enqueue_content(seeded, seed_words(seeded, 2))
+    # A's renewals lapsed for > TTL and a second `wd serve` (B) took the lease (as of t0 + 91 s; A's clock still reads t0)
+    assert lease.acquire(seeded, "B", t0 + timedelta(seconds=lease.TTL_SECONDS + 1))
+    keeper.start()
+    try:
+        assert keeper.lost.wait(5)
+        assert w.fenced and w.step() is False
+        assert all(queue.get_job(seeded, j).status == "queued" and queue.get_job(seeded, j).attempts == 0 for j in ids)
+        assert lease.release(seeded, "B")  # B stops; A's keeper takes the lease back on its next round
+        deadline = time.monotonic() + 5
+        while keeper.lost.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not keeper.lost.is_set() and lease.read(seeded)["instance"] == "A"
+        assert w.step() is True
+        assert all(queue.get_job(seeded, j).status == "done" for j in ids) and w.processed == 2
+    finally:
+        keeper.stop()
+        keeper.join(timeout=5)
 
 
 def test_lease_blocks_worker_once(seeded, settings, test_env, monkeypatch, capsys):

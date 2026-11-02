@@ -207,7 +207,7 @@ def test_spa_serves_built_files_with_cache_policy(settings, frozen_clock):
 def test_lifespan_migrated_db_and_public_url_guess(client: TestClient, settings):
     c = db.connect(settings.db_path)
     try:
-        assert db.current_version(c) == 1
+        assert db.current_version(c) == db.list_migration_files()[-1].version  # every shipped file applied by the lifespan
         assert len(db.table_names(c)) == 25
         guess = db.kv_get(c, "public_url_guess")
         assert guess is None or guess.startswith("http://") and guess.endswith(f":{settings.port}")
@@ -234,6 +234,9 @@ def test_worker_enabled_takes_and_releases_the_lease(settings, frozen_clock):
             assert held["expires_at"] == "2026-10-14T00:01:30Z"
         finally:
             conn.close()
+        keeper, *workers = app.state.threads
+        assert isinstance(keeper, lease.LeaseKeeper) and len(workers) >= 3  # claude-N, io-1, scheduler
+        assert all(t.lease_lost is keeper.lost and not t.fenced for t in workers)  # every thread is fenced by the keeper's flag
         assert c.get("/api/health").status_code == 200
     conn = db.connect(cfg.db_path)
     try:
