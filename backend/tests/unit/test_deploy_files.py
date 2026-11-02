@@ -236,7 +236,7 @@ def test_install_sh_syntax_help_and_unknown_option():
             continue
         if code.startswith("sudo -n true"):  # the read-only preflight probe for passwordless sudo
             continue
-        if re.match(r"^(sudo|systemctl|pip|npm|chmod|install |cp |sed -i|apt-get|certbot|ln )", code):
+        if re.match(r"^(sudo|systemctl|pip|npm|chmod|install |cp |sed -i|apt-get|certbot|ln |rm |mv )", code):
             pytest.fail(f"mutating command outside run(): {line!r}")
 
 
@@ -331,6 +331,127 @@ def test_install_sh_upgrade_without_passwordless_sudo_warns_that_the_old_version
     body = INSTALL.read_text(encoding="utf-8")
     assert re.search(r'^if \[ "\$STALE" = 1 \]; then echo "health OK, but the OLD process answered', body, re.M)
     assert body.index('if [ "$STALE" = 1 ]; then echo "health OK') < body.index('echo "word-Dance is running at $WD_PUBLIC_URL"')
+
+
+# ------------------------------------------------------- install.sh: the frontend snapshot in the data dir (DEPLOY §1/§2/§10)
+def _head_sha() -> str:
+    """What install.sh names the snapshot after: ``git rev-parse --short HEAD`` of the checkout the tests run from."""
+    cp = _sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"])
+    assert cp.returncode == 0, cp.stderr
+    return cp.stdout.strip()
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_builds_the_frontend_into_a_versioned_snapshot_and_publishes_it_after_the_stop(tmp_path):
+    """The installed service serves ``$DATA/frontend`` → ``frontend-releases/<sha>``, never ``<repo>/frontend/dist`` —
+    which ``make test`` / ``npm run build`` in the checkout rewrite in place under the running process (seen on main:
+    a gate run swapped the live SPA under the pre-upgrade backend). The slow build stays before the stop and goes into a
+    staging dir (``<sha>.new``, so a re-run on the same commit never rebuilds the live tree); the publish — rename into
+    place, ONE atomic rename of the symlink, prune to the two newest snapshots — follows the stop and precedes migrate."""
+    data = tmp_path / "data"
+    sha = _head_sha()
+    releases = f"{data}/frontend-releases"
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data, sudo_ok=True, service_active=True))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    plus = [l for l in cp.stdout.splitlines() if l.startswith("+ ")]
+    mkdir = next(l for l in plus if l.startswith("+ install -d -m 0700 "))
+    assert releases in mkdir.split()  # created 0700 like every other runtime subdirectory
+    build = plus.index(f"+ bash -c cd '{REPO}/frontend' && npm ci --silent && npm run build --silent -- --outDir '{releases}/{sha}.new' --emptyOutDir")
+    stop = plus.index("+ sudo -n systemctl stop word-dance.service")
+    unstage = plus.index(f"+ rm -rf {releases}/{sha}")
+    rename = plus.index(f"+ mv -T {releases}/{sha}.new {releases}/{sha}")
+    link = plus.index(f"+ ln -sfn frontend-releases/{sha} {data}/frontend.tmp")  # relative target: the data dir may move (ops.md §5)
+    swap = plus.index(f"+ mv -T {data}/frontend.tmp {data}/frontend")
+    prune = plus.index(f"+ bash -c cd '{releases}' && ls -1t | tail -n +3 | xargs -r rm -rf --")
+    migrate = next(i for i, l in enumerate(plus) if l.endswith("/.venv/bin/wd migrate"))
+    restart = plus.index("+ sudo -n systemctl restart word-dance.service")
+    assert build < stop < unstage < rename < link < swap < prune < migrate < restart
+    assert f"==> frontend publish: {data}/frontend -> frontend-releases/{sha}" in cp.stdout
+    assert "frontend/dist" not in cp.stdout  # the checkout's build directory is no longer part of the plan
+    assert cp.stderr == ""
+    assert not data.exists()
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_publishes_the_snapshot_without_a_restart_too(tmp_path):
+    """``--no-restart``, no passwordless sudo, or a fresh box (no running unit): the swap still happens after the point where
+    the stop would be — the old process keeps serving the snapshot it resolved at startup until it is restarted (what
+    today's in-place rebuild could not promise), and the plan ends before ``wd migrate`` as in the normal case."""
+    data = tmp_path / "data"
+    sha = _head_sha()
+    swap = f"+ mv -T {data}/frontend.tmp {data}/frontend"
+    for args, env in (
+        (["--no-restart", "--dry-run"], _install_env(tmp_path, data, sudo_ok=True, service_active=True)),
+        (["--dry-run"], _install_env(tmp_path, data, sudo_ok=False, service_active=True)),
+        (["--dry-run"], _install_env(tmp_path, data, sudo_ok=True, service_active=False)),
+    ):
+        cp = _sh([str(INSTALL), *args], env=env)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        lines = cp.stdout.splitlines()
+        assert "systemctl stop" not in cp.stdout
+        assert swap in lines and f"+ ln -sfn frontend-releases/{sha} {data}/frontend.tmp" in lines
+        if "NOTE:" in cp.stdout:  # the running service is kept: said before the publish, which goes ahead anyway
+            assert lines.index(next(l for l in lines if l.startswith("NOTE:"))) < lines.index(swap)
+        assert lines.index(swap) < next(i for i, l in enumerate(lines) if l.endswith("/.venv/bin/wd migrate"))
+        assert not data.exists()
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_fills_an_empty_wd_frontend_dist_once(tmp_path):
+    """Like ``WD_PUBLIC_URL``: an empty value (the dev default ``<repo>/frontend/dist``) is filled with the published symlink,
+    a non-empty value is the operator's and is left alone, an old ``.env`` without the key gets it appended — the file is
+    never rewritten (DEPLOY §2/§4). The first upgrade of a deployment whose ``.env`` carries ``WD_FRONTEND_DIST=""`` is the
+    second case: one ``sed -i`` on that line, nothing else."""
+    data = tmp_path / "data"
+    fill = f'+ sed -i s|^WD_FRONTEND_DIST=.*|WD_FRONTEND_DIST="{data}/frontend"| {data}/.env'
+    # a fresh box (no .env yet): the template's empty value is read, the fill targets the .env step 5 will have copied
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert fill in cp.stdout.splitlines() and cp.stderr == "" and not data.exists()
+    # an existing .env with the empty value (every deployment before this change): filled once
+    data.mkdir()
+    shutil.copy(ENV_EXAMPLE, data / ".env")
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert [l for l in cp.stdout.splitlines() if "WD_FRONTEND_DIST" in l] == [fill]
+    assert (data / ".env").read_text(encoding="utf-8") == ENV_EXAMPLE.read_text(encoding="utf-8")  # dry run: unchanged
+    # a non-empty value is the operator's: no fill at all
+    text = ENV_EXAMPLE.read_text(encoding="utf-8").replace('WD_FRONTEND_DIST=""', 'WD_FRONTEND_DIST="/srv/word-dance/ui"')
+    (data / ".env").write_text(text, encoding="utf-8")
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert "WD_FRONTEND_DIST" not in "\n".join(l for l in cp.stdout.splitlines() if l.startswith("+ "))
+    assert (data / ".env").read_text(encoding="utf-8") == text
+    # an old .env without the key: appended in the §4 line shape, not rewritten
+    text = "\n".join(l for l in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines() if not l.startswith("WD_FRONTEND_DIST=")) + "\n"
+    (data / ".env").write_text(text, encoding="utf-8")
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    appended = [l for l in cp.stdout.splitlines() if l.startswith("+ ") and "WD_FRONTEND_DIST" in l]
+    assert appended == [f"""+ bash -c printf 'WD_FRONTEND_DIST="%s"\\n' '{data}/frontend' >> '{data}/.env'"""]
+    assert (data / ".env").read_text(encoding="utf-8") == text
+    # the planned command itself, run by hand on the same file: one well-formed line, the rest byte-identical
+    cp = _sh(["bash", "-c", appended[0][len("+ bash -c ") :]])
+    assert cp.returncode == 0, cp.stderr
+    lines = (data / ".env").read_text(encoding="utf-8").splitlines()
+    assert lines[-1] == f'WD_FRONTEND_DIST="{data}/frontend"' and LINE_RE.match(lines[-1]) and "\n".join(lines[:-1]) + "\n" == text
+
+
+def test_install_sh_refuses_a_frontend_directory_that_is_not_a_symlink(tmp_path):
+    """``$DATA/frontend`` is the publish target of ``mv -T``, which cannot replace a real directory: say so in the
+    preflight instead of failing in step 6 with the unit already stopped."""
+    body = INSTALL.read_text(encoding="utf-8")
+    assert re.search(r'^\[ ! -e "\$DATA/frontend" \] \|\| \[ -L "\$DATA/frontend" \] \|\| \{ echo ', body, re.M)
+    assert body.index('[ ! -e "$DATA/frontend" ]') < body.index("# 2. data dir")  # read-only, before the first run()
+    data = tmp_path / "data"
+    (data / "frontend").mkdir(parents=True)
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data))
+    assert cp.returncode == 1 and "is not a symlink" in cp.stdout and str(data / "frontend") in cp.stdout
+    assert [l for l in cp.stdout.splitlines() if l.startswith("+ ")] == []
+    # a symlink (a previous publish) or nothing at all passes
+    shutil.rmtree(data / "frontend")
+    (data / "frontend").symlink_to("frontend-releases/0000000")  # dangling is fine too: mv -T replaces it
+    assert _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data)).returncode == 0
 
 
 # ------------------------------------------------------------------ install.sh: data dir vs the installed unit (ops.md §5)

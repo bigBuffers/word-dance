@@ -93,11 +93,18 @@ earlier — the files stay in `images/` until `wd images-prune`).
 cd /home/sqin/word-Dance && git pull && deploy/install.sh        # or: make install
 ```
 
-`install.sh` is idempotent: it upgrades pip/npm dependencies, rebuilds the SPA, **stops the unit** (unless
-`--no-restart`), runs `wd migrate` (which first writes `backups/pre-migrate-<from>-to-<to>.db.gz` when a migration is
-pending), re-imports the seed only if the shipped file changed, starts the unit, and never touches `.env`, the
-database or images. Downtime ≈ migration time + 3 s. In-flight jobs are recovered by the stale-lock sweep; a Claude
-call in flight gets up to `TimeoutStopSec=300` to finish.
+`install.sh` is idempotent: it upgrades pip/npm dependencies, builds the SPA into a new snapshot
+`/home/sqin/word-dance-data/frontend-releases/<sha>.new`, **stops the unit** (unless `--no-restart`), publishes that
+snapshot (`<sha>.new` → `<sha>`, then the `frontend` symlink is replaced with one atomic rename; the two newest
+snapshots are kept), runs `wd migrate` (which first writes `backups/pre-migrate-<from>-to-<to>.db.gz` when a migration
+is pending), re-imports the seed only if the shipped file changed, starts the unit, and never touches `.env` (beyond
+filling an empty `WD_PUBLIC_URL` / `WD_FRONTEND_DIST` once), the database or images. Downtime ≈ migration time + 3 s.
+In-flight jobs are recovered by the stale-lock sweep; a Claude call in flight gets up to `TimeoutStopSec=300` to finish.
+
+The service serves `WD_FRONTEND_DIST=/home/sqin/word-dance-data/frontend` (DEPLOY §1/§4), never `<repo>/frontend/dist`:
+`make test` / `npm run build` in the checkout (§8) write `frontend/dist` and leave the live UI alone, and a browser tab
+keeps finding its lazy chunks until the next publish + restart. `wd serve` resolves the symlink when it starts, so after
+`--no-restart` (or without passwordless sudo) the old process keeps its old snapshot until you restart it.
 
 **If the data directory was moved (§5), every `deploy/install.sh` / `make install` in this section — upgrade, code
 rollback, migration rollback — keeps working as written**: when `WD_DATA_DIR` is unset the script takes the data
@@ -120,6 +127,14 @@ Rollback of the code: `git checkout <previous tag> && deploy/install.sh`. Rollba
 sudo systemctl stop word-dance
 wd restore /home/sqin/word-dance-data/backups/pre-migrate-<from>-to-<to>.db.gz --yes
 git checkout <previous tag> && deploy/install.sh
+```
+
+Rollback of the UI alone (a bad build, API unchanged — the previous snapshot is still there):
+
+```bash
+ls -1t /home/sqin/word-dance-data/frontend-releases                     # newest first; the second entry is the previous release
+cd /home/sqin/word-dance-data && ln -sfn frontend-releases/<previous> frontend.tmp && mv -T frontend.tmp frontend
+sudo systemctl restart word-dance                                       # wd serve resolves the symlink at startup
 ```
 
 Dry runs: `deploy/install.sh --dry-run` prints every mutating step with a leading `+` and changes nothing;
@@ -192,6 +207,7 @@ that scenario — the moved directory is untouched.
 | Restore needed | — | §3 |
 | Flag tier fell back to 0 | `claude_probe_fallback` event | inspect the stderr excerpt in the event; upgrade the CLI or stay on tier 0 (fully functional) |
 | Reverse proxy / HTTPS wanted later | — | `deploy/install.sh --with-caddy words.example.com` (sets `WD_HOST=127.0.0.1`, `WD_PUBLIC_URL`, `WD_TRUST_PROXY=1`) |
+| UI stale or mixed after an upgrade (old pages, lazy chunk imports failing, 「前端尚未构建」) | `readlink /home/sqin/word-dance-data/frontend` does not name the snapshot the last `deploy/install.sh` printed (`==> frontend publish: …`), or the service was not restarted after it (`--no-restart`, no passwordless sudo — `wd serve` resolves the symlink at startup) | `sudo systemctl restart word-dance`, reload the tab. Symlink missing, or `.env` still has `WD_FRONTEND_DIST=""` → re-run `deploy/install.sh` (fills the value, publishes the snapshot, §4). Bad build → the UI rollback in §4 |
 
 ## 7. Optional ECDICT dictionary
 
@@ -203,7 +219,9 @@ needs ≈ 1.1 GB free during extraction. Without it, words outside the seed are 
 
 ## 8. Tests and smoke on the box
 
-* `make test` — pytest + typecheck + vitest + vite build (no network, fake claude).
+* `make test` — pytest + typecheck + vitest + vite build (no network, fake claude). The vite build writes
+  `frontend/dist`, which the installed service does not serve (it serves the snapshot behind
+  `/home/sqin/word-dance-data/frontend`, §4), so the gate is safe to run in the production checkout.
 * `make smoke` — `scripts/smoke.py`: boots a throwaway instance (temporary data dir, port 8010, fake claude,
   mocked image providers, registration open) and walks the whole product: first registration → invite → onboarding
   → browse/mark → bank add → jobs → batch → every grade kind → master/restore/re-add → export/import → history →
@@ -225,7 +243,9 @@ Real-Claude acceptance (≤ $0.20 total) and the delivery checks are manual: see
 `WD_DATA_DIR` is 0700; `.env`, the database (+ `-wal`/`-shm`), images, backups and claude logs are 0600 — guaranteed
 by `UMask=0077` in the units, `os.umask(0o077)` in `wd serve` and an explicit chmod in `wd migrate`/`wd backup`/`wd
 restore`. Check with `ls -la /home/sqin/word-dance-data` (expect `drwx------`) and `stat -c %a
-/home/sqin/word-dance-data/.env` (expect `600`). `git clean -fdx` in the checkout can never touch the data directory.
+/home/sqin/word-dance-data/.env` (expect `600`). `frontend-releases/` (the SPA snapshots, §4) is 0700 as well; the files
+inside keep the build's modes — static assets, private through the parent directory and served by the same user.
+`git clean -fdx` in the checkout can never touch the data directory.
 
 ## 10. Known issues and deferred items (integration hand-over)
 

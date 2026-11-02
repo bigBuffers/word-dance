@@ -49,11 +49,12 @@ CLAUDE_BIN=$(command -v claude || true)
 [ -n "$CLAUDE_BIN" ] || { echo "claude CLI not found in PATH for $RUN_USER (expected /home/sqin/.local/bin/claude)"; exit 1; }
 [ "$(df --output=avail -m /home | tail -1)" -gt 2048 ] || { echo "need > 2 GB free on /home"; exit 1; }
 [ -f "$REPO/frontend/package-lock.json" ] || { echo "frontend/package-lock.json missing (npm ci needs it)"; exit 1; }
+[ ! -e "$DATA/frontend" ] || [ -L "$DATA/frontend" ] || { echo "$DATA/frontend exists and is not a symlink — move it away; step 6 publishes the SPA there as a symlink into $DATA/frontend-releases/ (DEPLOY §1)"; exit 1; }
 sudo -n true 2>/dev/null && HAVE_SUDO=1 || { HAVE_SUDO=0; echo "WARN: no passwordless sudo — systemd steps will be printed, not executed"; }
 
 # 2. data dir -------------------------------------------------------------
 log "data dir $DATA"
-run install -d -m 0700 "$DATA" "$DATA/images" "$DATA/claude-cwd" "$DATA/claude-logs" "$DATA/backups" "$DATA/tmp"
+run install -d -m 0700 "$DATA" "$DATA/images" "$DATA/claude-cwd" "$DATA/claude-logs" "$DATA/backups" "$DATA/tmp" "$DATA/frontend-releases"
 
 # 3. backend venv ---------------------------------------------------------
 log "python venv"
@@ -62,9 +63,13 @@ run "$REPO/.venv/bin/pip" install --quiet --upgrade pip wheel
 run "$REPO/.venv/bin/pip" install --quiet -r "$REPO/backend/requirements.txt"
 run "$REPO/.venv/bin/pip" install --quiet -e "$REPO/backend"          # provides the `wd` console script ([build-system] setuptools, TASKS P0)
 
-# 4. frontend build -------------------------------------------------------
+# 4. frontend build → a versioned snapshot inside the data dir, never <repo>/frontend/dist ------------------------
+# The installed service serves $DATA/frontend, a symlink step 6 swaps atomically after the unit is stopped — so a build in
+# the checkout (`make test`, `npm run build`) can no longer replace the assets of the running process, and a re-run on the
+# same commit builds into a staging dir (<sha>.new) instead of the live tree. The slow part stays here, before the stop.
 log "frontend build"
-run bash -c "cd '$REPO/frontend' && npm ci --silent && npm run build --silent"      # → frontend/dist
+REL=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || date +%s)        # one snapshot per deployed commit: frontend-releases/<sha>
+run bash -c "cd '$REPO/frontend' && npm ci --silent && npm run build --silent -- --outDir '$DATA/frontend-releases/$REL.new' --emptyOutDir"
 
 # 5. .env (created once; never overwritten) -------------------------------
 if [ ! -f "$DATA/.env" ]; then
@@ -91,6 +96,13 @@ elif grep -Eq '^WD_PUBLIC_URL=("")?$' "$ENV_READ"; then
   PORT=$(sed -n 's/^WD_PORT="\{0,1\}\([0-9][0-9]*\)"\{0,1\}$/\1/p' "$ENV_READ"); PORT=${PORT:-8000}
   [ -n "$LAN_IP" ] && run sed -i "s|^WD_PUBLIC_URL=.*|WD_PUBLIC_URL=\"http://$LAN_IP:$PORT\"|" "$DATA/.env"
 fi
+# the SPA path, filled once like WD_PUBLIC_URL: an empty WD_FRONTEND_DIST (the dev default <repo>/frontend/dist) becomes the
+# symlink step 6 publishes; a non-empty value is the operator's and is left alone; an old .env without the key gets it appended
+if grep -Eq '^WD_FRONTEND_DIST=("")?$' "$ENV_READ"; then
+  run sed -i "s|^WD_FRONTEND_DIST=.*|WD_FRONTEND_DIST=\"$DATA/frontend\"|" "$DATA/.env"
+elif ! grep -q '^WD_FRONTEND_DIST=' "$ENV_READ"; then
+  run bash -c "printf 'WD_FRONTEND_DIST=\"%s\"\n' '$DATA/frontend' >> '$DATA/.env'"
+fi
 if [ -f "$DATA/.env" ]; then
   # the file is sourced by bash below: an unquoted value with a space (WD_AI_EXTRA_ARGS=--effort low) would RUN the command `low`.
   # Rule (§4): every non-comment line is KEY="value" (or KEY='value' for a secret containing $ ` or \). Checked before sourcing.
@@ -115,6 +127,16 @@ if [ "$ACTIVE" = 1 ]; then
     if [ "$STALE" = 1 ]; then echo "WARN: no passwordless sudo — the OLD version keeps serving during and after this run; afterwards run: sudo systemctl restart word-dance"; fi
   fi
 fi
+# publish the snapshot built in step 4: rename the staging dir into place, swap the `frontend` symlink with ONE rename (relative
+# target, so a moved data dir keeps working), keep the two newest snapshots (the previous one is the rollback target, ops.md §4).
+# After the stop, so the old process never sees a half-published tree; under --no-restart / without sudo it keeps serving the
+# snapshot it resolved at startup until it is restarted (never a new SPA on top of the old API).
+log "frontend publish: $DATA/frontend -> frontend-releases/$REL"
+run rm -rf "$DATA/frontend-releases/$REL"
+run mv -T "$DATA/frontend-releases/$REL.new" "$DATA/frontend-releases/$REL"
+run ln -sfn "frontend-releases/$REL" "$DATA/frontend.tmp"
+run mv -T "$DATA/frontend.tmp" "$DATA/frontend"
+run bash -c "cd '$DATA/frontend-releases' && ls -1t | tail -n +3 | xargs -r rm -rf --"
 run "$REPO/.venv/bin/wd" migrate                                    # cli.py: db.run_migrations() records each NNNN file itself; snapshots first (§5)
 run "$REPO/.venv/bin/wd" import-seed                                # reads WD_SEED_PATH (default <repo>/data/seed/vocab.jsonl.gz); idempotent; no-op when kv.seed_version matches
 log "claude probe (<= \$0.05)"
