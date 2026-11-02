@@ -2,7 +2,8 @@
 
 * :func:`get_db` — one connection per request (closed afterwards).
 * :func:`current_user` — the session cookie ``wd_session`` → ``sessions`` row (``token_hash = sha256(cookie)``),
-  401 ``unauthorized`` / 403 ``account_disabled``; slides the expiry at most once per day.
+  401 ``unauthorized`` / 403 ``account_disabled``; slides the expiry at most once per day; on a non-GET request
+  also counts DESIGN §10's per-user mutation throttle (``security.throttle_mutation``, 300/min → 429 ``rate_limited``).
 * :func:`require_onboarded` (409 ``onboarding_required``), :func:`require_admin` (403 ``forbidden``).
 * :func:`csrf_guard` — API.md §1: every non-GET ``/api/*`` request carries ``X-WD-Request: 1`` and, when an
   ``Origin`` header is present, it equals the request's own Host-derived origin or the origin of
@@ -156,6 +157,10 @@ def current_user(request: Request, conn: sqlite3.Connection = Depends(get_db)) -
     user = {k: row[k] for k in USER_COLUMNS}
     user["session_token_hash"] = token_hash
     request.state.user_id = user["id"]
+    if request.method.upper() not in SAFE_METHODS:  # DESIGN §10 "mutations 300/min per user" — one place for every authenticated route
+        from . import security  # security imports this module (SESSION_COOKIE, hash_token), so resolve the cycle at call time
+
+        security.throttle_mutation(conn, int(user["id"]), now_dt)
     return user
 
 

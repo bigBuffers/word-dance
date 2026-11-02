@@ -4,6 +4,7 @@
 * ``POST /api/account/password``: verifies the current password, applies the policy, revokes every other session.
 * ``DELETE /api/account``: password check, last-admin guard, cascade; a private word created by the user is deleted
   only when no other user's ``user_words`` row references it (checked after the cascade, same transaction).
+  Both password checks share ``security.verify_account_password`` (10 attempts per 15 min per user → 429).
 * ``POST /api/account/email/request-code`` / ``verify``: 6-digit HMAC'd codes through ``app.state.mailer``.
 * ``GET /api/account/export?format=csv|json``: the 14-column bank export (+ 365 days of ``review_logs`` in JSON).
 """
@@ -78,8 +79,7 @@ def update_account(body: AccountUpdateRequest, request: Request, user: dict[str,
 @router.post("/api/account/password", status_code=204)
 def change_password(body: PasswordChangeRequest, request: Request, user: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)):
     now = request.app.state.clock.now_utc()
-    if not security.verify_password(body.current_password, user["password_hash"]):
-        raise ApiError("invalid_credentials")
+    security.verify_account_password(conn, user, body.current_password, now=now)  # 429 / 401; outside any transaction so a wrong guess stays counted
     security.check_password(body.new_password, user["username"])
     security.set_password(conn, int(user["id"]), security.hash_password(body.new_password), now, keep_token_hash=user["session_token_hash"])
     log.info("password changed", extra={"event": "password_change", "user_id": user["id"]})
@@ -89,9 +89,9 @@ def change_password(body: PasswordChangeRequest, request: Request, user: dict[st
 @router.delete("/api/account", status_code=204)
 def delete_account(body: AccountDeleteRequest, request: Request, user: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)):
     cfg: Settings = request.app.state.settings
-    now_iso = to_iso(request.app.state.clock.now_utc())
-    if not security.verify_password(body.password, user["password_hash"]):
-        raise ApiError("invalid_credentials")
+    now = request.app.state.clock.now_utc()
+    now_iso = to_iso(now)
+    security.verify_account_password(conn, user, body.password, now=now)  # 429 / 401; outside any transaction so a wrong guess stays counted
     user_id = int(user["id"])
     with db.tx(conn):
         if security.is_last_active_admin(conn, user):

@@ -341,6 +341,63 @@ def test_password_change_revokes_other_sessions(client: TestClient, app):
     assert other.post("/api/auth/login", json={"username": "alice", "password": "New-Pass-Word-9"}).status_code == 200
 
 
+def test_password_rechecks_are_throttled_per_user(client: TestClient, app, settings, frozen_clock):
+    """API.md 7–8: a stolen session cookie must not allow unlimited online guessing of the account password."""
+    alice = register(client, "alice")["user"]  # admin
+    bob_c = second_client(app)
+    bob = register(bob_c, "bob")["user"]
+    key = f"pwcheck:user:{alice['id']}"
+    for _ in range(10):
+        r = client.post("/api/account/password", json={"current_password": "wrong-password-1", "new_password": "New-Pass-Word-9"})
+        assert r.status_code == 401 and error_code(r) == "invalid_credentials"
+    assert count(settings, "auth_throttle", "key = ? AND count = 10", (key,)) == 1  # the failed attempts are committed
+    r = client.post("/api/account/password", json={"current_password": PW, "new_password": "New-Pass-Word-9"})  # the 11th, even with the right password
+    assert r.status_code == 429 and error_code(r) == "rate_limited"
+    assert r.headers["Retry-After"] == "900" and r.json()["error"]["details"]["retry_after_s"] == 900
+    r = client.request("DELETE", "/api/account", json={"password": PW})  # both re-checks share the budget
+    assert r.status_code == 429 and error_code(r) == "rate_limited"
+    assert client.get("/api/auth/me").status_code == 200  # the session itself is unaffected …
+    assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200  # … and login has its own lockout
+    frozen_clock.advance(minutes=15)
+    r = client.post("/api/account/password", json={"current_password": PW, "new_password": "New-Pass-Word-9"})
+    assert r.status_code == 204
+    assert count(settings, "auth_throttle", "key = ?", (key,)) == 0  # cleared by the successful check
+    # a typo never accumulates: every correct password resets the counter
+    assert client.post("/api/account/password", json={"current_password": "typo-password-1", "new_password": PW}).status_code == 401
+    assert client.post("/api/account/password", json={"current_password": "New-Pass-Word-9", "new_password": PW}).status_code == 204
+    assert count(settings, "auth_throttle", "key = ?", (key,)) == 0
+    # DELETE /api/account draws on the same budget (bob is not the last admin)
+    for _ in range(10):
+        r = bob_c.request("DELETE", "/api/account", json={"password": "wrong-password-1"})
+        assert r.status_code == 401 and error_code(r) == "invalid_credentials"
+    r = bob_c.request("DELETE", "/api/account", json={"password": PW})
+    assert r.status_code == 429 and r.json()["error"]["details"]["retry_after_s"] == 900
+    assert count(settings, "users", "id = ?", (bob["id"],)) == 1  # nothing deleted
+    frozen_clock.advance(minutes=15)
+    assert bob_c.request("DELETE", "/api/account", json={"password": PW}).status_code == 204
+    assert count(settings, "users", "id = ?", (bob["id"],)) == 0
+
+
+def test_mutations_are_throttled_300_per_minute_per_user(client: TestClient, app, settings, frozen_clock):
+    """DESIGN §10: every authenticated non-GET request counts; reads and other users are unaffected."""
+    alice = register(client, "alice")["user"]
+    bob_c = second_client(app)
+    register(bob_c, "bob")
+    for i in range(300):
+        assert client.put("/api/account", json={"display_name": f"n{i}"}).status_code == 200
+    r = client.put("/api/account", json={"display_name": "n300"})
+    assert r.status_code == 429 and error_code(r) == "rate_limited"
+    assert r.headers["Retry-After"] == "60" and r.json()["error"]["details"]["retry_after_s"] == 60
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200 and me.json()["user"]["display_name"] == "n299"  # reads pass; the refused write never landed
+    r = client.post("/api/account/password", json={"current_password": PW, "new_password": "New-Pass-Word-9"})
+    assert r.status_code == 429  # any authenticated non-GET route
+    assert bob_c.put("/api/account", json={"display_name": "bob2"}).status_code == 200  # per user
+    assert count(settings, "auth_throttle", "key = ? AND count = 300", (f"mutate:user:{alice['id']}",)) == 1
+    frozen_clock.advance(minutes=1)
+    assert client.put("/api/account", json={"display_name": "n300"}).status_code == 200
+
+
 def test_update_account_display_name_and_email(client: TestClient, app, settings):
     alice = register(client, "alice")["user"]
     register(second_client(app), "bob", email="bob@example.com")
