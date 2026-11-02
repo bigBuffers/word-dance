@@ -524,6 +524,36 @@ def test_hourly_gc(settings, seeded):
     assert tick(conn, settings, now + timedelta(hours=1)).gc is True
 
 
+def test_hourly_gc_expires_timed_out_open_suggestions(settings, seeded, caplog):
+    """CLAUDE_INTEGRATION §6.6: an open suggestion past its 30-day expires_at is swept to `expired` by the hourly GC for
+    every user — not only inside a nightly consolidate job, which runs for onboarded users whose bank needs one. Live
+    open rows and `auto` rows (which merely lose their undo) are untouched."""
+    conn = seeded
+    uid = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z")
+    uw = mark(conn, uid, "abandon", "2026-10-14T00:00:00Z").user_word_id
+
+    def suggest(expires_at: str, status: str = "open") -> int:
+        return int(
+            conn.execute(
+                "INSERT INTO bank_suggestions(user_id, type, user_word_id, payload_json, status, expires_at, created_at) VALUES (?, 'fix_spelling', ?, '{}', ?, ?, '2026-09-13T00:00:00Z') RETURNING id",
+                (uid, uw, status, expires_at),
+            ).fetchone()[0]
+        )
+
+    stale, live, auto = suggest("2026-10-13T00:00:00Z"), suggest("2026-11-13T00:00:00Z"), suggest("2026-10-13T00:00:00Z", "auto")
+    now = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
+    with caplog.at_level(logging.INFO, logger="wd.jobs.scheduler"):
+        assert tick(conn, settings, now).gc is True
+    rows = {int(r[0]): (r[1], r[2]) for r in conn.execute("SELECT id, status, resolved_at FROM bank_suggestions")}
+    assert rows == {stale: ("expired", "2026-10-14T01:00:00Z"), live: ("open", None), auto: ("auto", None)}
+    assert [r.getMessage() for r in caplog.records if getattr(r, "event", None) == "suggestions_expired"] == ["expired 1 timed-out open suggestion(s)"]
+    # idempotent: the next hour finds nothing and logs nothing
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="wd.jobs.scheduler"):
+        assert tick(conn, settings, now + timedelta(hours=1)).gc is True
+    assert not [r for r in caplog.records if getattr(r, "event", None) == "suggestions_expired"]
+
+
 # -------------------------------------------------------------------------------------------- thread
 def test_scheduler_thread_start_stop(settings, connect, frozen_clock, seeded):
     cfg = dataclasses.replace(settings, tick_seconds=1)
