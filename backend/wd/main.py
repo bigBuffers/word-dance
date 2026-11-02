@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import html
 import logging
 import os
 import socket
@@ -227,7 +228,16 @@ class WdMiddleware:
 
 # ------------------------------------------------------------------------------------------- SPA
 def _mount_spa(app: FastAPI, cfg: Settings) -> None:
+    # Settings.from_env resolved WD_FRONTEND_DIST, so an installed service serves the snapshot its `$WD_DATA_DIR/frontend`
+    # symlink pointed at when it started (DEPLOY §1/§10): install.sh's later publish is picked up at the next restart.
     dist = cfg.frontend_dist
+    if not (dist / "index.html").is_file():
+        log.warning(
+            "frontend not found: %s has no index.html — installed service: deploy/install.sh publishes it under "
+            "$WD_DATA_DIR/frontend (restart afterwards); dev checkout: cd frontend && npm ci && npm run build. "
+            "The SPA answers 503 until then",
+            dist,
+        )
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str):
@@ -250,7 +260,9 @@ def _mount_spa(app: FastAPI, cfg: Settings) -> None:
             return FileResponse(index, headers={"Cache-Control": "no-cache"})
         return HTMLResponse(
             "<!doctype html><meta charset='utf-8'><title>word-Dance</title>"
-            "<p>前端尚未构建 — run <code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code>; the API is up at <code>/api/health</code>.</p>",
+            f"<p>前端尚未构建 — <code>WD_FRONTEND_DIST={html.escape(str(dist))}</code> has no <code>index.html</code>. "
+            "Installed service: run <code>deploy/install.sh</code> (it publishes the SPA under <code>$WD_DATA_DIR/frontend</code>) and restart; "
+            "dev checkout: <code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code>. The API is up at <code>/api/health</code>.</p>",
             status_code=503,
             headers={"Cache-Control": "no-store"},
         )

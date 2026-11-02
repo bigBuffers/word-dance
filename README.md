@@ -74,7 +74,7 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 | 路径 | 说明 |
 |---|---|
 | `backend/` | FastAPI 后端：`wd` 包（API 路由、服务层、SQLite 迁移、任务队列与调度、Claude 与图片管线、备份、`wd` 命令行）及 pytest 测试 |
-| `frontend/` | React + TypeScript 单页应用（Vite）；构建产物 `frontend/dist` 由后端直接提供 |
+| `frontend/` | React + TypeScript 单页应用（Vite）；构建产物由后端直接提供——开发时为 `frontend/dist`，安装后由 `deploy/install.sh` 构建到数据目录的版本化快照 `frontend-releases/<sha>` 并以符号链接 `frontend` 原子发布，仓库内的构建不会影响线上页面 |
 | `data/` | 随仓库分发的压缩词汇种子 `seed/vocab.jsonl.gz`（9,162 词）、统计 `seed/stats.json`、数据来源说明与 ECDICT 许可证文本 |
 | `scripts/` | `build_seed.py`（从 ECDICT 与大纲词表重建种子）、`smoke.py`（端到端冒烟测试）、`dev.sh`（开发服务器） |
 | `deploy/` | `install.sh`、`fetch_ecdict.sh`、systemd 单元（服务 + 每夜备份定时器）、`env.example`、Caddy / nginx 示例配置 |
