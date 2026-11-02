@@ -206,16 +206,37 @@ def test_ai_calls_ledger_page(client: TestClient, seeded, admin):
     assert set(body["items"][0]) == {"id", "kind", "status", "model_requested", "model_used", "flag_tier", "word_count", "cost_usd", "duration_ms", "input_tokens", "output_tokens", "error", "started_at"}
 
 
-def test_pause_and_resume(client: TestClient, seeded, admin, settings):
+def test_pause_and_resume(client: TestClient, seeded, admin, settings, ctx, frozen_clock):
+    """CLAUDE_INTEGRATION §7: the manual pause is the ``paused_until`` guard (jobs defer, AI resumes when it elapses) —
+    not the kill switch, which used to be set as well and kept the worker idle after the returned ``paused_until``."""
+    from wd.ai import budget
+    from wd.clock import to_iso
+
     r = client.post("/api/admin/ai/pause", json={"paused": True})
     assert r.status_code == 200 and r.json() == {"paused": True, "paused_until": "2026-10-15T00:00:00Z"}
-    assert db.kv_get(seeded, "claude.enabled") == "0" and db.kv_get(seeded, "claude.paused_until") == "2026-10-15T00:00:00Z"
-    assert client.get("/api/admin/overview").json()["ai"]["enabled"] is False
+    assert db.kv_get(seeded, "claude.enabled") is None and db.kv_get(seeded, "claude.paused_until") == "2026-10-15T00:00:00Z"
+    ai = client.get("/api/admin/overview").json()["ai"]
+    assert ai["enabled"] is True and ai["paused_until"] == "2026-10-15T00:00:00Z"
     assert client.post("/api/admin/content/prewarm", json={"stage": "cet4", "limit": 5, "max_budget_usd": 1}).json()["error"]["code"] == "ai_disabled"
+    assert budget.can_spend(seeded, "content", 1, 20, NOW, cfg=settings) == (False, "2026-10-15T00:00:00Z")
+    job = queue.enqueue(seeded, "generate_content", {"word_id": word_ids(seeded, 1)[0]}, dedupe_key="content:pause-test", now=NOW)
+    w = worker.ClaudeWorker(ctx)
+    assert w.gate() is None and w.step() is True  # the worker runs; the handler defers the job to the pause end
+    assert queue.get_job(seeded, job).status == "queued" and queue.get_job(seeded, job).run_after == "2026-10-15T00:00:00Z"
+    assert seeded.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 0
+    # the pause elapses by itself: nothing else to flip
+    frozen_clock.advance(hours=24, minutes=1)
+    later = to_iso(frozen_clock.now_utc())
+    assert budget.can_spend(seeded, "content", 1, 20, later, cfg=settings) == (True, None) and budget.ai_enabled(seeded, settings)
+    assert client.get("/api/admin/overview").json()["ai"] | {"paused_until": None, "enabled": True} == client.get("/api/admin/overview").json()["ai"]
+    assert w.step() is True and queue.get_job(seeded, job).status == "done"
+    # resume still works as the explicit way out (and lifts a hand-set kill switch)
+    client.post("/api/admin/ai/pause", json={"paused": True})
+    db.kv_set(seeded, "claude.enabled", "0")
     r = client.post("/api/admin/ai/pause", json={"paused": False})
     assert r.json() == {"paused": False, "paused_until": None}
     assert db.kv_get(seeded, "claude.enabled") == "1" and db.kv_get(seeded, "claude.paused_until") is None
-    assert [e["kind"] for e in client.get("/api/admin/events").json()["items"] if e["kind"].startswith("claude_")] == ["claude_resumed", "claude_paused"]
+    assert [e["kind"] for e in client.get("/api/admin/events").json()["items"] if e["kind"].startswith("claude_")] == ["claude_resumed", "claude_paused", "claude_paused"]
 
 
 def test_probe_endpoint_asserts_the_exact_probe_object(client: TestClient, seeded, admin):
@@ -323,6 +344,34 @@ def test_regenerate_uses_the_r_suffix_and_refetch_image_enqueues(client: TestCli
     assert seeded.execute("SELECT image_state FROM words WHERE id = ?", (wid,)).fetchone()[0] == "queued"
     assert client.post("/api/admin/words/999999/refetch-image", json={}).status_code == 404
     assert client.post(f"/api/admin/words/{wid}/refetch-image", json={"provider": "bing"}).status_code == 400
+
+
+def test_regenerate_keeps_the_live_content_visible_and_requeues_a_failed_word(client: TestClient, seeded, admin, ctx):
+    """API.md 68: a new version is produced in the background. Flipping a ``ready`` word to ``queued`` hid its examples
+    from every learner (「例句生成中…」, or the budget-exhausted copy all day when the forced job was deferred); the word
+    now keeps ``ready`` and its version until the forced job stores the next one."""
+    from wd.ai import content
+    from wd.services import words
+
+    ready, failed = word_ids(seeded, 2)
+    w = words.word_row(seeded, ready)
+    cleaned = {"word": w["display"], "valid": True, "meaning_zh": "n. 测试释义", "meaning_en": "a test", "examples": [{"en": f"We use {w['display']} here.", "zh": "例句"}], "collocations": [], "mnemonic_zh": "", "image_keywords": [w["lemma"]], "image_alt_zh": "", "difficulty": 3}
+    cid, _ = content.store_content(seeded, w, cleaned, model="m", cost_share=0.004, call_id=None, now=NOW, force=False)
+    r = client.post(f"/api/admin/words/{ready}/regenerate")
+    assert r.status_code == 202, r.text
+    row = words.word_row(seeded, ready)
+    assert (row["content_state"], row["active_content_id"]) == ("ready", cid)
+    body = client.get(f"/api/words/{ready}/content").json()
+    assert body["state"] == "ready" and body["content"]["version"] == 1 and body["deferred_until"] is None
+    assert client.get(f"/api/words/{ready}").json()["content_state"] == "ready"
+    worker.drain(ctx, ("generate_content",))  # the forced job regenerates regardless of the state
+    row = words.word_row(seeded, ready)
+    assert row["content_state"] == "ready" and row["active_content_id"] != cid and queue.get_job(seeded, r.json()["job_id"]).status == "done"
+    assert client.get(f"/api/words/{ready}/content").json()["content"]["version"] == 2
+    # a word whose content failed (or never existed) is queued by the same call, as before
+    seeded.execute("UPDATE words SET content_state = 'failed' WHERE id = ?", (failed,))
+    assert client.post(f"/api/admin/words/{failed}/regenerate").status_code == 202
+    assert words.word_row(seeded, failed)["content_state"] == "queued"
 
 
 # ---------------------------------------------------------------------------------- events / config

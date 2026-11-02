@@ -273,10 +273,14 @@ def reject_word(conn: sqlite3.Connection, word: Mapping[str, Any], meaning_zh: s
 
 
 def mark_failed(conn: sqlite3.Connection, word_id: int, *, now: str) -> None:
-    """``content_state='failed'`` unless content already exists (a dead regenerate job keeps the old version)."""
+    """The dead-job side effect: ``content_state='failed'`` for a word without content. A word that still has a live
+    version (a dead forced regenerate whose state had been moved off ``ready``) goes back to ``ready`` instead — keyed on
+    ``active_content_id``, not on the state string, so the old version stays visible and nothing re-spends on it. A
+    rejected word (``is_valid_english=0``) keeps ``failed`` even with a stale version."""
     with db.maybe_tx(conn):
         conn.execute(
-            "UPDATE words SET content_state = 'failed', updated_at = ? WHERE id = ? AND content_state != 'ready'",
+            "UPDATE words SET content_state = CASE WHEN active_content_id IS NOT NULL AND is_valid_english = 1 THEN 'ready' ELSE 'failed' END, updated_at = ? "
+            "WHERE id = ? AND content_state != 'ready'",
             (now, int(word_id)),
         )
 
@@ -365,7 +369,8 @@ def select_jobs(conn: sqlite3.Connection, jobs: list[Job], *, now: str) -> list[
 
 
 def handle_anomaly(ctx: JobContext, conn: sqlite3.Connection, job: Job, word: Mapping[str, Any], *, now: str) -> None:
-    """``valid=false`` on a seed word: event + one retry alone; a repeat leaves ``content_state='failed'`` (§6.4)."""
+    """``valid=false`` on a seed word: event + one retry alone; a repeat — or no attempt left for the retry — leaves
+    ``content_state='failed'`` (§6.4) so the word never sits at ``queued`` with no live job."""
     wid = int(word["id"])
     with db.maybe_tx(conn):
         common.system_event(conn, "content_anomaly", {"word_id": wid, "lemma": word["lemma"], "job_id": job.id, "repeat": bool(job.payload.get("anomaly"))}, now=now)
@@ -375,6 +380,11 @@ def handle_anomaly(ctx: JobContext, conn: sqlite3.Connection, job: Job, word: Ma
             return
         queue.requeue_group(conn, [job.id], 1, consume_attempt=True, error="content anomaly: valid=false on a seed word", now=now)
         conn.execute("UPDATE jobs SET payload_json = json_set(payload_json, '$.anomaly', 1) WHERE id = ?", (job.id,))
+        after = queue.get_job(conn, job.id)
+        if after is not None and after.status == "dead":
+            # the claim consumed the last attempt: requeue_group marked the job dead, so the dead-job side effect applies
+            # here too (the nightly dead-job requeue remains the word's one retry alone; payload.anomaly is kept)
+            mark_failed(conn, wid, now=now)
     ctx.log.warning("content anomaly for seed word %s (job %d)", word["lemma"], job.id, extra={"job_id": job.id, "job_type": job.type, "event": "content_anomaly"})
 
 

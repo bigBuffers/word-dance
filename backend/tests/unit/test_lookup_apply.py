@@ -24,6 +24,8 @@ TZ = "Asia/Shanghai"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 FAKE = FIXTURES.parent / "fake_claude.py"
 ITEMS = {it["input"]: it for it in json.loads((FIXTURES / "claude_lookup_ok.json").read_text(encoding="utf-8"))["structured_output"]["items"]}
+#: DESIGN §3.2: a live headword is never also a word_forms value (the merge's `alt` row of a merged word is the one exception)
+HEADWORD_GUARD = "SELECT COUNT(*) FROM word_forms wf JOIN words w ON w.lemma = wf.form AND w.merged_into_word_id IS NULL"
 
 
 @pytest.fixture
@@ -163,6 +165,107 @@ def test_unvalidatable_headword_keeps_the_word_as_typed_with_a_suggestion_only(s
     out = lookup.apply_item(seeded, words.word_row(seeded, prov3), {**item, "input": "abstractify", "headword": "abstractified"}, now=NOW)
     assert out["outcome"] == "renamed" and words.word_row(seeded, prov3)["lemma"] == "abstractified"
     assert seeded.execute("SELECT word_id FROM word_forms WHERE form = 'abstractify'").fetchone()[0] == prov3
+    assert seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
+
+
+def test_a_headword_that_is_only_a_known_form_merges_into_its_lemma_instead_of_shadowing_it(seeded, alice):
+    """alice types `childs`; Claude answers headword `children`, which the seed knows only as a form of `child`. Renaming
+    the provisional row to `children` created a public Claude headword that hijacked child's form resolution for every
+    user (DESIGN §3.2 invariant); the §5.2 form step runs before any rename, so the row merges into `child`."""
+    bob = make_user(seeded, "bob")
+    child = wid(seeded, "child")
+    prov = add(seeded, alice, "childs")
+    assert (words.resolve(seeded, "children", "children", "word", bob).via, words.resolve(seeded, "children", "children", "word", bob).word_id) == ("form", child)
+    item = {**ITEMS["went"], "input": "childs", "headword": "children", "form_note_zh": "child 的复数", "meaning_zh": "孩子们", "definition_en": "plural of child"}
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov), item, now=NOW)
+    assert out["outcome"] == "merged" and out["word_id"] == child
+    w = words.word_row(seeded, prov)
+    assert w["merged_into_word_id"] == child and w["lemma"] == "childs" and w["is_public"] == 0
+    assert bank.my_row(seeded, alice, child)["state"] == "new" and bank.my_row(seeded, alice, prov) is None
+    assert tuple(seeded.execute("SELECT word_id, kind FROM word_forms WHERE form = 'childs'").fetchone()) == (child, "alt")
+    assert wid(seeded, "children") is None and seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
+    res = words.resolve(seeded, "children", "children", "word", bob)
+    assert (res.via, res.word_id) == ("form", child)  # every user still lands on the seed word
+    assert json.loads(seeded.execute("SELECT payload_json FROM bank_suggestions WHERE type = 'lemmatize'").fetchone()[0])["note_zh"] == "child 的复数"
+    # without Claude's note the §5.2 lemma note is used; a form target that is itself merged is followed
+    prov2 = add(seeded, alice, "studys")
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov2), {**item, "input": "studys", "headword": "studies", "form_note_zh": ""}, now=NOW)
+    assert out["outcome"] == "merged" and out["word_id"] == wid(seeded, "study")
+    assert json.loads(seeded.execute("SELECT payload_json FROM bank_suggestions WHERE user_word_id = (SELECT id FROM user_words WHERE user_id = ? AND word_id = ?)", (alice, wid(seeded, "study"))).fetchone()[0])["note_zh"] == "已归为原形 study（第三人称单数）"
+    # the guard inside rename_word itself: a form of another live word is never made a headword
+    prov3 = add(seeded, alice, "goed")
+    before = words.word_row(seeded, prov3)
+    assert lookup.rename_word(seeded, before, words.normalise_input("goes"), now=NOW) is None
+    assert words.word_row(seeded, prov3) == before and seeded.execute("SELECT COUNT(*) FROM word_forms WHERE form = 'goed'").fetchone()[0] == 0
+    assert seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
+
+
+def test_a_headword_that_is_an_ambiguous_form_is_kept_as_typed_with_a_suggestion(seeded, alice):
+    """`axes` is a form of ax, axe and axis in the seed: there is no unique merge target and no headword may be created
+    for it, so the row is handled like an unvalidatable headword (kept as typed, open fix_spelling suggestion)."""
+    prov = add(seeded, alice, "axess")
+    assert words.resolve(seeded, "axes", "axes", "word", alice).ambiguous
+    item = {**ITEMS["GDP"], "input": "axess", "kind": "word", "headword": "axes", "phonetic": "", "pos": "n.", "meaning_zh": "斧头（复数）", "definition_en": "plural of ax", "note_zh": "拼写错误"}
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov), item, now=NOW)
+    assert out["outcome"] == "kept" and out["suggestions"] == 1
+    w = words.word_row(seeded, prov)
+    assert w["lemma"] == "axess" and w["merged_into_word_id"] is None and w["is_valid_english"] == 1 and w["translation"] == "斧头（复数）"
+    assert wid(seeded, "axes") is None and words.resolve(seeded, "axes", "axes", "word", alice).ambiguous
+    s = db.row_to_dict(seeded.execute("SELECT * FROM bank_suggestions").fetchone())
+    assert s["type"] == "fix_spelling" and s["status"] == "open" and json.loads(s["payload_json"])["to"] == "axes"
+    assert seeded.execute(HEADWORD_GUARD).fetchone()[0] == 0
+
+
+def test_a_correction_after_a_merge_flags_only_the_rows_that_were_repointed(seeded, alice):
+    """alice adds `runing`; Claude: headword `run` (merge) and suggested_correction `running`. bob and carol simply hold
+    `run` and must not get a 「是否改为 “running”？」 flag whose 替换 button would swap their correct word."""
+    bob, carol = make_user(seeded, "bob"), make_user(seeded, "carol")
+    run, running = wid(seeded, "run"), wid(seeded, "running")
+    for uid in (bob, carol):
+        bank.apply_action(seeded, uid, run, "unfamiliar", origin="browse", context="browse", now=NOW, tz=TZ)
+    seeded.execute("UPDATE user_words SET state = 'learning' WHERE user_id = ? AND word_id = ?", (carol, run))
+    prov = add(seeded, alice, "runing")
+    item = {**ITEMS["went"], "input": "runing", "headword": "run", "form_note_zh": "", "suggested_correction": "running"}
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov), item, now=NOW)
+    assert out["outcome"] == "merged" and out["word_id"] == run and out["suggested_word_id"] == running
+    mine = bank.my_row(seeded, alice, run)
+    assert mine["needs_attention"] == 1 and mine["suggested_word_id"] == running and mine["attention_msg"] == "是否改为 “running”？"
+    for uid in (bob, carol):
+        other = bank.my_row(seeded, uid, run)
+        assert (other["needs_attention"], other["suggested_word_id"], other["attention_msg"]) == (0, None, None)
+        assert bank.attention_count(seeded, uid) == 0
+    assert bank.attention_count(seeded, alice) == 1
+    # without a merge the typed string's own holders are flagged as before
+    prov2 = add(seeded, alice, "recievee")
+    bank.apply_action(seeded, bob, prov2, "add_custom", origin="custom", context="api", input_text="recievee", now=NOW, tz=TZ)
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov2), {**ITEMS["recieve"], "input": "recievee", "headword": "recievee"}, now=NOW)
+    assert out["outcome"] == "filled" and out["suggested_word_id"] == wid(seeded, "receive")
+    assert all(bank.my_row(seeded, uid, prov2)["suggested_word_id"] == wid(seeded, "receive") for uid in (alice, bob))
+
+
+def test_merging_into_a_still_unvalidated_target_publishes_it(seeded, alice):
+    """bob's `zzqfoos` is merged into alice's provisional `zzqfoo` before alice's own lookup ran. Claude vouched for the
+    headword, so the target becomes public (DESIGN §5.2) — its own job is then skipped as already_validated, which used
+    to leave it valid but private for ever."""
+    bob, carol = make_user(seeded, "bob"), make_user(seeded, "carol")
+    target = add(seeded, alice, "zzqfoo")
+    prov = add(seeded, bob, "zzqfoos")
+    assert not words.is_visible(seeded, target, carol)
+    item = {**ITEMS["GDP"], "input": "zzqfoos", "kind": "word", "headword": "zzqfoo", "phonetic": "", "pos": "n.", "meaning_zh": "测试词", "definition_en": "a test word", "safe_for_sharing": True}
+    out = lookup.apply_item(seeded, words.word_row(seeded, prov), item, now=NOW)
+    assert out["outcome"] == "merged" and out["word_id"] == target and out["content_job_id"] is not None
+    t = words.word_row(seeded, target)
+    assert (t["is_valid_english"], t["safe_for_sharing"], t["is_public"], t["source"], t["kind"]) == (1, 1, 1, "claude", "word")
+    assert t["translation"] == "测试词" and words.is_visible(seeded, target, carol)
+    jobs = claim_lookups(seeded)
+    assert lookup.select_jobs(seeded, jobs, now=NOW) == []  # alice's own job is harmlessly skipped
+    assert sorted(queue.get_job(seeded, j.id).result["skipped"] for j in jobs) == ["already_validated", "merged"]
+    # an unsafe verdict keeps the target private; a merge into an already public headword never touches its is_public
+    target2, prov2 = add(seeded, alice, "zzqbar"), add(seeded, bob, "zzqbars")
+    lookup.apply_item(seeded, words.word_row(seeded, prov2), {**item, "input": "zzqbars", "headword": "zzqbar", "safe_for_sharing": False}, now=NOW)
+    t2 = words.word_row(seeded, target2)
+    assert (t2["is_valid_english"], t2["safe_for_sharing"], t2["is_public"]) == (1, 0, 0)
+    assert words.word_row(seeded, wid(seeded, "go"))["is_public"] == 1
 
 
 def test_dead_lookup_job_flags_the_holders_and_a_retry_clears_the_flag(seeded, alice, ctx):

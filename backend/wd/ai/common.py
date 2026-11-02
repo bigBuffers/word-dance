@@ -4,7 +4,8 @@
   says no — never an attempt consumed) and run ``claude`` once for the group.
 * :func:`handle_failure` — the §6.3 outcome table for a failed group: ``budget`` → bisection, ``error`` /
   ``invalid_output`` / ``timeout`` → backoff then bisection, ``overloaded`` → deferral (+ 15-min pause after six
-  in a row), ``auth`` / ``spawn_error`` → 30-min pause + ``system_events`` + jobs stay queued.
+  in a row), ``auth`` / ``spawn_error`` (the binary is missing or unusable — an oversized argv is an ordinary
+  ``error``, see ``runner``) → 30-min pause + ``system_events`` + jobs stay queued.
 * text post-validation helpers (control characters and HTML tags stripped; ``http://`` / ``https://`` /
   ``<script`` rejected; CJK / ASCII checks) used by content, lookup and consolidate.
 """
