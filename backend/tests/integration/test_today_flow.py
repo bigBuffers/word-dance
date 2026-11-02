@@ -248,7 +248,77 @@ def test_again_then_left_alone_is_still_listed_tomorrow(client: TestClient, sett
     built = client.post("/api/today/build").json()
     review = items_by_kind(built, "review")
     assert [i["word"]["id"] for i in review] == [w] and review[0]["mine"]["srs"]["step"] == 1  # still due: due_at = +10 min < day end
-    assert built["previous_open_batch"]["remaining"] == 1
+    # today's row supersedes yesterday's copy: one gradable card per word, so 继续昨天的学习 has nothing left to offer
+    assert built["previous_open_batch"] is None
+    y = client.get(f"/api/batches/{today['batch']['id']}").json()
+    assert y["batch"]["gradable"] is False and card["item_id"] not in [i["item_id"] for i in y["batch"]["items"]]
+    r = client.post(f"/api/today/items/{card['item_id']}/grade", json={"client_event_id": str(uuid.uuid4()), "grade": "good"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "invalid_transition" and r.json()["error"]["details"]["reason"] == "superseded_item"
+    assert grade(client, review[0]["item_id"], "good")["item"]["result"] == "good"  # graduates from its step in today's batch
+
+
+def test_skipped_day_leftovers_are_one_gradable_card_in_todays_batch(client: TestClient, settings, frozen_clock, alice):
+    """A day skipped entirely: yesterday's ungraded cards are re-selected today and studied ONCE (today's copy);
+    yesterday's copies are superseded (hidden, 409), so one exposure can never be graded twice and 1 d → 3 d takes two days."""
+    ids = {l: word_id(settings, l) for l in ("apple", "bank", "cat")}
+    for wid in ids.values():
+        mark(client, wid)
+    day1 = client.post("/api/today/build").json()
+    b1 = day1["batch"]["id"]
+    y_items = {i["word"]["id"]: i for i in items_by_kind(day1, "new")}
+    assert set(y_items) == set(ids.values())
+    frozen_clock.advance(days=1)  # 2026-10-15 09:00 local, nothing graded yesterday
+    before = client.get("/api/today").json()
+    assert before["status"] == "none" and before["previous_open_batch"] == {"id": b1, "local_date": "2026-10-14", "remaining": 3}
+    day2 = client.post("/api/today/build").json()
+    t_items = {i["word"]["id"]: i for i in items_by_kind(day2, "new")}
+    assert set(t_items) == set(ids.values()) and all(i["result"] is None for i in t_items.values())  # reappear tomorrow (DESIGN §6.3)
+    assert day2["previous_open_batch"] is None  # every leftover moved to today's batch
+    y = client.get(f"/api/batches/{b1}").json()
+    assert y["batch"]["gradable"] is False and y["batch"]["counts"]["new"] == 0 and y["batch"]["counts"]["total"] == y["batch"]["counts"]["screen"]
+    assert not any(i["kind"] == "new" for i in y["batch"]["items"])
+    r = client.post(f"/api/today/items/{y_items[ids['apple']]['item_id']}/grade", json={"client_event_id": str(uuid.uuid4()), "grade": "good"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "invalid_transition" and r.json()["error"]["details"]["reason"] == "superseded_item"
+    # today's copy is the single gradable row: good → step → good graduates to 1 day
+    apple_t = t_items[ids["apple"]]["item_id"]
+    assert grade(client, apple_t, "good")["item"]["result"] is None
+    frozen_clock.advance(minutes=10)
+    g = grade(client, apple_t, "good")
+    assert g["item"]["result"] == "good" and g["next_due_zh"] == "明天" and g["mine"]["srs"]["interval_days"] == 1 and g["mine"]["srs"]["repetitions"] == 2
+    assert q1(settings, "SELECT COUNT(*) FROM review_logs WHERE user_id = ? AND word_id = ? AND action IN ('again','hard','good','master')", (alice, ids["apple"])) == 2
+    assert qrows(settings, "SELECT graded, good FROM daily_stats WHERE user_id = ? AND local_date = '2026-10-15'", (alice,)) == [{"graded": 2, "good": 2}]
+    # no further gradable row for apple anywhere today (yesterday's copy stays hidden, today's is final)
+    listed = client.get("/api/today").json()
+    assert [i["result"] for i in listed["batch"]["items"] if i["word"]["id"] == ids["apple"]] == ["good"]
+    assert client.get(f"/api/batches/{b1}").json()["batch"]["gradable"] is False
+    assert client.post(f"/api/today/items/{y_items[ids['apple']]['item_id']}/grade", json={"client_event_id": str(uuid.uuid4()), "grade": "good"}).status_code == 409
+    # the 3-day step comes only on the next review day
+    frozen_clock.advance(days=1)
+    day3 = client.post("/api/today/build").json()
+    (apple_r,) = [i for i in items_by_kind(day3, "review") if i["word"]["id"] == ids["apple"]]
+    g3 = grade(client, apple_r["item_id"], "good")
+    assert g3["item"]["result"] == "good" and g3["mine"]["srs"]["interval_days"] == 3 and g3["next_due_zh"] == "3 天后"
+
+
+def test_leftovers_beyond_todays_caps_stay_gradable_in_yesterdays_batch(client: TestClient, settings, frozen_clock, alice):
+    ids = {l: word_id(settings, l) for l in ("apple", "bank", "cat")}
+    for wid in ids.values():
+        mark(client, wid)
+    day1 = client.post("/api/today/build").json()
+    b1 = day1["batch"]["id"]
+    assert len(items_by_kind(day1, "new")) == 3
+    frozen_clock.advance(days=1)
+    run(settings, "UPDATE user_settings SET daily_new_count = 2 WHERE user_id = ?", (alice,))  # today re-selects only two of the three
+    day2 = client.post("/api/today/build").json()
+    picked = {i["word"]["id"] for i in items_by_kind(day2, "new")}
+    assert len(picked) == 2 and picked < set(ids.values())
+    (left,) = set(ids.values()) - picked
+    assert day2["previous_open_batch"] == {"id": b1, "local_date": "2026-10-14", "remaining": 1}
+    y = client.get(f"/api/batches/{b1}").json()
+    assert y["batch"]["gradable"] is True and [i["word"]["id"] for i in y["batch"]["items"] if i["kind"] == "new"] == [left]
+    left_item = next(i for i in items_by_kind(day1, "new") if i["word"]["id"] == left)
+    assert grade(client, left_item["item_id"], "master")["item"]["result"] == "master"  # the word nobody re-selected is studied where it is
+    assert client.get("/api/today").json()["previous_open_batch"] is None
 
 
 def test_stale_items_are_hidden_and_refuse_grades_until_restored(client: TestClient, settings, frozen_clock, alice):

@@ -116,20 +116,22 @@ def history(conn: sqlite3.Connection, user_id: int, from_date: date, to_date: da
 
 
 def heatmap(conn: sqlite3.Connection, user_id: int, today: date, days: int = HEATMAP_DAYS) -> list[dict[str, Any]]:
-    """``Stats.heatmap``: the last ``days`` local days (ascending) with ``graded`` and ``goal_met``."""
+    """``Stats.heatmap``: the last ``days`` local days (ascending) with ``graded`` and ``goal_met``.
+
+    ``goal_met`` is the API.md §9.1 predicate shared with ``TodayResponse.goal_met`` / ``complete_session``
+    (``completed_at`` set, or every non-stale study item final — ``batches.goal_met`` over ``visible_items``), so a
+    card marked 已掌握 from the 词库 page (stale, hidden) never leaves the heat strip disagreeing with the 今日 page.
+    """
     uid = int(user_id)
     start = today - timedelta(days=days - 1)
     graded = {str(r[0]): int(r[1]) for r in conn.execute("SELECT local_date, graded FROM daily_stats WHERE user_id = ? AND local_date BETWEEN ? AND ?", (uid, start.isoformat(), today.isoformat()))}
     met: dict[str, bool] = {}
     for r in _rows(
         conn,
-        "SELECT pb.local_date, pb.completed_at, "
-        "(SELECT COUNT(*) FROM push_items pi WHERE pi.batch_id = pb.id AND pi.kind IN ('review','new','extra')) AS study_total, "
-        "(SELECT COUNT(*) FROM push_items pi WHERE pi.batch_id = pb.id AND pi.kind IN ('review','new','extra') AND pi.result IS NOT NULL) AS study_done "
-        "FROM push_batches pb WHERE pb.user_id = ? AND pb.local_date BETWEEN ? AND ?",
+        "SELECT id, local_date, completed_at FROM push_batches WHERE user_id = ? AND local_date BETWEEN ? AND ?",
         (uid, start.isoformat(), today.isoformat()),
     ):
-        met[str(r["local_date"])] = r["completed_at"] is not None or (int(r["study_total"]) > 0 and int(r["study_done"]) == int(r["study_total"]))
+        met[str(r["local_date"])] = r["completed_at"] is not None or batches.goal_met(batches.visible_items(conn, uid, int(r["id"])))
     out = []
     d = start
     while d <= today:

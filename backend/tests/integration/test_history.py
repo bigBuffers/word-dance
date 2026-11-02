@@ -89,8 +89,11 @@ def test_history_days_streak_heatmap_batches_and_stats(client: TestClient, setti
     assert list(days) == ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"]
     assert (days["2026-10-10"]["graded"], days["2026-10-10"]["mastered"], days["2026-10-10"]["added"], days["2026-10-10"]["study_minutes"]) == (2, 2, 2, 1)
     assert (days["2026-10-10"]["batch_id"], days["2026-10-10"]["batch_total"], days["2026-10-10"]["batch_done"]) == (d1["batch"]["id"], 2, 2)
-    assert (days["2026-10-11"]["graded"], days["2026-10-11"]["good"], days["2026-10-11"]["batch_done"], days["2026-10-11"]["batch_total"]) == (1, 1, 0, 1)
+    # `cat` (the only card of 10-11, still in its step) was re-selected into 10-14's batch as a review: its 10-11 copy is
+    # superseded (DESIGN §6.3) and no longer counted there — the card moved to today, where it is the single gradable row
+    assert (days["2026-10-11"]["graded"], days["2026-10-11"]["good"], days["2026-10-11"]["batch_done"], days["2026-10-11"]["batch_total"]) == (1, 1, 0, 0)
     assert days["2026-10-11"]["batch_id"] == d2["batch"]["id"]  # apple/bank are mastered → no reviews; `cat` is the only (new) card, still in its step
+    assert [i["word"]["id"] for i in d4["batch"]["items"] if i["kind"] == "review"] == [word_id(settings, "cat")]
     assert days["2026-10-12"]["batch_id"] is None and days["2026-10-12"]["offline"] is True
     assert days["2026-10-13"]["batch_id"] is None and days["2026-10-13"]["offline"] is True
     assert days["2026-10-11"]["offline"] is False and days["2026-10-14"]["offline"] is False and days["2026-10-09"]["offline"] is False
@@ -118,6 +121,30 @@ def test_history_days_streak_heatmap_batches_and_stats(client: TestClient, setti
     assert [b["local_date"] for b in p2["items"]] == ["2026-10-10"] and p2["items"][0]["completed_at"] is not None and p2["items"][0]["counts"]["done"] == 2
     one = client.get(f"/api/batches/{d1['batch']['id']}").json()
     assert one["batch"]["gradable"] is False and one["batch"]["counts"]["done"] == 2 and one["local_date"] == "2026-10-10"
+
+
+def test_heatmap_goal_met_shares_the_stale_aware_predicate_of_today(client: TestClient, settings, frozen_clock, alice):
+    """Two cards mastered in the session, the third marked 已掌握 from the 词库 page (stale, hidden) and no
+    POST /today/complete: the heat strip must say what the 今日 page and DayStats say — the goal was met."""
+    for lemma in ("apple", "bank", "cat"):
+        assert client.post(f"/api/words/{word_id(settings, lemma)}/mark", json={"action": "unfamiliar"}).status_code == 200
+    today = client.post("/api/today/build").json()
+    cards = [i for i in today["batch"]["items"] if i["kind"] == "new"]
+    assert len(cards) == 3
+    for item in cards[:2]:
+        r = client.post(f"/api/today/items/{item['item_id']}/grade", json={"client_event_id": str(uuid.uuid4()), "grade": "master", "elapsed_ms": 3000})
+        assert r.status_code == 200, r.text
+    assert client.post(f"/api/words/{cards[2]['word']['id']}/mark", json={"action": "mastered", "context": "bank"}).status_code == 200
+    t = client.get("/api/today").json()
+    assert t["goal_met"] is True and (t["batch"]["counts"]["done"], t["batch"]["counts"]["total"]) == (2, 2) and t["batch"]["completed_at"] is None
+    s = client.get("/api/stats").json()
+    assert s["heatmap"][-1]["date"] == "2026-10-10" and s["heatmap"][-1]["goal_met"] is True and s["today"] == {"done": 2, "total": 2}
+    h = client.get("/api/history?from=2026-10-10&to=2026-10-10").json()["days"][0]
+    assert (h["batch_done"], h["batch_total"]) == (2, 2)
+    frozen_clock.advance(days=3)  # the cell stays lit later on, completed_at never having been written
+    heat = {d["date"]: d for d in client.get("/api/stats").json()["heatmap"]}
+    assert heat["2026-10-10"]["goal_met"] is True
+    assert client.get(f"/api/batches/{today['batch']['id']}").json()["batch"]["completed_at"] is None
 
 
 def test_history_range_validation(client: TestClient, settings, frozen_clock, alice):

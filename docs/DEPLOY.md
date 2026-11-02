@@ -365,7 +365,7 @@ Upgrade: `cd /home/sqin/word-Dance && git pull && deploy/install.sh` — deps, f
 | Fresh install, nobody can log in | `GET /api/health` → `needs_setup:true`; login page says 「尚无账号，首个注册的账号将成为管理员」 | open the site and register — the first account becomes admin without an invite code; or `wd create-admin` on the box |
 | Openverse 429 | provider cooldown in admin overview | nothing; Wikimedia continues; optionally register an Openverse app key |
 | Disk low | admin health `disk_free_bytes` | prune `images/` of words nobody studies (`wd images-prune --unused-days 365`, ops.md) or move `WD_DATA_DIR` |
-| Service down for days | first tick builds **today's** batches only; `downtime` event; history shows 「服务器离线」 | nothing |
+| Service down for days | first tick builds **today's** batches only (back before a user's push time → delivered at push time as usual; back after it → published at once, deliveries `skipped` when > 6 h late); `downtime` event; history shows 「服务器离线」 | nothing |
 | Restore needed | — | §5 |
 | Rotate secrets | — | edit `.env`, `sudo systemctl restart word-dance` |
 | Flag tier fell back to 0 | `claude_probe_fallback` event | inspect the stderr excerpt; upgrade the CLI or keep tier 0 (fully functional) |

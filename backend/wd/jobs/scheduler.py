@@ -8,7 +8,9 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   day_start(target_date))`` — a batch is always built on its own local day (push 01:00 → built from 00:00, never
   the evening before); publish exactly once at push time (conditional UPDATE); deliveries enqueued unless > 6 h
   late (``skipped``); ``next_push_at`` advanced once with the ``WHERE next_push_at = ?`` guard; catch-up after
-  downtime builds today only;
+  downtime builds today only — and when the service comes back on a later local day *before* that day's push
+  time, ``next_push_at`` is re-anchored to that instant (guarded) so today's batch is built in its normal window
+  and published + delivered at push time instead of being published at once with ``skipped`` deliveries;
 * ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, stale ``running`` jobs);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
 * 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, one requeue of dead
@@ -30,12 +32,12 @@ import threading
 import time as _time
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from .. import db
 from ..ai import budget
-from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, to_iso, zone
+from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, parse_push_time, to_iso, zone
 from ..services import bank, batches
 from . import lease, queue
 from .registry import JobContext
@@ -89,6 +91,12 @@ def build_from(next_push_at: datetime, tz: str, prebuild_hours: int, now: dateti
     return target, start
 
 
+def push_instant(local_day: date, tz: str, push_time: str) -> datetime:
+    """UTC instant of ``push_time`` on ``local_day`` in ``tz`` — built exactly like ``compute_next_push`` (DST-safe, ``fold=0``)."""
+    hour, minute = parse_push_time(push_time)
+    return datetime(local_day.year, local_day.month, local_day.day, hour, minute, tzinfo=zone(tz)).astimezone(timezone.utc)
+
+
 # -------------------------------------------------------------------------------------------- pushes
 def due_users(conn: sqlite3.Connection, now: datetime, prebuild_hours: int) -> list[dict[str, Any]]:
     horizon = to_iso(now + timedelta(hours=int(prebuild_hours)))
@@ -112,6 +120,21 @@ def process_user(conn: sqlite3.Connection, s: Mapping[str, Any], now: datetime, 
         return
     next_push = parse_iso(str(s["next_push_at"]))
     target, start = build_from(next_push, tz, prebuild_hours, now)
+    if target > clock_local_date(next_push, tz):
+        # Catch-up onto a later local day (an outage covered the previous push). While that day's own push instant is
+        # still ahead, re-anchor next_push_at to it (guarded) instead of publishing now with 'skipped' deliveries: the
+        # regular path below then builds inside the normal prebuild window and publishes + delivers at push time.
+        day_push = push_instant(target, tz, str(s["push_time"]))
+        if now < day_push:
+            with db.maybe_tx(conn):
+                conn.execute(
+                    "UPDATE user_settings SET next_push_at = ?, updated_at = ? WHERE user_id = ? AND next_push_at = ?",
+                    (to_iso(day_push), to_iso(now), uid, s["next_push_at"]),
+                )
+            log.info("catch-up re-anchored to today's push time", extra={"event": "catchup_reanchored", "user_id": uid, "next_push_at": to_iso(day_push)})
+            s = {**s, "next_push_at": to_iso(day_push)}
+            next_push = day_push
+            target, start = build_from(next_push, tz, prebuild_hours, now)
     batch: batches.Batch | None = None
     if now >= start:
         trigger = "scheduled" if now < next_push else "catchup"
@@ -266,18 +289,39 @@ def prefetch(conn: sqlite3.Connection, now: datetime | str | None, *, cfg: Any =
 
 
 def requeue_dead_once(conn: sqlite3.Connection, now: datetime) -> int:
-    """Nightly: up to 50 ``dead`` content/lookup jobs older than 24 h back to ``queued`` once (``attempts 0``, ``group_size 1``)."""
+    """Nightly: up to 50 ``dead`` content/lookup jobs older than 24 h back to ``queued`` once (``attempts 0``, ``group_size 1``).
+
+    A dead row whose dedupe key is held by a live (``queued``/``running``) job — a 重试, a fresh batch/prefetch enqueue
+    of the same word — is not a candidate: its work is already queued, and it must not take one of the 50 slots. Each
+    candidate is updated on its own, so a key shared by two dead rows (a dead job and its re-enqueued, also-dead
+    successor) or a race with a concurrent enqueue only skips that row (``ux_jobs_dedupe_live``) instead of aborting
+    the whole night's requeue; a skipped row keeps ``requeued_at`` NULL and stays eligible. Returns the rows requeued.
+    """
     now_s = to_iso(now)
     cutoff = to_iso(now - DEAD_REQUEUE_AGE)
     with db.maybe_tx(conn):
-        cur = conn.execute(
-            "UPDATE jobs SET status = 'queued', attempts = 0, payload_json = json_set(payload_json, '$.group_size', 1, '$.requeued_at', ?), "
-            "run_after = ?, updated_at = ?, finished_at = NULL, locked_at = NULL, locked_by = NULL "
-            "WHERE id IN (SELECT id FROM jobs WHERE status = 'dead' AND type IN ('generate_content','lookup_word') "
-            "AND COALESCE(finished_at, updated_at) < ? AND json_extract(payload_json, '$.requeued_at') IS NULL ORDER BY id LIMIT ?)",
-            (now_s, now_s, now_s, cutoff, DEAD_REQUEUE_LIMIT),
-        )
-        return int(cur.rowcount)
+        ids = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT j.id FROM jobs j WHERE j.status = 'dead' AND j.type IN ('generate_content','lookup_word') "
+                "AND COALESCE(j.finished_at, j.updated_at) < ? AND json_extract(j.payload_json, '$.requeued_at') IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM jobs l WHERE l.dedupe_key = j.dedupe_key AND l.status IN ('queued','running')) "
+                "ORDER BY j.id LIMIT ?",
+                (cutoff, DEAD_REQUEUE_LIMIT),
+            )
+        ]
+        requeued = 0
+        for job_id in ids:
+            try:
+                cur = conn.execute(
+                    "UPDATE jobs SET status = 'queued', attempts = 0, payload_json = json_set(payload_json, '$.group_size', 1, '$.requeued_at', ?), "
+                    "run_after = ?, updated_at = ?, finished_at = NULL, locked_at = NULL, locked_by = NULL WHERE id = ? AND status = 'dead'",
+                    (now_s, now_s, now_s, job_id),
+                )
+                requeued += int(cur.rowcount)
+            except sqlite3.IntegrityError:  # statement-level abort: the transaction stays open
+                log.info("dead job %d not requeued: its dedupe key is held by a live job", job_id, extra={"event": "dead_requeue_skipped", "job_id": job_id})
+        return requeued
 
 
 def prune_claude_logs(cfg: Any, now: datetime) -> int:
@@ -470,6 +514,7 @@ __all__ = [
     "process_pushes",
     "process_user",
     "prune_claude_logs",
+    "push_instant",
     "register_cli",
     "requeue_dead_once",
     "run_tick",

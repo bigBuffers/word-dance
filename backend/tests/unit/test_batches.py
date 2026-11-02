@@ -333,9 +333,43 @@ def test_hide_stale_rule():
         {"id": 7, "kind": "screen", "result": "unfamiliar", "word_id": 7},  # graded → stays
         {"id": 8, "kind": "review", "result": None, "word_id": 8, "merged_into_word_id": 99},  # merged → hidden
         {"id": 9, "kind": "new", "result": None, "word_id": 9},  # row deleted (restore) → hidden
+        {"id": 10, "kind": "new", "result": None, "word_id": 10, "superseded": 1},  # re-selected into a newer batch → hidden
+        {"id": 11, "kind": "review", "result": "good", "word_id": 11, "superseded": 1},  # graded → history, stays
+        {"id": 12, "kind": "extra", "result": None, "word_id": 12, "superseded": 0},  # flag false → visible
     ]
-    states = {1: "learning", 2: "mastered", 3: "removed", 4: "mastered", 5: "new", 7: "new", 8: "learning"}
-    assert [it["id"] for it in batches.hide_stale(items, states)] == [1, 4, 6, 7]
+    states = {1: "learning", 2: "mastered", 3: "removed", 4: "mastered", 5: "new", 7: "new", 8: "learning", 10: "new", 11: "learning", 12: "new"}
+    assert [it["id"] for it in batches.hide_stale(items, states)] == [1, 4, 6, 7, 11, 12]
+
+
+def test_superseded_review_card_is_graded_once_per_day(settings, seeded, user):
+    """A mature review left ungraded yesterday and re-selected today: today's row is the only gradable one, so the
+    interval grows once (8 d → ~21 d), never twice the same day; yesterday's copy answers 409 superseded_item."""
+    conn = seeded
+    conn.execute("UPDATE user_settings SET daily_screen_count = 0 WHERE user_id = ?", (user,))
+    yesterday_now = NOW - timedelta(days=1)
+    make_learning(conn, user, "apple", due_at="2026-10-12T16:00:00Z", interval=8)  # due on 2026-10-13 local
+    b1 = batches.build_batch(conn, user, "2026-10-13", "scheduled", yesterday_now)
+    (y_item,) = items_of(conn, b1.id)
+    assert y_item["kind"] == "review" and y_item["result"] is None
+    assert batches.previous_open_batch(conn, user, "2026-10-13") == {"id": b1.id, "local_date": "2026-10-13", "remaining": 1}
+    b2 = batches.build_batch(conn, user, TODAY, "scheduled", NOW)
+    (t_item,) = items_of(conn, b2.id)
+    assert t_item["kind"] == "review" and t_item["word_id"] == y_item["word_id"]
+    # the newer row supersedes the older one everywhere: previous_open_batch, Batch.gradable, counts, progress
+    assert batches.previous_open_batch(conn, user, "2026-10-13") is None
+    assert batches.visible_items(conn, user, b1.id) == [] and batches.batch_progress(conn, user, b1.id) == (0, 0)
+    assert batches.today_response(conn, user, NOW, batch_id=b1.id, cfg=settings)["batch"]["gradable"] is False
+    with pytest.raises(ApiError) as e:
+        batches.grade_item(conn, user, y_item["id"], "good", client_event_id=str(uuid.uuid4()), elapsed_ms=None, now=NOW, cfg=settings)
+    assert e.value.code == "invalid_transition" and e.value.details["reason"] == "superseded_item"
+    r = batches.grade_item(conn, user, t_item["id"], "good", client_event_id=str(uuid.uuid4()), elapsed_ms=2000, now=NOW, cfg=settings)
+    iv = r["mine"]["srs"]["interval_days"]
+    assert r["item"]["result"] == "good" and 20 <= iv <= 22 and r["mine"]["srs"]["consecutive_good"] == 1  # (8 + 1/2) × 2.5 ± 5 %
+    with pytest.raises(ApiError) as e:  # still no second exposure through yesterday's copy
+        batches.grade_item(conn, user, y_item["id"], "good", client_event_id=str(uuid.uuid4()), elapsed_ms=None, now=NOW + timedelta(minutes=1), cfg=settings)
+    assert e.value.code == "invalid_transition"
+    assert count(conn, "SELECT COUNT(*) FROM review_logs WHERE user_id = ? AND action = 'good'", (user,)) == 1
+    assert conn.execute("SELECT interval_days FROM user_words WHERE user_id = ? AND word_id = ?", (user, y_item["word_id"])).fetchone()[0] == iv
 
 
 # ------------------------------------------------------------------------------------ publish/finalize
