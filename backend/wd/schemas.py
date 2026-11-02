@@ -35,6 +35,7 @@ ItemKind = Literal["review", "new", "screen", "extra"]
 WordKind = Literal["word", "phrase", "abbreviation", "proper_noun"]
 ReportReason = Literal["wrong_meaning", "unnatural_example", "bad_translation", "irrelevant_image", "inappropriate_image", "other"]
 WebhookFormat = Literal["generic", "wecom", "feishu", "serverchan", "bark"]
+WebhookTestReason = Literal["dns_failed", "host_not_public", "connect_failed", "timeout", "tls_failed", "http_error", "invalid_url"]  # API.md 17; delivery.webhook.REASONS
 Role = Literal["user", "admin"]
 OnboardingState = Literal["pending", "screen", "done"]
 RegistrationMode = Literal["open", "invite", "closed"]
@@ -434,7 +435,8 @@ class TimezonesResponse(Model):
 class WebhookTestResponse(Model):
     ok: bool
     http_status: int | None
-    error: str | None
+    error: str | None  # English transport diagnostic (admin ledger wording); the UI renders `reason`, never this
+    reason: WebhookTestReason | None  # None when ok
 
 
 class EmailTestResponse(Model):

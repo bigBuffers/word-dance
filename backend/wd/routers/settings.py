@@ -142,7 +142,7 @@ def test_webhook(request: Request, user: dict[str, Any] = Depends(current_user),
         raise ApiError("webhook_unconfigured")
     security.rate_limit(conn, f"webhook_test:user:{user['id']}", limit=security.TEST_SEND_LIMIT, window_s=security.TEST_SEND_WINDOW_S, now=now)
     result = webhook_delivery.send_test_webhook(row)
-    return {"ok": bool(result.get("ok")), "http_status": result.get("http_status"), "error": result.get("error")}
+    return {"ok": bool(result.get("ok")), "http_status": result.get("http_status"), "error": result.get("error"), "reason": result.get("reason")}
 
 
 @router.post("/api/settings/email/test", status_code=202, response_model=EmailTestResponse)

@@ -43,6 +43,7 @@ import type {
   User,
   UserState,
   UserWord,
+  WebhookTestReason,
   WordBrief,
   WordDetail,
   BatchSummary,
@@ -112,10 +113,12 @@ export type SettingsUpdate = Partial<Omit<Settings, 'next_push_at' | 'email_veri
 export interface TimezonesResponse {
   items: string[];
 }
+/** Endpoint 17. `error` is the English transport diagnostic kept for the admin ledger — the UI renders `reason` (SettingsPage.webhookFailureReason), never `error`. */
 export interface WebhookTestResponse {
   ok: boolean;
   http_status: number | null;
   error: string | null;
+  reason: WebhookTestReason | null;
 }
 export interface EmailTestResponse {
   queued: true;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -173,18 +174,46 @@ def test_webhook_test_endpoint(client: TestClient, alice, frozen_clock, monkeypa
 
     def send_test_webhook(row):
         calls.append(dict(row))
-        return {"ok": True, "http_status": 200, "error": None}
+        return {"ok": True, "http_status": 200, "error": None, "reason": None}
 
     monkeypatch.setattr(webhook, "send_test_webhook", send_test_webhook)  # WP4's sender; test_delivery exercises the real one
     r = client.post("/api/settings/webhook/test")
-    assert r.status_code == 200 and r.json() == {"ok": True, "http_status": 200, "error": None}, r.text
+    assert r.status_code == 200 and r.json() == {"ok": True, "http_status": 200, "error": None, "reason": None}, r.text
     assert len(calls) == 1 and calls[0]["webhook_url"] == HOOK and calls[0]["webhook_format"] == "feishu" and calls[0]["user_id"] == alice["id"]
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 429 and error(r)["code"] == "rate_limited" and r.headers["Retry-After"] == "600"  # 1 per 10 min
     frozen_clock.advance(minutes=10)
-    monkeypatch.setattr(webhook, "send_test_webhook", lambda row: {"ok": False, "http_status": 500, "error": "boom"})
+    monkeypatch.setattr(webhook, "send_test_webhook", lambda row: {"ok": False, "http_status": 500, "error": "boom", "reason": "http_error"})
     r = client.post("/api/settings/webhook/test")
-    assert r.status_code == 200 and r.json() == {"ok": False, "http_status": 500, "error": "boom"}
+    assert r.status_code == 200 and r.json() == {"ok": False, "http_status": 500, "error": "boom", "reason": "http_error"}
+
+
+def test_webhook_test_endpoint_reports_reason_and_status(client: TestClient, alice, frozen_clock, monkeypatch: pytest.MonkeyPatch):
+    """API.md 17 through the real sender: the response carries the closed-set ``reason`` next to ``http_status`` and the
+    English ``error`` — the outbound request goes through the webhook module's httpx seam (``CLIENT_FACTORY`` + pinned
+    ``resolve_host``), so nothing leaves the box."""
+    assert client.put("/api/settings", json={"webhook_enabled": True, "webhook_url": HOOK, "webhook_format": "generic"}).status_code == 200
+    monkeypatch.setattr(webhook, "resolve_host", lambda host: ["93.184.216.34"])  # the DNS pin: a public address
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused")
+
+    monkeypatch.setattr(webhook, "CLIENT_FACTORY", lambda: httpx.Client(transport=httpx.MockTransport(refused), follow_redirects=False))
+    r = client.post("/api/settings/webhook/test")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": False, "http_status": None, "error": "request failed: ConnectError: [Errno 111] Connection refused", "reason": "connect_failed"}
+
+    frozen_clock.advance(minutes=10)
+    monkeypatch.setattr(webhook, "CLIENT_FACTORY", lambda: httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503, text="maintenance")), follow_redirects=False))
+    r = client.post("/api/settings/webhook/test")
+    assert r.status_code == 200 and r.json() == {"ok": False, "http_status": 503, "error": "HTTP 503", "reason": "http_error"}
+
+    frozen_clock.advance(minutes=10)
+    monkeypatch.setattr(webhook, "resolve_host", lambda host: ["10.0.0.1"])  # the saved name now resolves into a private range
+    r = client.post("/api/settings/webhook/test")
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False and body["http_status"] is None and body["reason"] == "host_not_public"
+    assert body["error"] == "rejected: hooks.example.com resolves to a non-public address 10.0.0.1"
 
 
 def test_email_test_endpoint_enqueues_the_test_job(client: TestClient, alice, app, settings, frozen_clock):

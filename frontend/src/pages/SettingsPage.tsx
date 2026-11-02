@@ -45,12 +45,27 @@ export async function buildImportBody(file: { name: string; text(): Promise<stri
 
 /**
  * zh cause + action for a failed webhook test (DESIGN §0.3: no raw transport text for non-admins). The server's
- * `error` string is an English diagnostic ("request failed: ConnectError: …", "rejected: …", "HTTP 404"), kept for
- * the admin job ledger; the user sees the HTTP status when the target answered, otherwise the connection advice.
+ * closed-set `reason` (API.md 17) picks the copy; its `error` string is an English diagnostic ("request failed:
+ * ConnectError: …", "rejected: …", "HTTP 404") kept for the admin job ledger and never rendered. Without a usable
+ * reason (an older server, or `http_error` without a status) the HTTP status decides, else the connection advice.
  */
-export function webhookFailureReason(res: Pick<WebhookTestResponse, 'http_status' | 'error'>): string {
-  if (res.http_status !== null && res.http_status !== undefined) return zh.settings.webhookFailHttp(res.http_status);
-  return zh.settings.webhookFailConnect;
+export function webhookFailureReason(res: Pick<WebhookTestResponse, 'http_status' | 'error'> & Partial<Pick<WebhookTestResponse, 'reason'>>): string {
+  switch (res.reason) {
+    case 'dns_failed':
+      return zh.settings.webhookFailDns;
+    case 'host_not_public':
+      return zh.settings.webhookFailPrivate;
+    case 'connect_failed':
+      return zh.settings.webhookFailConnect;
+    case 'timeout':
+      return zh.settings.webhookFailTimeout;
+    case 'tls_failed':
+      return zh.settings.webhookFailTls;
+    case 'invalid_url':
+      return zh.settings.webhookFailInvalidUrl;
+    default:
+      return typeof res.http_status === 'number' ? zh.settings.webhookFailHttp(res.http_status) : zh.settings.webhookFailConnect;
+  }
 }
 
 /** Toggles a stage keeping the list non-empty and `current_stage` inside it (canonical order). */

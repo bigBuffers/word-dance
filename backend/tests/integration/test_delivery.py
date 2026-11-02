@@ -8,12 +8,16 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import socket
+import ssl
+import typing
 from datetime import datetime, timezone
+from typing import Callable
 
 import httpx
 import pytest
 
-from wd import db
+from wd import db, schemas
 from wd.delivery import email, webhook
 from wd.delivery.mailer import RecordingMailer
 from wd.jobs import queue, registry
@@ -111,6 +115,17 @@ class Captured:
 
     def bodies(self) -> list[dict]:
         return [json.loads(r.content) for r in self.requests]
+
+
+def install_raising(monkeypatch, make_exc: Callable[[httpx.Request], BaseException], *, ips=(PUBLIC_IP,)) -> None:
+    """A MockTransport whose handler raises what httpx surfaces for a transport failure (DNS pinned to ``ips``)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise make_exc(request)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(webhook, "CLIENT_FACTORY", lambda: httpx.Client(transport=transport, follow_redirects=False))
+    monkeypatch.setattr(webhook, "resolve_host", lambda host: list(ips))
 
 
 # ---------------------------------------------------------------------------------------------- email
@@ -311,7 +326,7 @@ def test_webhook_ssrf_guard_rejects_private_targets(settings, seeded, connect, f
 def test_send_test_webhook_ok_and_server_errors_retry(settings, seeded, connect, frozen_clock, monkeypatch):
     captured = Captured().install(monkeypatch)
     r = webhook.send_test_webhook({"webhook_url": "https://hooks.example.com/x", "webhook_format": "wecom"})
-    assert r == {"ok": True, "http_status": 200, "error": None}
+    assert r == {"ok": True, "http_status": 200, "error": None, "reason": None}
     assert captured.bodies()[0]["text"]["content"].startswith(webhook.TEST_TITLE_ZH)
     generic = webhook.build_payload("generic", webhook.TEST_TITLE_ZH, webhook.TEST_BODY_ZH, url=None, date="2026-10-14", type_="test")
     assert generic["type"] == "test" and generic["words"] == [] and generic["url"] is None
@@ -364,5 +379,119 @@ def test_webhook_test_route_reaches_send_test_webhook(client, settings, monkeypa
     client.cookies.set("wd_session", token)
     r = client.post("/api/settings/webhook/test")
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "http_status": 200, "error": None}
+    assert r.json() == {"ok": True, "http_status": 200, "error": None, "reason": None}
     assert captured.bodies()[0]["msg_type"] == "text"
+
+
+# ------------------------------------------------------------------------------- reason codes (API.md 17)
+def tls_wrapped(request: httpx.Request) -> BaseException:
+    """How httpx surfaces a handshake failure: ``ConnectError`` raised from httpcore's wrapper of the ``ssl`` error."""
+    exc = httpx.ConnectError("handshake failed", request=request)
+    exc.__cause__ = ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")
+    return exc
+
+
+def resolver_wrapped(request: httpx.Request) -> BaseException:
+    exc = httpx.ConnectError("connect failed", request=request)
+    exc.__cause__ = socket.gaierror(-2, "Name or service not known")
+    return exc
+
+
+@pytest.mark.parametrize(
+    "make_exc, reason",
+    [
+        (lambda request: httpx.ConnectTimeout("timed out"), "timeout"),
+        (lambda request: httpx.ReadTimeout("timed out"), "timeout"),
+        (lambda request: httpx.WriteTimeout("timed out"), "timeout"),
+        (lambda request: httpx.ConnectError("[Errno -2] Name or service not known"), "dns_failed"),
+        (lambda request: httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "dns_failed"),
+        (lambda request: httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known"), "dns_failed"),
+        (resolver_wrapped, "dns_failed"),
+        (lambda request: httpx.ConnectError("[Errno 111] Connection refused"), "connect_failed"),
+        (lambda request: httpx.ConnectError("All connection attempts failed"), "connect_failed"),
+        (lambda request: httpx.ConnectError("[Errno 113] No route to host"), "connect_failed"),
+        (lambda request: httpx.ReadError("[Errno 104] Connection reset by peer"), "connect_failed"),
+        (lambda request: httpx.RemoteProtocolError("Server disconnected without sending a response."), "connect_failed"),
+        (lambda request: httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1010)"), "tls_failed"),
+        (lambda request: httpx.ConnectError("[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1010)"), "tls_failed"),
+        (tls_wrapped, "tls_failed"),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_send_test_webhook_classifies_transport_failures(monkeypatch, make_exc, reason):
+    """API.md 17: every transport failure maps to one closed-set ``reason``; ``error`` stays the English diagnostic."""
+    install_raising(monkeypatch, make_exc)
+    r = webhook.send_test_webhook({"webhook_url": "https://hooks.example.com/x", "webhook_format": "generic"})
+    assert r["ok"] is False and r["http_status"] is None and r["reason"] == reason, r
+    assert r["reason"] in webhook.REASONS
+    assert r["error"].startswith("request failed: ") and r["error"].split(": ")[1] in {"ConnectTimeout", "ReadTimeout", "WriteTimeout", "ConnectError", "ReadError", "RemoteProtocolError"}
+
+
+@pytest.mark.parametrize(
+    "url, ips, reason",
+    [
+        ("https://hooks.example.com/x", ("10.0.0.1",), "host_not_public"),  # the SSRF guard: a private resolved address …
+        ("https://hooks.example.com/x", (PUBLIC_IP, "192.168.0.9"), "host_not_public"),  # … or one private record among public ones
+        ("https://hooks.example.com/x", ("169.254.169.254",), "host_not_public"),
+        ("https://hooks.example.com/x", ("::1",), "host_not_public"),
+        ("https://127.0.0.1/x", (PUBLIC_IP,), "host_not_public"),  # IP literals are refused whatever they are
+        ("https://93.184.216.34/x", (PUBLIC_IP,), "host_not_public"),
+        ("https://[::1]/x", (PUBLIC_IP,), "host_not_public"),
+        ("https://localhost/x", (PUBLIC_IP,), "host_not_public"),
+        ("https://intranet.local/x", (PUBLIC_IP,), "host_not_public"),
+        ("https://hooks/x", (PUBLIC_IP,), "host_not_public"),
+        ("https://hooks.example.com/x", (), "dns_failed"),  # no address records
+        ("http://hooks.example.com/x", (PUBLIC_IP,), "invalid_url"),
+        ("https://user:pw@hooks.example.com/x", (PUBLIC_IP,), "invalid_url"),
+        ("https://hooks.example.com:70000/x", (PUBLIC_IP,), "invalid_url"),
+        ("https://-hooks.example.com/x", (PUBLIC_IP,), "invalid_url"),
+        ("https://[::1/x", (PUBLIC_IP,), "invalid_url"),  # urlsplit itself rejects it
+        ("", (PUBLIC_IP,), "invalid_url"),
+    ],
+)
+def test_send_test_webhook_reasons_for_refused_urls(monkeypatch, url, ips, reason):
+    """Refused before any request: ``host_not_public`` for the SSRF policy, ``dns_failed`` without records, ``invalid_url``
+    for a malformed URL — all with the unchanged ``rejected: …`` diagnostic and ``http_status`` None."""
+    captured = Captured().install(monkeypatch, ips=ips)
+    r = webhook.send_test_webhook({"webhook_url": url, "webhook_format": "generic"})
+    assert r["ok"] is False and r["http_status"] is None and r["reason"] == reason, r
+    assert r["error"].startswith("rejected: ")
+    assert captured.requests == []
+
+
+def test_send_test_webhook_reports_a_resolver_failure_as_dns_failed(monkeypatch):
+    """The pin step's own lookup failing (``socket.gaierror``) is ``dns_failed`` — still a final refusal for the job handler."""
+    captured = Captured()
+    transport = httpx.MockTransport(captured.handler)
+    monkeypatch.setattr(webhook, "CLIENT_FACTORY", lambda: httpx.Client(transport=transport, follow_redirects=False))  # the real resolve_host runs
+
+    def no_such_host(host, port, *args, **kwargs):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(webhook.socket, "getaddrinfo", no_such_host)
+    r = webhook.send_test_webhook({"webhook_url": "https://hooks.example.com/x", "webhook_format": "generic"})
+    assert r == {"ok": False, "http_status": None, "error": "rejected: cannot resolve hooks.example.com: [Errno -2] Name or service not known", "reason": "dns_failed"}
+    assert captured.requests == []
+    with pytest.raises(webhook.SsrfError):  # the job handler keeps treating it as a final refusal (no retry)
+        webhook.pin("https://hooks.example.com/x")
+
+
+@pytest.mark.parametrize("status", [302, 404, 500])
+def test_send_test_webhook_non_2xx_is_http_error(monkeypatch, status):
+    Captured(status=status).install(monkeypatch)
+    r = webhook.send_test_webhook({"webhook_url": "https://hooks.example.com/x", "webhook_format": "bark"})
+    assert r == {"ok": False, "http_status": status, "error": f"HTTP {status}", "reason": "http_error"}
+
+
+def test_classify_error_is_total_and_mirrors_the_schema():
+    assert set(typing.get_args(schemas.WebhookTestReason)) == set(webhook.REASONS) and len(webhook.REASONS) == 7
+    assert webhook.classify_error(webhook.DnsError("x")) == "dns_failed"
+    assert webhook.classify_error(webhook.InvalidUrlError("x")) == "invalid_url"
+    assert webhook.classify_error(webhook.SsrfError("x")) == "host_not_public"
+    assert webhook.classify_error(httpx.PoolTimeout("x")) == "timeout"
+    assert webhook.classify_error(RuntimeError("?")) == "connect_failed"  # the fallback for anything unforeseen
+    # both refusal subclasses stay SsrfErrors: handle_send_webhook finishes them as final, never retries
+    assert issubclass(webhook.DnsError, webhook.SsrfError) and issubclass(webhook.InvalidUrlError, webhook.SsrfError)
+    assert isinstance(webhook.safe_post("http://hooks.example.com/x", {}), webhook.PostResult)
+    status, error, reason = webhook.safe_post("http://hooks.example.com/x", {})  # the job path's 3-tuple unpacking
+    assert status is None and error == "rejected: only https URLs are allowed" and reason == "invalid_url"

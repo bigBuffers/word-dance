@@ -15,6 +15,7 @@ export type ItemKind = 'review' | 'new' | 'screen' | 'extra';
 export type WordKind = 'word' | 'phrase' | 'abbreviation' | 'proper_noun';
 export type ReportReason = 'wrong_meaning' | 'unnatural_example' | 'bad_translation' | 'irrelevant_image' | 'inappropriate_image' | 'other';
 export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bark';
+export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }

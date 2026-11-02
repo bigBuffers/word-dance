@@ -2,7 +2,9 @@
 // line (client-side DESIGN §5.1 mirror first, then GET /api/lookup?q= debounced 300 ms, cached by lemma),
 // ambiguous candidate chips (→ POST /api/bank/add-word), note, study today, results with status badges; pending
 // rows poll through AttentionBadge until validated, then show `bank.status.validated` (badge + header count follow). Lines the
-// client rejects carry the server's own reason strings (`zh.bank.invalidReason`). Calls refreshCounters() after every add.
+// client rejects carry the server's own reason strings (`zh.bank.invalidReason`). With the study-today switch on, a row that
+// reached the bank without a study row today (`added_to_today:false` — the 20/day cap, a word already in today's batch, or a
+// provisional word awaiting validation) says `screen.addedTomorrow`. Calls refreshCounters() after every add.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '@/api/client';
@@ -42,6 +44,19 @@ export function badgeStatus(r: ResultEntry): AddBadgeStatus {
   return r.validated ? 'validated' : r.status;
 }
 
+/** Statuses whose word is in the bank, i.e. could have been appended to today's batch (`added_to_today`, API.md 34/35). */
+const IN_BANK: readonly AddResult['status'][] = ['added', 'readded', 'exists', 'pending_ai'];
+
+/**
+ * The study-today note of a result row (`bank.studyToday` switch): `screen.addedToday` when the server appended a study
+ * row, `screen.addedTomorrow` when the switch was on but the word only reached the bank (cap of 20/day, already in today's
+ * batch, or pending validation — it joins the first batch after validation), nothing otherwise (exported for tests).
+ */
+export function todayNote(result: Pick<AddResult, 'status' | 'added_to_today'>, studyToday: boolean): string | null {
+  if (result.added_to_today) return zh.screen.addedToday;
+  return studyToday && IN_BANK.includes(result.status) ? zh.screen.addedTomorrow : null;
+}
+
 interface ResultRowProps {
   result: ResultEntry;
   studyToday: boolean;
@@ -55,7 +70,7 @@ interface ResultRowProps {
 
 function ResultRow({ result, studyToday, onPickCandidate, onEdit, onReplace, onRemove, onKeep, onUpdate }: ResultRowProps) {
   const word = result.word;
-  const todayNote = result.added_to_today ? zh.screen.addedToday : studyToday && result.status === 'pending_ai' ? zh.screen.addedTomorrow : null;
+  const note = todayNote(result, studyToday);
   return (
     <li className="result-row">
       <div className="result-row__line">
@@ -72,7 +87,7 @@ function ResultRow({ result, studyToday, onPickCandidate, onEdit, onReplace, onR
       {word?.translation_short && <div className="result-row__detail">{word.translation_short}</div>}
       {result.lemma_note_zh && <div className="result-row__note">{result.lemma_note_zh}</div>}
       {(result.error || result.message) && <div className="result-row__note">{result.error ?? result.message}</div>}
-      {todayNote && <div className="result-row__today">{todayNote}</div>}
+      {note && <div className="result-row__today">{note}</div>}
       {result.status === 'ambiguous' && result.candidates.length > 0 && (
         <div className="preview-row__chips" role="group" aria-label={zh.bank.preview.ambiguous}>
           {result.candidates.map((c) => (

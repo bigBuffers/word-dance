@@ -150,7 +150,7 @@ def image_meta(conn, word_id: int) -> dict                                      
 def render_card(conn, word_id: int) -> str                                        # template SVG
 
 # WP4  wd/delivery/email.py / webhook.py — handlers registered: 'send_email' {batch_id} | {user_id, test: true} (API.md 18; dedupe email:test:<user_id>) · 'send_webhook' {batch_id}
-def send_test_webhook(settings_row) -> dict                                       # {ok, http_status, error}
+def send_test_webhook(settings_row) -> dict                                       # {ok, http_status, error, reason} (reason: API.md 17 closed set, None when ok)
 def public_url(conn, cfg) -> str|None                                             # WD_PUBLIC_URL → kv.public_url_guess → None (DESIGN §6.5); None ⇒ links omitted
 ```
 
