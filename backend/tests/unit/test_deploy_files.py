@@ -55,13 +55,22 @@ def _node_ok() -> bool:
     return v.split(".")[0].isdigit() and int(v.split(".")[0]) >= 22
 
 
-def _install_env(tmp_path: Path, data_dir: Path) -> dict[str, str]:
-    """A hermetic environment for install.sh --dry-run: a fake `claude` in PATH, no inherited WD_* values."""
+def _fake_bin(directory: Path, name: str, exit_code: int) -> None:
+    script = directory / name
+    script.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    script.chmod(0o755)
+
+
+def _install_env(tmp_path: Path, data_dir: Path, *, service_active: bool = False, sudo: bool | None = None) -> dict[str, str]:
+    """A hermetic environment for install.sh --dry-run: a fake `claude` in PATH, no inherited WD_* values, and a fake
+    `systemctl` so the host's own word-dance.service state (install.sh step 6: `systemctl is-active --quiet …`) never
+    leaks into the expectations; `sudo=True/False` fakes passwordless sudo being available or not."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
-    claude = fake_bin / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n")
-    claude.chmod(0o755)
+    _fake_bin(fake_bin, "claude", 0)
+    _fake_bin(fake_bin, "systemctl", 0 if service_active else 3)  # `is-active` exits 3 for an inactive/unknown unit
+    if sudo is not None:
+        _fake_bin(fake_bin, "sudo", 0 if sudo else 1)
     env = {k: v for k, v in os.environ.items() if not k.startswith("WD_")}
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["WD_DATA_DIR"] = str(data_dir)
@@ -217,7 +226,28 @@ def test_install_sh_dry_run_prints_every_step_and_changes_nothing(tmp_path):
         assert any(needle in l for l in plus), needle
     assert not data.exists()  # nothing created
     assert not (REPO / ".venv").exists() or True  # the worktree may or may not have a venv; the dry run must not create one
-    assert "+ sudo -n systemctl stop" not in out  # no service is running here
+    assert "+ sudo -n systemctl stop" not in out  # the fake systemctl reports no running service
+
+
+@pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")
+def test_install_sh_stops_a_running_service_unless_no_restart(tmp_path):
+    """An upgrade on a box where word-dance.service is active stops it before `wd migrate` (step 6) — kept with --no-restart."""
+    data = tmp_path / "data"
+    env = _install_env(tmp_path, data, service_active=True, sudo=True)
+    cp = _sh([str(INSTALL), "--dry-run"], env=env)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    plus = [l for l in cp.stdout.splitlines() if l.startswith("+ ")]
+    stop = [i for i, l in enumerate(plus) if l == "+ sudo -n systemctl stop word-dance.service"]
+    migrate = [i for i, l in enumerate(plus) if "/.venv/bin/wd migrate" in l]
+    assert len(stop) == 1 and migrate and stop[0] < migrate[0]
+    cp = _sh([str(INSTALL), "--no-restart", "--dry-run"], env=env)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert "+ sudo -n systemctl stop" not in cp.stdout
+    assert "NOTE: --no-restart: the running service is kept" in cp.stdout
+    # without passwordless sudo the service is never touched (the operator runs the printed commands as root)
+    cp = _sh([str(INSTALL), "--dry-run"], env=_install_env(tmp_path, data, service_active=True, sudo=False))
+    assert cp.returncode == 0 and "+ sudo -n systemctl stop" not in cp.stdout
+    assert not data.exists()
 
 
 @pytest.mark.skipif(not _node_ok(), reason="install.sh preflight needs node >= 22")

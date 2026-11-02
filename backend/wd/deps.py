@@ -8,7 +8,9 @@
   ``Origin`` header is present, it equals the request's own Host-derived origin or the origin of
   ``WD_PUBLIC_URL`` (plus ``http://localhost:5173`` under ``WD_DEV=1``). The same check runs globally in
   ``main.py``'s middleware; the dependency exists for explicit wiring and tests.
-* :func:`client_ip` — ``X-Forwarded-For`` first hop only when ``WD_TRUST_PROXY=1``.
+* :func:`client_ip` — the connecting peer; behind a trusted proxy (``WD_TRUST_PROXY=1``) the address the proxy
+  appended to ``X-Forwarded-For`` (resolved by uvicorn's ``ProxyHeadersMiddleware``; fallback: the LAST hop), never the
+  client-supplied first hop, which would let anyone rotate past the per-IP throttles.
 * :func:`visible_word_sql` — the API.md §1 / DESIGN §5.2 word visibility predicate as a reusable SQL fragment.
 """
 
@@ -30,6 +32,8 @@ SESSION_COOKIE = "wd_session"
 CSRF_HEADER = "x-wd-request"
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 DEV_ORIGIN = "http://localhost:5173"
+# the peers `wd serve` trusts for X-Forwarded-* (uvicorn `forwarded_allow_ips="127.0.0.1"`, DEPLOY §3)
+TRUSTED_PROXY_PEERS: tuple[str, ...] = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 USER_COLUMNS = (
     "id",
     "username",
@@ -71,14 +75,24 @@ def get_db(request: Request) -> Iterator[sqlite3.Connection]:
 
 # ----------------------------------------------------------------------------------- client / csrf
 def client_ip(request: Request) -> str:
+    """The client address the throttles (``login:ip:*``, ``register:ip:*``) and ``sessions.ip`` are keyed on.
+
+    ``wd serve`` runs uvicorn with ``proxy_headers=WD_TRUST_PROXY, forwarded_allow_ips="127.0.0.1"`` (DEPLOY §3), whose
+    ``ProxyHeadersMiddleware`` already rewrites ``request.client`` to the right-most ``X-Forwarded-For`` hop that is not a
+    trusted proxy — i.e. the ``$remote_addr`` nginx appends (``$proxy_add_x_forwarded_for``) or the client IP Caddy sets.
+    So the peer address is the answer. Only when that middleware did not run (another ASGI runner, tests) and the peer
+    *is* the local proxy, the LAST hop of the header is taken as a fallback — never the first one, which is whatever the
+    client itself sent and would let an attacker rotate past every per-IP limit.
+    """
     cfg: Settings = request.app.state.settings
-    if cfg.trust_proxy:
+    peer = request.client.host if request.client else ""
+    if cfg.trust_proxy and peer in TRUSTED_PROXY_PEERS:
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            first = xff.split(",")[0].strip()
-            if first:
-                return first
-    return request.client.host if request.client else "0.0.0.0"
+            last = xff.rsplit(",", 1)[-1].strip()
+            if last:
+                return last
+    return peer or "0.0.0.0"
 
 
 def host_origin(scheme: str, headers: Mapping[str, str], cfg: Settings) -> str | None:
@@ -153,6 +167,9 @@ def current_user(request: Request, conn: sqlite3.Connection = Depends(get_db)) -
                 "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
                 (now, to_iso(now_dt + timedelta(days=cfg.session_days)), token_hash),
             )
+        # the browser drops the cookie Max-Age seconds after the Set-Cookie it last saw, whatever the row says: have the
+        # middleware re-send it with a fresh Max-Age (main.WdMiddleware reads scope["state"], the dict behind request.state)
+        request.state.reissue_session_token = token
     user = {k: row[k] for k in USER_COLUMNS}
     user["session_token_hash"] = token_hash
     request.state.user_id = user["id"]

@@ -3,8 +3,10 @@
 Contracts: API.md 31/32 (``GET /api/screen/next``, ``POST /api/screen/verdict``), DESIGN §6.3 step 4 (candidate order:
 ``stage_distance`` from the 主攻阶段, then frequency), DESIGN §4 (verdict → state machine through
 :func:`wd.services.bank.apply_action`), DESIGN §6.3 (an in-batch ``unfamiliar`` keeps the ``screen`` push row and —
-while the day's new-word quota has room — appends a second ``kind='new'`` row through WP4's
-``batches.append_to_today``; ``added_to_today:false`` when there is no batch today or the word is already in it).
+while TODAY's new-word quota has room — appends a second ``kind='new'`` row through WP4's ``batches.append_to_today``;
+``added_to_today:false`` when there is no batch today or the word is already in it). The room/duplicate checks run on
+the batch the append writes to (today's), also for a 推荐词 graded in yesterday's still-open batch. ``today`` carries
+the ``TodayCounts`` of today's batch whenever one exists (the 筛词 page shows 「已加入生词库，明天开始学」 from it).
 
 :func:`study_item_dict` builds the API.md ``StudyItem`` for a ``push_items`` row from the WP1 word helpers so the
 ``ScreenResponse.study_item`` (and WP4's ``GradeResponse.study_item``) need nothing beyond this package.
@@ -128,6 +130,13 @@ def new_quota_room(conn: sqlite3.Connection, batch_id: int, daily_new_count: int
     return n < int(daily_new_count)
 
 
+def today_counts_for(conn: sqlite3.Connection, user_id: int, batch: dict[str, Any], *, now: str, cfg: Any = None) -> dict[str, Any]:
+    """``TodayCounts`` of ``batch`` over its non-stale items (``batches`` imports this module, hence the late import)."""
+    from . import batches
+
+    return batches.today_counts(conn, batch, batches.visible_items(conn, user_id, int(batch["id"])), now=now, cfg=cfg)
+
+
 def _stored_response(conn: sqlite3.Connection, user_id: int, client_event_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT result_json FROM review_logs WHERE user_id = ? AND client_event_id = ?",
@@ -229,18 +238,22 @@ def apply_verdict(
                 "UPDATE push_items SET result = ?, graded_at = ?, user_word_id = COALESCE(?, user_word_id) WHERE id = ?",
                 (verdict, now_s, r.user_word_id, item["id"]),
             )
+        # the study row always lands in TODAY's batch (batches.append_to_today), so room and duplicates are checked there —
+        # the in-batch item itself may belong to yesterday's still-gradable batch (继续昨天的学习)
+        today_batch = bank.today_batch(conn, user_id, today)
         if verdict == "unfamiliar" and r.status in ("added", "readded") and word.get("is_valid_english") == 1:
-            batch = bank.today_batch(conn, user_id, today) if item is None else bank._row(conn, "SELECT * FROM push_batches WHERE id = ?", (item["batch_id"],))
-            if batch is not None and not has_study_row(conn, int(batch["id"]), wid):
+            if today_batch is not None and not has_study_row(conn, int(today_batch["id"]), wid):
                 settings = bank.user_settings_row(conn, user_id)
-                if new_quota_room(conn, int(batch["id"]), int(settings["daily_new_count"])):
+                if new_quota_room(conn, int(today_batch["id"]), int(settings["daily_new_count"])):
                     new_item_id = bank._append_to_today(conn, user_id, wid, "new", now_s)
                     if new_item_id is not None:
                         response["added_to_today"] = True
                         response["study_item"] = study_item_dict(conn, user_id, new_item_id, now=now_s, cfg=cfg)
+        if today_batch is not None:
+            response["today"] = today_counts_for(conn, user_id, today_batch, now=now_s, cfg=cfg)
         if r.log_id is not None:
             conn.execute("UPDATE review_logs SET result_json = ? WHERE id = ?", (json.dumps(response, ensure_ascii=False), r.log_id))
         return response
 
 
-__all__ = ["apply_verdict", "has_study_row", "new_quota_room", "screen_next", "study_item_dict"]
+__all__ = ["apply_verdict", "has_study_row", "new_quota_room", "screen_next", "study_item_dict", "today_counts_for"]

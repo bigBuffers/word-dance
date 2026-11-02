@@ -703,9 +703,22 @@ def _create_provisional(conn: sqlite3.Connection, key: str, display: str, kind: 
         row, created = _insert_word(conn, cols)
         if not created:  # lost the UNIQUE(lemma) race against another holder: behave like the exact step
             final, redirected = follow_merge(conn, row)
-            return _resolution_for("exact", final, redirected=redirected)
+            return _resolution_for("exact", final, redirected=redirected, job_id=_ensure_lookup(conn, final, now))
         job_id = enqueue_lookup(conn, int(row["id"]), now)
     return _resolution_for("provisional", row, created=True, job_id=job_id)
+
+
+def _ensure_lookup(conn: sqlite3.Connection, row: Mapping[str, Any], now: str) -> int | None:
+    """A hit on a word that is still ``is_valid_english IS NULL`` must have a live ``lookup_word`` job, or nothing is left
+    to validate it (the first holder's job died, or the row was created without one): the new holder enqueues it. The
+    pre-check only saves a write per add — the UPSERT folds repeats into the live job anyway. Returns the new job id."""
+    if row.get("is_valid_english") is not None or row.get("merged_into_word_id") is not None:
+        return None
+    wid = int(row["id"])
+    if queue.live_job(conn, f"lookup:{wid}") is not None:
+        return None
+    with db.maybe_tx(conn):
+        return enqueue_lookup(conn, wid, now)
 
 
 def resolve(conn: sqlite3.Connection, key: str, display: str, kind: str, user_id: int, *, now: str | None = None) -> Resolution:
@@ -724,7 +737,7 @@ def resolve(conn: sqlite3.Connection, key: str, display: str, kind: str, user_id
     row = word_by_lemma(conn, key)
     if row is not None:
         final, redirected = follow_merge(conn, row)
-        return _resolution_for("exact", final, redirected=redirected)
+        return _resolution_for("exact", final, redirected=redirected, job_id=_ensure_lookup(conn, final, now))
     res = _resolve_forms(conn, key, user_id)
     if res is not None:
         return res

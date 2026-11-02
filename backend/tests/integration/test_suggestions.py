@@ -119,6 +119,8 @@ def test_list_open_and_all(client: TestClient, settings, alice):
     assert s["expires_at"] == "2026-11-13T00:00:00Z" and s["resolved_at"] is None and s["created_at"] == "2026-10-13T18:30:00Z"
     all_ = client.get("/api/suggestions?status=all").json()
     assert sorted(x["id"] for x in all_["items"]) == sorted([s_open, s_old, s_auto, s_rej]) and all_["open_count"] == 1  # confusable groups and other users never appear
+    by_id = {x["id"]: x["status"] for x in all_["items"]}
+    assert by_id == {s_open: "open", s_old: "expired", s_auto: "auto", s_rej: "rejected"}  # a timed-out open row never advertises 接受
     assert client.get("/api/suggestions?status=bogus").status_code == 400
     assert client.get("/api/suggestions?status=open&x=1").status_code == 400
 
@@ -241,6 +243,126 @@ def test_reject_and_errors(client: TestClient, settings, alice):
     r = client.post(f"/api/suggestions/{stale}/accept")
     assert r.status_code == 409 and r.json()["error"]["code"] == "already_resolved"
     assert qrow(settings, "SELECT status FROM bank_suggestions WHERE id = ?", (stale,))["status"] == "expired"
+    # … nor rejected: it is recorded as expired either way
+    stale = suggest(settings, alice, "fix_spelling", user_word_id=uw["id"], target_word_id=word_id(settings, "abandon"), payload={}, expires_at="2026-10-13T00:00:00Z")
+    r = client.post(f"/api/suggestions/{stale}/reject")
+    assert r.status_code == 409 and r.json()["error"] == {"code": "already_resolved", "message": "该建议已处理", "details": {"status": "expired"}}
+    assert qrow(settings, "SELECT status FROM bank_suggestions WHERE id = ?", (stale,))["status"] == "expired"
+
+
+def test_accept_fix_spelling_without_a_target_resolves_the_proposal(client: TestClient, settings, alice):
+    """lookup_word step 2 stores `fix_spelling` with target_word_id NULL and the headword in payload.to: accept resolves it
+    like the user's own add — an unknown spelling becomes a provisional word with one lookup job and the row moves onto it."""
+    from wd.ai import lookup
+    from wd.services import words
+
+    prov = add_provisional(client, "aquire")
+    uw = uw_row(settings, alice, prov)
+    item = {"input": "aquire", "is_english": True, "kind": "word", "headword": "acquire", "form_note_zh": "", "phonetic": "", "pos": "v.", "meaning_zh": "获得", "definition_en": "to get", "difficulty": 2, "suggested_correction": "", "safe_for_sharing": True, "note_zh": "看起来是 acquire 的拼写错误"}
+    conn = db.connect(settings.db_path)
+    try:
+        out = lookup.apply_item(conn, words.word_row(conn, prov), item, now="2026-10-14T00:00:00Z")  # 'aqu' vs 'acq': validate_headword rejects → step 2
+    finally:
+        conn.close()
+    assert out["outcome"] == "kept" and out["suggestions"] == 1
+    listed = client.get("/api/suggestions").json()
+    (s,) = listed["items"]
+    assert s["type"] == "fix_spelling" and s["target"] is None and s["payload"]["to"] == "acquire" and listed["open_count"] == 1
+    r = client.post(f"/api/suggestions/{s['id']}/accept")
+    assert r.status_code == 200, r.text
+    res = r.json()["result"]
+    acquire = word_id(settings, "acquire")
+    assert res["applied"] is True and res["mine"]["id"] == uw["id"] and res["mine"]["word_id"] == acquire and res["message_zh"] == "已合并到 “acquire”"
+    w = qrow(settings, "SELECT * FROM words WHERE id = ?", (acquire,))
+    assert (w["source"], w["is_public"], w["is_valid_english"], w["created_by_user_id"]) == ("user", 0, None, alice)  # provisional, exactly like typing it
+    assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'lookup_word' AND dedupe_key = ? AND status = 'queued'", (f"lookup:{acquire}",)) == 1
+    assert qrow(settings, "SELECT status, target_word_id FROM bank_suggestions WHERE id = ?", (s["id"],)) == {"status": "accepted", "target_word_id": acquire}
+    assert client.get("/api/suggestions").json()["open_count"] == 0
+    assert [i["lemma"] for i in client.get("/api/bank").json()["items"]] == ["acquire"]
+    assert client.get(f"/api/words/{acquire}").json()["mine"]["id"] == uw["id"]
+
+
+def test_accept_without_a_target_repoints_to_an_existing_headword_or_refuses(client: TestClient, settings, alice):
+    prov = add_provisional(client, "abandonned")
+    uw = uw_row(settings, alice, prov)
+    abandon = word_id(settings, "abandon")
+    sid = suggest(settings, alice, "fix_spelling", user_word_id=uw["id"], target_word_id=None, payload={"from": "abandonned", "to": "abandon"})
+    res = client.post(f"/api/suggestions/{sid}/accept").json()["result"]
+    assert res["mine"]["word_id"] == abandon and res["message_zh"] == "已合并到 “abandon”"
+    assert qrow(settings, "SELECT target_word_id FROM bank_suggestions WHERE id = ?", (sid,))["target_word_id"] == abandon
+    assert q1(settings, "SELECT COUNT(*) FROM words") == q1(settings, "SELECT COUNT(*) FROM words WHERE id <= ?", (prov,))  # nothing created
+    # nothing resolvable → 409 invalid_transition and the row stays open (the user can still 保留)
+    prov2 = add_provisional(client, "abstractify")
+    uw2 = uw_row(settings, alice, prov2)
+    for payload in ({"from": "abstractify"}, {"from": "abstractify", "to": "abc123"}):
+        bad = suggest(settings, alice, "fix_spelling", user_word_id=uw2["id"], target_word_id=None, payload=payload)
+        r = client.post(f"/api/suggestions/{bad}/accept")
+        assert r.status_code == 409 and r.json()["error"]["code"] == "invalid_transition" and r.json()["error"]["details"]["reason"] == "no_target"
+        assert qrow(settings, "SELECT status FROM bank_suggestions WHERE id = ?", (bad,))["status"] == "open"
+    assert uw_row(settings, alice, prov2)["word_id"] == prov2
+
+
+def test_accept_clears_the_attention_flags_of_the_replaced_string(client: TestClient, settings, alice):
+    """A flagged typo row (⚠ 「是否改为 “abandon”？」 + suggested_word_id) moves onto the corrected word: those columns described
+    the typo — the corrected entry must not show ⚠/替换 (替换 would remove the corrected word) nor be kept out of batches."""
+    prov = add_provisional(client, "abandonned")
+    abandon = word_id(settings, "abandon")
+    uw = uw_row(settings, alice, prov)
+    run(settings, "UPDATE user_words SET needs_attention = 1, attention_msg = '未识别为英文单词：拼写错误；是否改为 “abandon”？', suggested_word_id = ? WHERE id = ?", (abandon, uw["id"]))
+    assert client.get("/api/auth/me").json()["counters"]["attention"] == 1
+    sid = suggest(settings, alice, "fix_spelling", user_word_id=uw["id"], target_word_id=abandon, payload={"from": "abandonned", "to": "abandon"})
+    res = client.post(f"/api/suggestions/{sid}/accept").json()["result"]
+    assert res["mine"]["word_id"] == abandon and res["mine"]["needs_attention"] is False and res["mine"]["attention_msg"] is None and res["mine"]["suggested_word"] is None
+    assert client.get("/api/bank?state=attention").json()["items"] == [] and client.get("/api/auth/me").json()["counters"]["attention"] == 0
+    r = client.post(f"/api/bank/{abandon}/accept-suggestion")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "invalid_transition"
+    assert uw_row(settings, alice, abandon)["state"] == "new"
+    # merge branch: the flagged typo row wins (more repetitions) and takes the target — cleared there as well
+    prov2 = add_provisional(client, "abolishs")
+    abolish = word_id(settings, "abolish")
+    client.post(f"/api/words/{abolish}/mark", json={"action": "unfamiliar"})
+    typo = uw_row(settings, alice, prov2)
+    run(settings, "UPDATE user_words SET state = 'learning', repetitions = 5, needs_attention = 1, attention_msg = '暂时无法校验，请稍后重试或检查拼写' WHERE id = ?", (typo["id"],))
+    sid2 = suggest(settings, alice, "lemmatize", user_word_id=typo["id"], target_word_id=abolish, payload={"from": "abolishs", "to": "abolish"})
+    res = client.post(f"/api/suggestions/{sid2}/accept").json()["result"]
+    assert res["mine"]["id"] == typo["id"] and res["mine"]["word_id"] == abolish and res["mine"]["srs"]["repetitions"] == 5
+    assert res["mine"]["needs_attention"] is False and res["mine"]["attention_msg"] is None
+    assert client.get("/api/auth/me").json()["counters"]["attention"] == 0
+
+
+@pytest.mark.parametrize("held", ["mastered", "known", "removed"])
+def test_accept_merge_readds_a_target_held_outside_the_bank(client: TestClient, settings, alice, held):
+    """The user holds the target as mastered/known/removed and accepts a spelling fix of a fresh entry: the word must stay in
+    生词库 — the held row re-enters per DESIGN §4 (readd) and the typo row is parked, instead of a repetitions contest that
+    the row with no live SRS state wins and the entry silently disappearing."""
+    abandon = word_id(settings, "abandon")
+    if held == "known":
+        client.post(f"/api/words/{abandon}/mark", json={"action": "known"})
+    else:
+        client.post(f"/api/words/{abandon}/mark", json={"action": "unfamiliar"})
+        client.post(f"/api/words/{abandon}/mark", json={"action": "mastered" if held == "mastered" else "remove"})
+    real = uw_row(settings, alice, abandon)
+    assert real["state"] == held
+    run(settings, "UPDATE user_words SET repetitions = 6, first_added_at = '2026-01-01T00:00:00Z' WHERE id = ?", (real["id"],))
+    prov = add_provisional(client, "abandonned")
+    typo = uw_row(settings, alice, prov)
+    sid = suggest(settings, alice, "fix_spelling", user_word_id=typo["id"], target_word_id=abandon, payload={"from": "abandonned", "to": "abandon"})
+    before = q1(settings, "SELECT COUNT(*) FROM user_words WHERE user_id = ?", (alice,))
+    r = client.post(f"/api/suggestions/{sid}/accept")
+    assert r.status_code == 200, r.text
+    res = r.json()["result"]
+    assert res["applied"] is True and res["removed_word_id"] == prov and res["message_zh"] == "已合并到 “abandon”"
+    assert res["mine"]["id"] == real["id"] and res["mine"]["word_id"] == abandon and res["mine"]["state"] == "new"
+    assert res["mine"]["times_added"] == 2 and res["mine"]["priority"] == 80 and res["mine"]["input_text"] == "abandonned"
+    kept = qrow(settings, "SELECT * FROM user_words WHERE id = ?", (real["id"],))
+    assert (kept["state"], kept["step"], kept["due_at"], kept["mastered_at"], kept["ease"]) == ("new", 0, None, None, 2.3 if held == "mastered" else 2.5)
+    assert qrow(settings, "SELECT state, word_id FROM user_words WHERE id = ?", (typo["id"],)) == {"state": "removed", "word_id": prov}
+    assert q1(settings, "SELECT COUNT(*) FROM user_words WHERE user_id = ?", (alice,)) == before  # never deleted
+    assert [i["lemma"] for i in client.get("/api/bank").json()["items"]] == ["abandon"]
+    actions = [l["action"] for l in qrows(settings, "SELECT action FROM review_logs WHERE user_id = ? ORDER BY id", (alice,))]
+    assert actions[-2:] == ["readd", "consolidate"]
+    assert qrow(settings, "SELECT status FROM bank_suggestions WHERE id = ?", (sid,))["status"] == "accepted"
+    assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND dedupe_key = ?", (f"content:{abandon}",)) == 1
 
 
 # ----------------------------------------------------------------------------------------------- undo
@@ -267,6 +389,47 @@ def test_undo_of_an_auto_lemmatize_restores_prev_word_id(client: TestClient, set
     assert qrows(settings, "SELECT action, word_id FROM review_logs WHERE user_id = ? ORDER BY id", (alice,))[-1] == {"action": "consolidate", "word_id": prov}
     r = client.post(f"/api/suggestions/{sid}/undo")
     assert r.status_code == 409 and r.json()["error"]["code"] == "already_resolved"
+
+
+def test_undo_of_a_lookup_merge_restores_the_merged_word(client: TestClient, settings, alice):
+    """lookup_word merged the typo into the seed headword (merged_into_word_id set, 7-day auto undo): 撤销 must hand back a
+    word that is studied, shown as the user's and markable — not a bank row parked on a tombstone."""
+    from wd.ai import lookup
+    from wd.services import bank, batches, words
+
+    prov = add_provisional(client, "abandonning")
+    abandon = word_id(settings, "abandon")
+    uw = uw_row(settings, alice, prov)
+    item = {"input": "abandonning", "is_english": True, "kind": "word", "headword": "abandon", "form_note_zh": "abandon 的现在分词", "phonetic": "", "pos": "v.", "meaning_zh": "放弃", "definition_en": "to leave", "difficulty": 2, "suggested_correction": "", "safe_for_sharing": True, "note_zh": ""}
+    conn = db.connect(settings.db_path)
+    try:
+        out = lookup.apply_item(conn, words.word_row(conn, prov), item, now="2026-10-14T00:00:00Z")
+    finally:
+        conn.close()
+    assert out["outcome"] == "merged" and out["word_id"] == abandon
+    assert uw_row(settings, alice, abandon)["id"] == uw["id"] and qrow(settings, "SELECT merged_into_word_id FROM words WHERE id = ?", (prov,))["merged_into_word_id"] == abandon
+    assert q1(settings, "SELECT COUNT(*) FROM word_forms WHERE form = 'abandonning' AND word_id = ?", (abandon,)) == 1
+    (s,) = client.get("/api/suggestions?status=all").json()["items"]
+    assert s["type"] == "lemmatize" and s["status"] == "auto"
+    r = client.post(f"/api/suggestions/{s['id']}/undo")
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["mine"]["word_id"] == prov and r.json()["result"]["message_zh"] == "已撤销"
+    w = qrow(settings, "SELECT * FROM words WHERE id = ?", (prov,))
+    assert w["merged_into_word_id"] is None and w["is_public"] == 0 and w["is_valid_english"] == 1  # a standalone private word again
+    assert q1(settings, "SELECT COUNT(*) FROM word_forms WHERE form = 'abandonning'") == 0  # no alt form may equal a live lemma
+    detail = client.get(f"/api/words/{prov}").json()
+    assert detail["word"]["id"] == prov and detail["mine"]["id"] == uw["id"]
+    assert client.patch(f"/api/bank/{prov}", json={"note": "hello"}).status_code == 200
+    r = client.post(f"/api/words/{prov}/mark", json={"action": "unfamiliar", "context": "bank"})
+    assert r.status_code == 200 and r.json()["status"] == "exists" and q1(settings, "SELECT COUNT(*) FROM user_words WHERE user_id = ?", (alice,)) == 1
+    assert [i["lemma"] for i in client.get("/api/bank").json()["items"]] == ["abandonning"]
+    conn = db.connect(settings.db_path)
+    try:
+        sel = batches.select_words(conn, alice, bank.user_settings_row(conn, alice), "2026-10-14")
+        assert [n["word_id"] for n in sel.news] == [prov]  # pushed again
+    finally:
+        conn.close()
+    assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND dedupe_key = ? AND status = 'queued'", (f"content:{prov}",)) == 1  # the merge had cancelled it
 
 
 def test_undo_expired_and_not_auto(client: TestClient, settings, alice, frozen_clock):

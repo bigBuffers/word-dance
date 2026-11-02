@@ -107,7 +107,8 @@ ratified items into the design documents in the "contract change" commit.
    wd.jobs.scheduler.Scheduler as scheduler)`, constructed as `Cls(ctx.for_worker(worker_id))` and driven via
    `start()/stop()/join(timeout)` (`interfaces.BackgroundThread`). **Lease**: `kv.worker_lease` TTL 90 s renewed every 30 s
    by `wd/jobs/lease.py` (`acquire/renew/release/is_live`, `LeaseKeeper`); a second instance logs a warning and serves
-   requests only; stale `running` jobs are swept at startup; `workers != 1` (WEB_CONCURRENCY or `--workers`) raises
+   requests only while `main.LeaseWaiter` retries the lease every 30 s (a crash-restarted service takes over once the
+   stale lease expires); stale `running` jobs are swept when the lease is taken; `workers != 1` (WEB_CONCURRENCY or `--workers`) raises
    `SystemExit`. `create_app(settings=None, *, clock=None, configure_logs=True)`; `app.state.mailer` is
    `delivery.mailer.mailer_from_settings(cfg)` (`SmtpMailer` or `RecordingMailer`). **`wd worker-once`, `wd tick`,
    `wd restore` must use `wd.jobs.lease.is_live(conn, now_iso)` for the DEPLOY §9 exit-2 refusal** (`cli.LEASE_HINT`).
@@ -219,7 +220,8 @@ ratified items into the design documents in the "contract change" commit.
 ## 5. Known warnings (not defects)
 
 * `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead` — starlette
-  1.8 / fastapi 0.143; harmless until the pins move.
+  1.8 / fastapi 0.143; harmless until the pins move. Filtered by `[tool.pytest.ini_options] filterwarnings` in
+  `backend/pyproject.toml` (message match), so it no longer shows up in `make test`.
 * `WD_SECRET_KEY is not set; using a random per-process key` on every CLI run without the variable — expected outside
   install.sh.
 * `wd.backup` / `wd.seed` / handler modules / worker classes "not available yet" warnings at startup — the Phase-0 window
