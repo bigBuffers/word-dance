@@ -1,0 +1,163 @@
+# 2020 年上海市初中英语课程终结性评价指南·词汇表 —— 词条括号内的词形信息（不规则动词变化、复数、比较级、英美拼写、变体/全称）
+# 来源文件：07.pdf「2020年上海市初中英语课程终结性评价指南词汇表」，上海市教育考试院 2019-09-26 发布
+#   发布页：https://www.shmeea.edu.cn/page/08000/20190926/13309.html
+#   文件 URL（页面 href 原文，下载时 302 到 https）：http://www.shmeea.edu.cn/download/20190926/07.pdf
+# 本地副本：/private/tmp/claude-501/-Users-sqin-word-dance/0be1d882-e939-4b1e-8c2e-b69435664161/scratchpad/verify-provinces/dl-shmeea/07.pdf
+#   md5 = 059df9c02684bd989fff6f8849ee1993（与 mahavivo 转载件《上海市初中英语词汇表（2020年版）.pdf》逐字节相同）
+# 获取日期：2026-11-05
+# 说明文档：data/lists/shmeea-2020-junior.README.md
+# 范围：单词正文（PDF 第 2–72 页）词头行及其词性续行上、位于释义之前或紧跟词性标记的括号；原文照录，不作规范化
+#   （含全角逗号「，」、「或」、「；」）。be 的变化形式写在释义里，按原文补一行。附表中的 America (U.S.A.)、Britain (U.K.) 见 -appendix.tsv。
+# 格式：TSV，四列 headword / kind / printed / where；headword 与 shmeea-2020-junior.txt 中的行一致；
+#   kind ∈ irregular-forms（动词不规则变化）, plural（复数）, comparison（比较级/最高级）, past-form（过去式/过去分词说明）,
+#   us-spelling / uk-spelling（英美拼写）, full-form（全称/等价形式）, alt-form（变体写法）；where ∈ headword-line / continuation / gloss。
+#   每行只标一个 kind：maths (=mathematics，美 math) 只标 full-form，其美式拼写 math 未计入 us-spelling；much (more, most) 为比较级，标 comparison；
+#   burn、dream 的括号以「或」分隔两套变化，照录为一行。
+# 计数：146 行：alt-form 7；comparison 11；irregular-forms 94；past-form 5；us-spelling 12；plural 12；full-form 4；uk-spelling 1
+# headword	kind	printed	where
+A.M. (a.m.)	alt-form	a.m.	headword-line
+bad	comparison	比较级 worse，最高级 worst	headword-line
+be	irregular-forms	am, is, are, was, were, being, been	gloss
+beat	irregular-forms	beat, beaten	headword-line
+become	irregular-forms	became, become	headword-line
+begin	irregular-forms	began, begun	headword-line
+best	comparison	good, well 的最高级	headword-line
+better	comparison	good, well 的比较级	headword-line
+bite	irregular-forms	bit, bitten	headword-line
+blow	irregular-forms	blew, blown	headword-line
+born	past-form	动词 bear 的过去分词	headword-line
+break	irregular-forms	broke, broken	headword-line
+bring	irregular-forms	brought, brought	headword-line
+build	irregular-forms	built, built	headword-line
+bund (the Bund)	alt-form	the Bund	headword-line
+burn	irregular-forms	burned, burned 或 burnt, burnt	headword-line
+buy	irregular-forms	bought, bought	headword-line
+can	past-form	could	headword-line
+catch	irregular-forms	caught, caught	headword-line
+centre	us-spelling	美 center	headword-line
+child	plural	复 children	headword-line
+choose	irregular-forms	chose, chosen	headword-line
+colour	us-spelling	美 color	headword-line
+come	irregular-forms	came, come	headword-line
+cost	irregular-forms	cost, cost	headword-line
+cut	irregular-forms	cut, cut	headword-line
+deal	irregular-forms	dealt, dealt	headword-line
+dialogue	us-spelling	美 dialog	headword-line
+dig	irregular-forms	dug, dug	headword-line
+do	irregular-forms	did，done	headword-line
+draw	irregular-forms	drew, drawn	headword-line
+dream	irregular-forms	dreamt, dreamt 或 dreamed, dreamed	headword-line
+drink	irregular-forms	drank, drunk	headword-line
+drive	irregular-forms	drove, driven	headword-line
+eat	irregular-forms	ate, eaten	headword-line
+e-mail (email)	alt-form	email	headword-line
+fall	irregular-forms	fell, fallen	headword-line
+far	comparison	比较级 farther， 最高级 farthest 或比较级 further，最高级 furthest	headword-line
+favour	us-spelling	美 favor	headword-line
+favourite	us-spelling	美 favorite	headword-line
+feed	irregular-forms	fed, fed	headword-line
+feel	irregular-forms	felt, felt	headword-line
+fight	irregular-forms	fought, fought	headword-line
+find	irregular-forms	found, found	headword-line
+fit	irregular-forms	fit, fit；fitted, fitted	headword-line
+fly	irregular-forms	flew, flown	headword-line
+foot	plural	复 feet	headword-line
+forget	irregular-forms	forgot, forgotten	headword-line
+freeze	irregular-forms	froze, frozen	headword-line
+get	irregular-forms	got, got	headword-line
+give	irregular-forms	gave, given	headword-line
+go	irregular-forms	went, gone	headword-line
+good	comparison	比较级 better，最高级 best	headword-line
+grow	irregular-forms	grew, grown	headword-line
+hang	irregular-forms	hanged, hanged	headword-line
+hang	irregular-forms	hung, hung	continuation
+have	irregular-forms	had, had	headword-line
+hear	irregular-forms	heard, heard	headword-line
+hide	irregular-forms	hid, hidden	headword-line
+hit	irregular-forms	hit, hit	headword-line
+hold	irregular-forms	held, held	headword-line
+honour	us-spelling	美 honor	headword-line
+hurt	irregular-forms	hurt, hurt	headword-line
+keep	irregular-forms	kept, kept	headword-line
+knife	plural	复 knives	headword-line
+know	irregular-forms	knew, known	headword-line
+lay	irregular-forms	laid, laid	headword-line
+lead	irregular-forms	led, led	headword-line
+learn	irregular-forms	learnt，learnt；learned，learned	headword-line
+leave	irregular-forms	left, left	headword-line
+lend	irregular-forms	lent, lent	headword-line
+let	irregular-forms	let, let	headword-line
+lie	irregular-forms	lay, lain	continuation
+life	plural	复 lives	headword-line
+little	comparison	比较级 less，最高级 least	headword-line
+lose	irregular-forms	lost, lost	headword-line
+make	irregular-forms	made, made	headword-line
+man	plural	复 men	headword-line
+manner(s)	alt-form	s	headword-line
+many	comparison	比较级 more，最高级 most	headword-line
+maths	full-form	=mathematics，美 math	headword-line
+may	past-form	might	headword-line
+mean	irregular-forms	meant, meant	headword-line
+meet	irregular-forms	met, met	headword-line
+metre	us-spelling	美 meter	headword-line
+more	comparison	much 或 many 的比较级	headword-line
+most	comparison	much 或 many 的最高级	headword-line
+mouse	plural	复 mice	headword-line
+much	comparison	more, most	headword-line
+neighbour	us-spelling	美 neighbor	headword-line
+neighbourhood	us-spelling	美 neighborhood	headword-line
+pay	irregular-forms	paid，paid	headword-line
+phone (=telephone)	full-form	=telephone	headword-line
+photo (=photograph)	full-form	=photograph	headword-line
+P.M. (p.m.)	alt-form	p.m.	headword-line
+policeman	plural	复数 policemen	headword-line
+popular (=pop)	full-form	=pop	headword-line
+postman	plural	复数 postmen	headword-line
+practice	uk-spelling	英 practise	continuation
+programme	us-spelling	美 program	headword-line
+put	irregular-forms	put，put	headword-line
+read	irregular-forms	read, read	headword-line
+ride	irregular-forms	rode, ridden	headword-line
+ring	irregular-forms	rang, rung	headword-line
+run	irregular-forms	ran, run	headword-line
+say	irregular-forms	said, said	headword-line
+see	irregular-forms	saw, seen	headword-line
+sell	irregular-forms	sold, sold	headword-line
+send	irregular-forms	sent, sent	headword-line
+set	irregular-forms	set, set	headword-line
+shake	irregular-forms	shook, shaken	headword-line
+shall	past-form	should	headword-line
+sheep	plural	复 sheep	headword-line
+shelf	plural	复 shelves	headword-line
+shine	irregular-forms	shone, shone	headword-line
+should	past-form	shall 的过去时态	headword-line
+show	irregular-forms	showed, shown	headword-line
+shut	irregular-forms	shut, shut	headword-line
+sit	irregular-forms	sat, sat	headword-line
+sleep	irregular-forms	slept, slept	headword-line
+smell	irregular-forms	smelt, smelt	headword-line
+speak	irregular-forms	spoke, spoken	headword-line
+spread	irregular-forms	spread, spread	headword-line
+stand	irregular-forms	stood, stood	headword-line
+steal	irregular-forms	stole, stolen	headword-line
+stick	irregular-forms	stuck, stuck	continuation
+strike	irregular-forms	struck, struck/stricken	headword-line
+sweep	irregular-forms	swept, swept	headword-line
+swim	irregular-forms	swam, swum	headword-line
+take	irregular-forms	took，taken	headword-line
+teach	irregular-forms	taught, taught	headword-line
+television (TV)	alt-form	TV	headword-line
+tell	irregular-forms	told, told	headword-line
+theatre	us-spelling	美 theater	headword-line
+think	irregular-forms	thought, thought	headword-line
+throw	irregular-forms	threw, thrown	headword-line
+tooth	plural	复 teeth	headword-line
+toward(s)	alt-form	s	headword-line
+underground	us-spelling	美 subway	continuation
+understand	irregular-forms	understood, understood	headword-line
+wake	irregular-forms	woke, woken	headword-line
+wear	irregular-forms	wore, worn	headword-line
+well	comparison	比较级 better，最高级 best	headword-line
+win	irregular-forms	won, won	headword-line
+woman	plural	复 women	headword-line
+write	irregular-forms	wrote, written	headword-line

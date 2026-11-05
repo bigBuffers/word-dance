@@ -1,0 +1,171 @@
+# 2020 年上海市初中英语课程终结性评价指南·词汇表 —— 附表（代词、数词、月份星期、国家/大洲及其对应的人、常用学科）
+# 来源文件：07.pdf「2020年上海市初中英语课程终结性评价指南词汇表」，上海市教育考试院 2019-09-26 发布
+#   发布页：https://www.shmeea.edu.cn/page/08000/20190926/13309.html
+#   文件 URL（页面 href 原文，下载时 302 到 https）：http://www.shmeea.edu.cn/download/20190926/07.pdf
+# 本地副本：/private/tmp/claude-501/-Users-sqin-word-dance/0be1d882-e939-4b1e-8c2e-b69435664161/scratchpad/verify-provinces/dl-shmeea/07.pdf
+#   md5 = 059df9c02684bd989fff6f8849ee1993（与 mahavivo 转载件《上海市初中英语词汇表（2020年版）.pdf》逐字节相同）
+# 获取日期：2026-11-05
+# 说明文档：data/lists/shmeea-2020-junior.README.md
+# 范围：PDF 第 85–89 页（印刷页码 84–88）：人称代词、物主代词、反身代词（p.84）；基数词和序数词（p.85–86）；月份和星期（p.87）；
+#   国家、大洲及其对应的人（p.87–88）；常用学科（p.88）。这些词不在 A–Z 正文内，单独成表，不要并入主表计数。
+# 格式：TSV，三列 word / section / note；word 保留原文词形（Math(s), one hundred (and) one）；每个词形在同一节内只列一次。
+# 计数：158 行：人称代词 12；物主代词(形容词性) 7；物主代词(名词性) 7；反身代词 8；基数词 39；序数词 33；星期 7；月份 12；国家/大洲 13；国籍/洲人 14；常用学科 6
+# word	section	note
+I	人称代词	
+me	人称代词	
+we	人称代词	
+us	人称代词	
+you	人称代词	
+he	人称代词	
+him	人称代词	
+she	人称代词	
+her	人称代词	
+it	人称代词	
+they	人称代词	
+them	人称代词	
+my	物主代词(形容词性)	
+your	物主代词(形容词性)	
+his	物主代词(形容词性)	
+her	物主代词(形容词性)	
+its	物主代词(形容词性)	
+our	物主代词(形容词性)	
+their	物主代词(形容词性)	
+mine	物主代词(名词性)	
+yours	物主代词(名词性)	
+his	物主代词(名词性)	
+hers	物主代词(名词性)	
+its	物主代词(名词性)	
+ours	物主代词(名词性)	
+theirs	物主代词(名词性)	
+myself	反身代词	
+yourself	反身代词	
+himself	反身代词	
+herself	反身代词	
+itself	反身代词	
+ourselves	反身代词	
+yourselves	反身代词	
+themselves	反身代词	
+one	基数词	
+two	基数词	
+three	基数词	
+four	基数词	
+five	基数词	
+six	基数词	
+seven	基数词	
+eight	基数词	
+nine	基数词	
+ten	基数词	
+eleven	基数词	
+twelve	基数词	
+thirteen	基数词	
+fourteen	基数词	
+fifteen	基数词	
+sixteen	基数词	
+seventeen	基数词	
+eighteen	基数词	
+nineteen	基数词	
+twenty	基数词	
+twenty-one	基数词	
+twenty-two	基数词	
+twenty-three	基数词	
+thirty	基数词	
+forty	基数词	
+fifty	基数词	
+sixty	基数词	
+seventy	基数词	
+eighty	基数词	
+ninety	基数词	
+one hundred	基数词	
+one hundred (and) one	基数词	
+one hundred (and) two	基数词	
+three hundred	基数词	
+one thousand	基数词	
+three thousand	基数词	
+ten thousand	基数词	
+one million	基数词	
+one billion	基数词	
+first	序数词	
+second	序数词	
+third	序数词	
+fourth	序数词	
+fifth	序数词	
+sixth	序数词	
+seventh	序数词	
+eighth	序数词	
+ninth	序数词	
+tenth	序数词	
+eleventh	序数词	
+twelfth	序数词	
+thirteenth	序数词	
+fourteenth	序数词	
+fifteenth	序数词	
+sixteenth	序数词	
+seventeenth	序数词	
+eighteenth	序数词	
+nineteenth	序数词	
+twentieth	序数词	
+twenty-first	序数词	
+twenty-second	序数词	
+twenty-third	序数词	
+thirtieth	序数词	
+fortieth	序数词	
+fiftieth	序数词	
+sixtieth	序数词	
+seventieth	序数词	
+eightieth	序数词	
+ninetieth	序数词	
+one hundredth	序数词	
+one hundred and first	序数词	
+one hundred and second	序数词	
+Monday	星期	
+Tuesday	星期	
+Wednesday	星期	
+Thursday	星期	
+Friday	星期	
+Saturday	星期	
+Sunday	星期	
+January	月份	
+February	月份	
+March	月份	
+April	月份	
+May	月份	
+June	月份	
+July	月份	
+August	月份	
+September	月份	
+October	月份	
+November	月份	
+December	月份	
+America	国家/大洲	U.S.A.
+American	国籍/洲人	
+Australian	国籍/洲人	
+Australia	国家/大洲	
+British	国籍/洲人	
+Britain	国家/大洲	U.K.
+Briton	国籍/洲人	
+Canadian	国籍/洲人	
+Canada	国家/大洲	
+Chinese	国籍/洲人	
+China	国家/大洲	
+English	国籍/洲人	
+England	国家/大洲	
+French	国籍/洲人	
+France	国家/大洲	
+German	国籍/洲人	
+Germany	国家/大洲	
+Italian	国籍/洲人	
+Italy	国家/大洲	
+Japanese	国籍/洲人	
+Japan	国家/大洲	
+Asian	国籍/洲人	
+Asia	国家/大洲	
+African	国籍/洲人	
+Africa	国家/大洲	
+European	国籍/洲人	
+Europe	国家/大洲	
+Chinese	常用学科	
+English	常用学科	
+Math(s)	常用学科	
+Biology	常用学科	
+Physics	常用学科	
+Chemistry	常用学科	

@@ -1,0 +1,279 @@
+# moe-2022-appendix.tsv — 《义务教育英语课程标准（2022 年版）》附录 3 词汇表的附表：数词表、月份/星期词汇表、部分地理名称及相关信息、部分国家/重要组织机构名称缩写、部分重要节日名称/中国文化专有名词、不规则动词表（说明第 5–7 条「单独列出」，不并入主表计数）
+# 来源：教育部教材〔2022〕2 号通知附件 W020220420582349487953.pdf（《义务教育英语课程标准（2022 年版）》），官方 URL http://www.moe.gov.cn/srcsite/A26/s8001/202204/W020220420582349487953.pdf
+#   （通知页 http://www.moe.gov.cn/srcsite/A26/s8001/202204/t20220420_619921.html）；依据 docs/analysis/2026-11-05-stages-regions-images/facts/provinces.md [provinces-1]、facts/shanghai-primary.md 第 53 行
+# 本地副本：/private/tmp/claude-501/-Users-sqin-word-dance/0be1d882-e939-4b1e-8c2e-b69435664161/scratchpad/shanghai-primary/moe/english_std_2022.pdf  md5 2806e276f3486f4bb581d1a0153ef337（`md5 -q`）；获取日期 2026-11-05（facts 记录）
+# 说明文档：data/lists/moe-2022.README.md（页码、规则、计数、与对照件的差异清单与裁决、存疑条目）
+# 页码：PDF 第 135（下半页）–144 页 = 印刷页 128–137：数词表 PDF 135 下–136；月份、星期 137 上；地理名称 137 下–138；缩写 139 上；节日/地名景点/其他专有名词 139 下；不规则动词 140–144。纯扫描，逐词目视转录（p-135…p-144 渲染图，疑点 300–400 dpi 裁剪复核）
+# 列：类别<TAB>词<TAB>附加1<TAB>附加2（固定 4 列，不适用处为空串；附加列为空时以 TAB 占位，故 161 行以 TAB 结尾、其中 143 行以两个 TAB 结尾，与 shmeea-2020-junior-appendix.tsv 做法一致）。类别取值 = 原文表题/栏头：数词-基数词、数词-序数词、月份、星期、地理名称、地理名称-派生、缩写、节日、地名景点、其他专有名词、不规则动词
+#   地理名称-派生：附加1 = 所属地名（原文两栏「Africa n. | African n., adj.」拆成两行）；不规则动词：附加1 = 过去式、附加2 = 过去分词（原文无过去分词处照录破折号「—」：can、may、must、shall、will）
+# 规则：保留原文拼写、大小写与括号注（be (am, is, are)、The United Kingdom (UK)、Beijing opera (Peking opera)、hang (悬挂)、lie (躺) 为原文消歧注）；印刷折行合并（UNESCO、The Changjiang River (The Yangtze River)、Traditional Chinese Medicine (TCM)）；
+#   去掉地理名称表的词性标注 n. / n., adj.；弯引号 ’ → '（Children's、Tian'anmen）；可选形式「 / 」写作「/」（burnt/burned、born/borne、got/gotten）；read 行去掉原文区分读音的音标 /riːd/ /red/，三形均写 read；qipao 原文斜体
+# 计数：267 行：数词-基数词 30、数词-序数词 28、月份 12、星期 7、地理名称 27、地理名称-派生 18、缩写 7、节日 13、地名景点 8、其他专有名词 11、不规则动词 106
+# 类别	词	附加1	附加2
+数词-基数词	one		
+数词-基数词	two		
+数词-基数词	three		
+数词-基数词	four		
+数词-基数词	five		
+数词-基数词	six		
+数词-基数词	seven		
+数词-基数词	eight		
+数词-基数词	nine		
+数词-基数词	ten		
+数词-基数词	eleven		
+数词-基数词	twelve		
+数词-基数词	thirteen		
+数词-基数词	fourteen		
+数词-基数词	fifteen		
+数词-基数词	sixteen		
+数词-基数词	seventeen		
+数词-基数词	eighteen		
+数词-基数词	nineteen		
+数词-基数词	twenty		
+数词-基数词	thirty		
+数词-基数词	forty		
+数词-基数词	fifty		
+数词-基数词	sixty		
+数词-基数词	seventy		
+数词-基数词	eighty		
+数词-基数词	ninety		
+数词-基数词	hundred		
+数词-基数词	thousand		
+数词-基数词	million		
+数词-序数词	first		
+数词-序数词	second		
+数词-序数词	third		
+数词-序数词	fourth		
+数词-序数词	fifth		
+数词-序数词	sixth		
+数词-序数词	seventh		
+数词-序数词	eighth		
+数词-序数词	ninth		
+数词-序数词	tenth		
+数词-序数词	eleventh		
+数词-序数词	twelfth		
+数词-序数词	thirteenth		
+数词-序数词	fourteenth		
+数词-序数词	fifteenth		
+数词-序数词	sixteenth		
+数词-序数词	seventeenth		
+数词-序数词	eighteenth		
+数词-序数词	nineteenth		
+数词-序数词	twentieth		
+数词-序数词	thirtieth		
+数词-序数词	fortieth		
+数词-序数词	fiftieth		
+数词-序数词	sixtieth		
+数词-序数词	seventieth		
+数词-序数词	eightieth		
+数词-序数词	ninetieth		
+数词-序数词	hundredth		
+月份	January		
+月份	February		
+月份	March		
+月份	April		
+月份	May		
+月份	June		
+月份	July		
+月份	August		
+月份	September		
+月份	October		
+月份	November		
+月份	December		
+星期	Monday		
+星期	Tuesday		
+星期	Wednesday		
+星期	Thursday		
+星期	Friday		
+星期	Saturday		
+星期	Sunday		
+地理名称	Africa		
+地理名称-派生	African	Africa	
+地理名称	America		
+地理名称-派生	American	America	
+地理名称	Antarctica		
+地理名称	Asia		
+地理名称-派生	Asian	Asia	
+地理名称	Australia		
+地理名称-派生	Australian	Australia	
+地理名称	Britain		
+地理名称-派生	British	Britain	
+地理名称	Canada		
+地理名称-派生	Canadian	Canada	
+地理名称	China		
+地理名称-派生	Chinese	China	
+地理名称	England		
+地理名称-派生	English	England	
+地理名称	Europe		
+地理名称-派生	European	Europe	
+地理名称	France		
+地理名称-派生	French	France	
+地理名称	Germany		
+地理名称-派生	German	Germany	
+地理名称	India		
+地理名称-派生	Indian	India	
+地理名称	Italy		
+地理名称-派生	Italian	Italy	
+地理名称	Japan		
+地理名称-派生	Japanese	Japan	
+地理名称	London		
+地理名称	New York		
+地理名称	New Zealand		
+地理名称-派生	New Zealander	New Zealand	
+地理名称	Paris		
+地理名称	Russia		
+地理名称-派生	Russian	Russia	
+地理名称	Singapore		
+地理名称-派生	Singaporean	Singapore	
+地理名称	South Africa		
+地理名称-派生	South African	South Africa	
+地理名称	The Atlantic Ocean		
+地理名称	The Indian Ocean		
+地理名称	The Pacific Ocean		
+地理名称	The United Kingdom (UK)		
+地理名称	The United States of America (USA)		
+缩写	CPC (Communist Party of China)		
+缩写	PLA (People's Liberation Army)		
+缩写	PRC (People's Republic of China)		
+缩写	UN (United Nations)		
+缩写	UNESCO (United Nations Educational, Scientific and Cultural Organization)		
+缩写	WHO (World Health Organization)		
+缩写	WTO (World Trade Organization)		
+节日	Children's Day		
+节日	Double Ninth Festival		
+节日	Dragon Boat Festival		
+节日	Labour Day		
+节日	Lantern Festival		
+节日	Mid-Autumn Festival		
+节日	National Day		
+节日	New Year's Day		
+节日	PLA Day		
+节日	Spring Festival		
+节日	Teachers' Day		
+节日	Tomb-sweeping Day		
+节日	Women's Day		
+地名景点	Mount Huangshan		
+地名景点	Mount Qomolangma		
+地名景点	Mount Taishan		
+地名景点	The Changjiang River (The Yangtze River)		
+地名景点	The Great Wall		
+地名景点	The Palace Museum		
+地名景点	The Yellow River		
+地名景点	Tian'anmen Square		
+其他专有名词	Beijing opera (Peking opera)		
+其他专有名词	Beijing roast duck		
+其他专有名词	hot pot		
+其他专有名词	lunar calendar		
+其他专有名词	mooncake		
+其他专有名词	paper-cut		
+其他专有名词	qipao		
+其他专有名词	Spring Festival couplets		
+其他专有名词	spring roll		
+其他专有名词	The Silk Road		
+其他专有名词	Traditional Chinese Medicine (TCM)		
+不规则动词	awake	awoke	awoken
+不规则动词	be (am, is, are)	was, were	been
+不规则动词	bear	bore	born/borne
+不规则动词	beat	beat	beaten
+不规则动词	become	became	become
+不规则动词	begin	began	begun
+不规则动词	bleed	bled	bled
+不规则动词	blow	blew	blown
+不规则动词	break	broke	broken
+不规则动词	bring	brought	brought
+不规则动词	build	built	built
+不规则动词	burn	burnt/burned	burnt/burned
+不规则动词	buy	bought	bought
+不规则动词	can	could	—
+不规则动词	catch	caught	caught
+不规则动词	choose	chose	chosen
+不规则动词	come	came	come
+不规则动词	cost	cost	cost
+不规则动词	cut	cut	cut
+不规则动词	deal	dealt	dealt
+不规则动词	dig	dug	dug
+不规则动词	do	did	done
+不规则动词	draw	drew	drawn
+不规则动词	dream	dreamt/dreamed	dreamt/dreamed
+不规则动词	drink	drank	drunk
+不规则动词	drive	drove	driven
+不规则动词	eat	ate	eaten
+不规则动词	fall	fell	fallen
+不规则动词	feed	fed	fed
+不规则动词	feel	felt	felt
+不规则动词	fight	fought	fought
+不规则动词	find	found	found
+不规则动词	fly	flew	flown
+不规则动词	forget	forgot	forgotten
+不规则动词	freeze	froze	frozen
+不规则动词	get	got	got/gotten
+不规则动词	give	gave	given
+不规则动词	go	went	gone
+不规则动词	grow	grew	grown
+不规则动词	hang (悬挂)	hung	hung
+不规则动词	have	had	had
+不规则动词	hear	heard	heard
+不规则动词	hide	hid	hidden
+不规则动词	hit	hit	hit
+不规则动词	hold	held	held
+不规则动词	hurt	hurt	hurt
+不规则动词	keep	kept	kept
+不规则动词	know	knew	known
+不规则动词	lay	laid	laid
+不规则动词	lead	led	led
+不规则动词	learn	learnt/learned	learnt/learned
+不规则动词	leave	left	left
+不规则动词	lend	lent	lent
+不规则动词	let	let	let
+不规则动词	lie (躺)	lay	lain
+不规则动词	light	lit/lighted	lit/lighted
+不规则动词	lose	lost	lost
+不规则动词	make	made	made
+不规则动词	may	might	—
+不规则动词	mean	meant	meant
+不规则动词	meet	met	met
+不规则动词	mistake	mistook	mistaken
+不规则动词	must	must	—
+不规则动词	pay	paid	paid
+不规则动词	put	put	put
+不规则动词	read	read	read
+不规则动词	ride	rode	ridden
+不规则动词	ring	rang	rung
+不规则动词	rise	rose	risen
+不规则动词	run	ran	run
+不规则动词	say	said	said
+不规则动词	see	saw	seen
+不规则动词	sell	sold	sold
+不规则动词	send	sent	sent
+不规则动词	set	set	set
+不规则动词	shake	shook	shaken
+不规则动词	shall	should	—
+不规则动词	shine	shone	shone
+不规则动词	shoot	shot	shot
+不规则动词	show	showed	shown
+不规则动词	shut	shut	shut
+不规则动词	sing	sang	sung
+不规则动词	sit	sat	sat
+不规则动词	sleep	slept	slept
+不规则动词	smell	smelt/smelled	smelt/smelled
+不规则动词	speak	spoke	spoken
+不规则动词	speed	sped/speeded	sped/speeded
+不规则动词	spell	spelt/spelled	spelt/spelled
+不规则动词	spend	spent	spent
+不规则动词	spread	spread	spread
+不规则动词	stand	stood	stood
+不规则动词	steal	stole	stolen
+不规则动词	stick	stuck	stuck
+不规则动词	sweep	swept	swept
+不规则动词	swim	swam	swum
+不规则动词	take	took	taken
+不规则动词	teach	taught	taught
+不规则动词	tell	told	told
+不规则动词	think	thought	thought
+不规则动词	throw	threw	thrown
+不规则动词	understand	understood	understood
+不规则动词	wake	woke	woken
+不规则动词	wear	wore	worn
+不规则动词	will	would	—
+不规则动词	win	won	won
+不规则动词	write	wrote	written

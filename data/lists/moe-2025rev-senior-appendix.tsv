@@ -1,0 +1,62 @@
+# moe-2025rev-senior-appendix.tsv — 《普通高中英语课程标准 日常修订版（2017 年版 2025 年修订）》附录 2 末尾「部分国家名称及相关信息（供教学参考）」表
+# 来源/本地副本/md5 同 moe-2025rev-senior.tsv；PDF 第 133–135 页 = 印刷页 130–132
+# 列：国家(中文)<TAB>COUNTRY n.<TAB>PERSON n.<TAB>RELATED ADJECTIVES；单元格内跨行文字已合并，「 / 」→「/」，弯引号 ’ → '；无星级（附录 2 说明第 7 条）
+# 注：文本层中「阿根廷」缺「廷」字（仅「阿根」），已按印刷页 130 页面图像补正
+# 计数：56 行
+# country_zh	country	person	adjective
+阿富汗	Afghanistan	Afghan	Afghan
+阿尔及利亚	Algeria	Algerian	Algerian
+阿根廷	Argentina	Argentinian	Argentinian
+澳大利亚	Australia	Australian	Australian
+奥地利	Austria	Austrian	Austrian
+比利时	Belgium	Belgian	Belgian
+巴西	Brazil	Brazilian	Brazilian
+加拿大	Canada	Canadian	Canadian
+中国	China	Chinese	Chinese
+哥伦比亚	Colombia	Colombian	Colombian
+古巴	Cuba	Cuban	Cuban
+丹麦	Denmark	Dane	Danish
+朝鲜	Democratic People's Republic of Korea—DPRK	Korean	Korean
+埃及	Egypt	Egyptian	Egyptian
+芬兰	Finland	Finn	Finnish
+法国	France	Frenchman/Frenchwoman	French
+德国	Germany	German	German
+希腊	Greece	Greek	Greek
+匈牙利	Hungary	Hungarian	Hungarian
+印度	India	Indian	Indian
+印度尼西亚	Indonesia	Indonesian	Indonesian
+伊朗	Iran	Iranian	Iranian
+伊拉克	Iraq	Iraqi	Iraqi
+爱尔兰	Ireland	Irish	Irish
+以色列	Israel	Israeli	Israeli
+意大利	Italy	Italian	Italian
+日本	Japan	Japanese	Japanese
+约旦	Jordan	Jordanian	Jordanian
+肯尼亚	Kenya	Kenyan	Kenyan
+科威特	Kuwait	Kuwaiti	Kuwaiti
+黎巴嫩	Lebanon	Lebanese	Lebanese
+卢森堡	Luxembourg	Luxembourger	Luxembourg
+马来西亚	Malaysia	Malaysian	Malaysian
+墨西哥	Mexico	Mexican	Mexican
+缅甸	Myanmar	Burmese	Burmese
+荷兰	Netherlands	Dutch	Dutch
+新西兰	New Zealand	New Zealander	New Zealand
+挪威	Norway	Norwegian	Norwegian
+巴基斯坦	Pakistan	Pakistani	Pakistani
+巴拿马	Panama	Panamanian	Panamanian
+菲律宾	Philippines	Filipino	Philippine
+波兰	Poland	Polish	Polish
+葡萄牙	Portugal	Portuguese	Portuguese
+韩国	Republic of Korea—ROK	Korean	Korean
+俄罗斯	Russia	Russian	Russian
+沙特阿拉伯	Saudi Arabia	Saudi Arabian	Saudi Arabian
+新加坡	Singapore	Singaporean	Singaporean
+南非	South Africa	South African	South African
+西班牙	Spain	Spaniard	Spanish
+瑞典	Sweden	Swedish	Swedish
+瑞士	Switzerland	Swiss	Swiss
+泰国	Thailand	Thai	Thai
+土耳其	Türkiye	Turk	Turkish
+英国	the United Kingdom—UK	Briton	British
+美国	the United States of America—USA	American	American
+越南	Vietnam	Vietnamese	Vietnamese

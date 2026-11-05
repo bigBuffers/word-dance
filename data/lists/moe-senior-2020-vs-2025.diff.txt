@@ -1,0 +1,635 @@
+# moe-senior-2020-vs-2025.diff.txt — 2025 修订版（日常修订版）主表相对 2020 版主表的变化
+# 输入：moe-2020-senior.tsv（3000 条）与 moe-2025rev-senior.tsv（3099 条）。匹配分三步：(1) 词条首词形完全一致（去括号、按「/」拆分后的首项，大小写敏感）；
+#   (2) 未匹配者按宽松词形匹配（括号变体/并列形式、括号内小品词拼接如 according (to)=according to、连字符与空格等价），大小写敏感；
+#   (3) 双方仍未匹配者再做大小写不敏感匹配（Internet→internet）；已在第 (1) 步精确匹配的词不再参与 (2)(3)。≈ = 已匹配但全文不同的所有对（含第 (1) 步首词形相同者，如 child (pl. children)→child），不计入新增/删除；~ = 首词形相同且级别变化，可与 ≈ 重叠（emperor/empress、gym (=gymnasium)、host/hostess、medium 4 条）；首词形不同的级别变化（advertisement (ad)→ad、percent→per cent (percent)、bean curd (tofu)→tofu (bean curd)）不计入 ~。详见 moe-senior.README.md §8、§10。
+# 小结：+ 新增 196（级别 0: 48，1: 74，2: 74）；- 删除 93（级别 0: 89，1: 0，2: 4）；~ 星级变化 273；≈ 词形改写 48；国家附表 +1 / -0 / 改写 8
+# 行格式：「+ 词条\t2025级别」「- 词条\t2020级别」「~ 词条\t2020级别->2025级别」「≈ 2020词形\t->\t2025词形\t(2020级别->2025级别)」；各节按 2025 版主表原文顺序排列（- 节按 2020 版；≈ 节按 2025 词形），即大小写不敏感字母序加原文自身的个别排列（如 ~ 节 p.m. 在 player 之后）
+
+## + 2025 版新增（196）
++ AI (=artificial intelligence)	0
++ alert	2
++ anniversary	1
++ Antarctica	2
++ app (=application)	0
++ Arctic	2
++ bacteria	1
++ BCE (Before the Common Era)	2
++ bee	0
++ besides	2
++ bias	2
++ bin	0
++ brand	1
++ bug	2
++ bully	0
++ burst	1
++ butterfly	0
++ capture	1
++ casual	2
++ cautious	2
++ CE (Common Era)	2
++ ceremony	2
++ charm	1
++ childhood	1
++ chip	0
++ chore	0
++ collaborate	1
++ command	1
++ compass	1
++ confident	1
++ conscious	2
++ controversial	2
++ convey	2
++ craft	2
++ crowded	0
++ cucumber	0
++ currency	2
++ curve	1
++ dam	1
++ dawn	1
++ dedicate	2
++ delight	1
++ disappoint	0
++ doll	0
++ drone	1
++ drown	1
++ economy	1
++ electric	0
++ elevator	1
++ eliminate	2
++ empathy	2
++ endangered	2
++ ethical	2
++ ethnic	2
++ evolve	2
++ exceed	2
++ exhaust	2
++ fable	1
++ faint	2
++ fascinating	2
++ fertile	1
++ final	0
++ fireman	0
++ firework	0
++ flame	2
++ float	1
++ fog	0
++ fool	0
++ fortune	1
++ frame	2
++ fulfil	2
++ furthermore	1
++ gene	2
++ gesture	1
++ giant	1
++ glance	2
++ god	0
++ graceful	2
++ gratitude	2
++ headline	1
++ helicopter	1
++ heritage	1
++ highway	1
++ horror	1
++ humanity	2
++ humour (humor)	0
++ humourous	1
++ hybrid	2
++ ingredient	1
++ ink	1
++ intellectual	2
++ invest	1
++ irrigation	1
++ keen	1
++ kung fu	0
++ lean	1
++ leap	2
++ legend	2
++ lifestyle	1
++ lightning	0
++ lip	1
++ livestock	1
++ lost	0
++ loyal	2
++ magnificent	2
++ mall	0
++ marine	2
++ meanwhile	2
++ metaphor	2
++ migration	2
++ miracle	2
++ mobile	0
++ modernization	1
++ modest	1
++ modify	2
++ monument	1
++ mutton	0
++ mutual	2
++ mystery	1
++ myth	2
++ neutral	2
++ numerous	1
++ obey	1
++ obstacle	2
++ offend	1
++ Olympic	0
++ operate	0
++ orchestra	2
++ organise (organize)	0
++ oven	0
++ packet	0
++ pagoda	1
++ pants	1
++ patriotism	1
++ penguin	0
++ perform	0
++ perspective	2
++ pile	1
++ ping-pong	0
++ pizza	0
++ porridge	0
++ portrait	1
++ poverty	1
++ prince/princess	0
++ principal	2
++ proportion	2
++ prosperity	2
++ puzzle	2
++ pyramid	1
++ recent	0
++ reinforce	2
++ rejuvenate	2
++ relieve	1
++ religion	1
++ revolution	1
++ rhythm	1
++ rival	2
++ rough	2
++ sacrifice	2
++ sauce	1
++ scale	1
++ scan	1
++ selfish	2
++ semester	2
++ shell	2
++ sigh	1
++ slave	1
++ socialism	0
++ sore	0
++ souvenir	2
++ spacecraft	1
++ spicy	1
++ split	1
++ status	2
++ steady	1
++ supplement	2
++ symptom	2
++ tap	0
++ teamwork	0
++ teenage	0
++ tent	0
++ theirs	0
++ throat	0
++ tomb	1
++ transfer	1
++ transition	2
++ tropical	2
++ tunnel	1
++ union	1
++ valid	2
++ voluntary	0
++ voyage	2
++ web	1
++ wetland	1
++ wolf	0
++ yield	2
+
+## - 2025 版删除（93）
+- AD	2
+- African	0
+- American	0
+- April	0
+- Asian	0
+- August	0
+- Australia	0
+- Australian	0
+- BC	2
+- Britain	0
+- British	0
+- Canada	0
+- Canadian	0
+- cheek	2
+- crayon	0
+- December	0
+- eight	0
+- eighteen	0
+- eighth	0
+- eighty	0
+- eleven	0
+- England	0
+- European	0
+- February	0
+- fifteen	0
+- fifth	0
+- fifty	0
+- first	0
+- five	0
+- foggy	2
+- forty	0
+- four	0
+- fourteen	0
+- fourth	0
+- France	0
+- French	0
+- Friday	0
+- German	0
+- Germany	0
+- humorous	0
+- hundred	0
+- India	0
+- Indian	0
+- January	0
+- Japan	0
+- Japanese	0
+- July	0
+- June	0
+- London	0
+- March	0
+- May	0
+- Monday	0
+- nine	0
+- nineteen	0
+- ninety	0
+- ninth	0
+- November	0
+- October	0
+- Olympics	0
+- one	0
+- pupil	0
+- Russia	0
+- Russian	0
+- Saturday	0
+- second	0
+- September	0
+- seven	0
+- seventeen	0
+- seventh	0
+- seventy	0
+- six	0
+- sixteen	0
+- sixth	0
+- sixty	0
+- Sunday	0
+- swimming	0
+- ten	0
+- tenth	0
+- third	0
+- thirteen	0
+- thirty	0
+- thousand	0
+- three	0
+- Thursday	0
+- Tuesday	0
+- twelfth	0
+- twelve	0
+- twentieth	0
+- twenty	0
+- two	0
+- UK	0
+- US	0
+- Wednesday	0
+
+## ~ 首词形相同但星级变化（273）
+~ a.m.	1->0
+~ accident	1->0
+~ account	1->0
+~ ache	1->0
+~ actually	1->0
+~ admire	1->0
+~ adult	1->0
+~ Africa	0->1
+~ agreement	0->1
+~ ahead	1->0
+~ aid	1->0
+~ aim	1->0
+~ alarm	1->0
+~ amazing	1->0
+~ America	0->1
+~ apartment	1->0
+~ argue	1->0
+~ Asia	0->1
+~ astronaut	2->0
+~ athlete	1->0
+~ attack	1->0
+~ average	1->0
+~ award	1->0
+~ aware	1->0
+~ badminton	1->0
+~ balance	1->0
+~ band	1->0
+~ bat	2->0
+~ bath	2->0
+~ behave	2->0
+~ belong	1->0
+~ belt	1->0
+~ benefit	1->0
+~ biology	2->0
+~ bleed	2->0
+~ boil	2->0
+~ bored	0->1
+~ breath	2->0
+~ budget	2->0
+~ butter	1->0
+~ cabbage	2->0
+~ calm	1->0
+~ cancer	2->0
+~ case	1->0
+~ cash	1->0
+~ certainly	0->1
+~ challenge	1->0
+~ champion	1->0
+~ character	1->0
+~ characteristic	2->0
+~ charity	1->0
+~ chat	1->0
+~ cheat	2->0
+~ cheese	2->0
+~ citizen	2->0
+~ classic	2->0
+~ click	1->0
+~ climate	1->0
+~ coal	0->1
+~ communication	0->1
+~ company	1->0
+~ compete	2->0
+~ competition	0->1
+~ confidence	1->0
+~ congratulation	1->0
+~ convenient	1->0
+~ cooperate	2->0
+~ cotton	2->0
+~ creative	1->0
+~ curious	1->0
+~ death	1->0
+~ decision	0->1
+~ dentist	2->0
+~ desert	1->0
+~ design	1->0
+~ development	0->1
+~ diet	1->0
+~ difficulty	0->1
+~ digital	1->0
+~ direction	0->1
+~ disaster	1->0
+~ discovery	0->1
+~ discussion	0->1
+~ disease	1->0
+~ donate	1->0
+~ download	1->0
+~ dragon	1->0
+~ drama	2->0
+~ duty	1->0
+~ eagle	2->0
+~ eastern	0->1
+~ effect	1->0
+~ effort	1->0
+~ emergency	2->0
+~ emperor/empress	2->0
+~ energetic	1->0
+~ energy	1->0
+~ era	2->0
+~ Europe	0->1
+~ event	1->0
+~ expert	1->0
+~ explore	1->0
+~ false	2->0
+~ familiar	1->0
+~ fashion	2->0
+~ finally	0->1
+~ fisherman	0->1
+~ flat	1->0
+~ flood	1->0
+~ flu	2->0
+~ focus	1->0
+~ folk	2->0
+~ forever	2->0
+~ forward	1->0
+~ found	2->0
+~ fox	2->0
+~ freeze	2->0
+~ gas	1->0
+~ goal	1->0
+~ graduate	1->0
+~ granddaughter	0->1
+~ grandparent	0->1
+~ grandson	0->1
+~ greet	2->0
+~ gym (=gymnasium)	1->0
+~ handbag	0->1
+~ harm	2->0
+~ harmful	0->1
+~ headache	0->1
+~ hike	2->0
+~ honey	1->0
+~ honour (honor)	1->0
+~ host/hostess	1->0
+~ hug	1->0
+~ hunt	2->0
+~ improve	1->0
+~ insect	1->0
+~ introduction	0->1
+~ invention	0->1
+~ jeans	1->0
+~ jog	1->0
+~ joy	1->0
+~ judge	1->0
+~ junior	1->0
+~ lamp	2->0
+~ landscape	2->0
+~ lantern	1->0
+~ laptop	2->0
+~ lawyer	2->0
+~ leader	0->1
+~ likely	1->0
+~ literature	1->0
+~ loss	1->0
+~ lucky	0->1
+~ madam	2->0
+~ manager	0->1
+~ manner	2->0
+~ master	1->0
+~ material	1->0
+~ medal	1->0
+~ medium	1->0
+~ million	2->1
+~ mirror	2->0
+~ missing	0->1
+~ mobile phone	0->1
+~ moment	1->0
+~ musician	0->1
+~ narrow	1->0
+~ nation	1->0
+~ national	0->1
+~ natural	0->1
+~ negative	1->0
+~ noisy	0->1
+~ normal	1->0
+~ northern	0->1
+~ novel	2->0
+~ ocean	1->0
+~ onion	2->0
+~ opera	1->0
+~ opinion	1->0
+~ Pacific	0->1
+~ pack	2->0
+~ paragraph	2->0
+~ partner	1->0
+~ pepper	2->0
+~ piano	1->0
+~ pill	2->0
+~ plastic	2->0
+~ plate	1->0
+~ player	0->1
+~ p.m.	1->0
+~ poet	2->0
+~ pollution	0->1
+~ pork	2->0
+~ position	1->0
+~ positive	1->0
+~ pot	2->0
+~ pour	2->0
+~ power	1->0
+~ prefer	1->0
+~ press	1->0
+~ pressure	1->0
+~ pronunciation	0->1
+~ prove	1->0
+~ publish	1->0
+~ quality	1->0
+~ rainbow	2->0
+~ rainy	0->1
+~ rather	1->0
+~ recently	0->1
+~ recognise (recognize)	1->0
+~ recommend	1->0
+~ recycle	2->0
+~ reduce	1->0
+~ remind	1->0
+~ respect	1->0
+~ responsible	1->0
+~ rocket	2->0
+~ scare	1->0
+~ secretary	0->1
+~ shark	2->0
+~ shelf	2->0
+~ shock	1->0
+~ shoot	1->0
+~ silence	0->1
+~ ski	1->0
+~ sleepy	0->1
+~ slim	1->0
+~ snack	1->0
+~ snowy	0->1
+~ soil	2->0
+~ soldier	2->0
+~ southern	0->1
+~ speaker	0->1
+~ stage	1->0
+~ stomachache	0->1
+~ stranger	0->1
+~ stress	1->0
+~ stupid	0->1
+~ style	1->0
+~ successful	0->1
+~ suffer	1->0
+~ suggestion	0->1
+~ suit	2->0
+~ survive	1->0
+~ sweep	2->0
+~ symbol	2->0
+~ talent	1->0
+~ telephone	0->1
+~ therefore	1->0
+~ thunder	2->0
+~ toothache	0->1
+~ tradition	1->0
+~ traditional	0->1
+~ twice	0->1
+~ uniform	2->0
+~ universe	2->0
+~ used	0->1
+~ useful	0->1
+~ usually	0->1
+~ valuable	0->1
+~ view	1->0
+~ virus	2->0
+~ visitor	0->1
+~ volunteer	1->0
+~ vote	2->0
+~ wave	2->0
+~ western	0->1
+~ whale	1->0
+~ within	1->0
+~ writer	0->1
+~ yoghurt	1->0
+~ youth	1->0
+
+## ≈ 词形改写 / 括号变体调整 / 合并拆分（48）
+≈ a (an)	->	a/an	(0->0)
+≈ according to	->	according (to)	(0->0)
+≈ actor	->	actor/actress	(0->0)
+≈ actress	->	actor/actress	(0->0)
+≈ advertisement (ad)	->	ad (=advertisement)	(2->0)
+≈ anybody	->	anybody/anyone	(0->0)
+≈ anyone	->	anybody/anyone	(0->0)
+≈ behaviour (behavior)	->	behaviour	(1->1)
+≈ bike (bicycle)	->	bike (=bicycle)	(0->0)
+≈ child (pl. children)	->	child	(0->0)
+≈ criterion (pl. criteria)	->	criterion	(2->2)
+≈ defence (defense)	->	defence	(1->1)
+≈ disk (disc)	->	disc (disk)	(2->2)
+≈ emperor	->	emperor/empress	(2->0)
+≈ everybody	->	everybody/everyone	(0->0)
+≈ everyone	->	everybody/everyone	(0->0)
+≈ exam (examination)	->	exam (=examination)	(0->0)
+≈ fibre (fiber)	->	fibre	(2->2)
+≈ foot (pl. feet)	->	foot	(0->0)
+≈ fridge (refrigerator)	->	fridge (=refrigerator)	(0->0)
+≈ grey	->	grey (gray)	(0->0)
+≈ gym	->	gym (=gymnasium)	(1->0)
+≈ host	->	host/hostess	(1->0)
+≈ ice-cream	->	ice cream	(0->0)
+≈ Internet	->	internet	(0->0)
+≈ kilo (kilogramme, kilogram)	->	kilo (=kilogram)	(0->0)
+≈ lab (laboratory)	->	lab (=laboratory)	(0->0)
+≈ man (pl. men)	->	man	(0->0)
+≈ maths (mathematics)	->	maths (=mathematics, math)	(0->0)
+≈ medium (pl. media)	->	medium	(1->0)
+≈ mother (mum)	->	mother (mum, mom)	(0->0)
+≈ mouse (pl. mice)	->	mouse	(0->0)
+≈ Mr	->	Mr (Mr.)	(0->0)
+≈ Mrs	->	Mrs (Mrs.)	(0->0)
+≈ Ms	->	Ms (Ms.)	(0->0)
+≈ PE (physical education)	->	PE (=physical education)	(0->0)
+≈ percent	->	per cent (percent)	(1->0)
+≈ photo (photograph)	->	photo (=photograph)	(0->0)
+≈ popular (pop)	->	popular	(0->0)
+≈ practice	->	practise (practice)	(0->0)
+≈ somebody	->	somebody/someone	(0->0)
+≈ someone	->	somebody/someone	(0->0)
+≈ theatre	->	theatre (theater)	(0->0)
+≈ bean curd (tofu)	->	tofu (bean curd)	(2->0)
+≈ tooth (pl. teeth)	->	tooth	(0->0)
+≈ toward(s)	->	towards (toward)	(0->0)
+≈ television (TV)	->	TV (=television)	(0->0)
+≈ woman (pl. women)	->	woman	(0->0)
+
+## 国家附表（moe-*-appendix.tsv，按中文国名匹配）
++ 沙特阿拉伯	Saudi Arabia	Saudi Arabian	Saudi Arabian
+≈ 朝鲜	DPRK=Democratic People's Republic of Korea / Korean / Korean	->	Democratic People's Republic of Korea—DPRK / Korean / Korean
+≈ 荷兰	Netherlands/Holland / Dutch / Dutch	->	Netherlands / Dutch / Dutch
+≈ 波兰	Poland / Pole / Polish	->	Poland / Polish / Polish
+≈ 韩国	ROK=Republic of Korea / Korean / Korean	->	Republic of Korea—ROK / Korean / Korean
+≈ 土耳其	Turkey / Turk / Turkish	->	Türkiye / Turk / Turkish
+≈ 英国	U.K.=the United Kingdom / Briton / British	->	the United Kingdom—UK / Briton / British
+≈ 美国	U.S.A.=the United States of America / American / American	->	the United States of America—USA / American / American
+≈ 越南	Viet Nam / Vietnamese / Vietnamese	->	Vietnam / Vietnamese / Vietnamese

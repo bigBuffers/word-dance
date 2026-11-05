@@ -1,0 +1,355 @@
+# 2020 年上海市初中英语课程终结性评价指南·词汇表 —— 词组(Phrases and Expressions)
+# 来源文件：07.pdf「2020年上海市初中英语课程终结性评价指南词汇表」，上海市教育考试院 2019-09-26 发布
+#   发布页：https://www.shmeea.edu.cn/page/08000/20190926/13309.html
+#   文件 URL（页面 href 原文，下载时 302 到 https）：http://www.shmeea.edu.cn/download/20190926/07.pdf
+# 本地副本：/private/tmp/claude-501/-Users-sqin-word-dance/0be1d882-e939-4b1e-8c2e-b69435664161/scratchpad/verify-provinces/dl-shmeea/07.pdf
+#   md5 = 059df9c02684bd989fff6f8849ee1993（与 mahavivo 转载件《上海市初中英语词汇表（2020年版）.pdf》逐字节相同）
+# 获取日期：2026-11-05
+# 说明文档：data/lists/shmeea-2020-junior.README.md
+# 范围：PDF 第 73–84 页（印刷页码 72–83）
+# 规则：顶格行 = 一条词组，词组 = 行首到第一个中文或省略号「……」之前的文本（原文释义以「……迟到」开头的 be late for 据此截断）；
+#   去掉释义开头的中文括号留下的悬空「(」（dress up (穿着)打扮 → dress up）；保留英文括号与 `/` 并列（a bit (of), less/more than,
+#   no longer/not...any longer）；括号内外多余空格规范为 (of)、at/in；弯引号 ’ 统一为 '（one's, what's）。不拆并列。
+# 计数：342 行（与 PDF 词组条目一一对应，无重复）
+a bit (of)
+a couple of
+a kind of
+a lot of/lots of
+a pair of
+a piece of
+above all
+according to
+add...to
+after all
+agree with sb.
+all over
+all right
+all the way
+and so on
+apologize to sb. for sth.
+arrive at/in a place
+as...as
+as long as
+as soon as
+as well
+ask for
+at breakfast/lunch/supper
+at first/last
+at home
+at least/most
+at once
+at present
+at the end of
+at the same time
+at/on weekends
+at work
+based on
+be able to
+be afraid of
+be angry with sb.
+be bad for
+be born
+be busy with/doing sth.
+be careful with
+be connected to/with
+be covered with
+be different from
+be/get familiar to/with
+be famous for
+be fond of
+be full of
+be good/poor at
+be interested in
+be keen on
+be late for
+be located (in/on/at)
+be made of
+be made up of
+be pleased with
+be proud of
+be ready for
+be responsible for
+be satisfied with
+be similar to
+be strict with sb.
+be supposed to
+be surprised at
+be thankful to sb.
+be used to
+because of
+belong to
+big deal
+both...and
+break into
+break down
+by bus/train/plane
+by oneself
+by the way
+calm down
+care for
+catch (a) cold
+change one's mind
+check in
+come from
+come on
+come to an end
+come true
+communicate with
+compete with
+complain about
+consist of
+cut down
+deal with
+depend on
+die of
+do harm to
+do one's best
+do sb. a favour
+do some shopping
+dream of
+dress up
+each other
+encourage sb. to do sth.
+enjoy oneself
+fall asleep
+far away (from)
+fill in
+find out
+focus on
+for example
+for free
+for the first time
+for the time being
+from time to time
+get along/on (with)
+get into the habit of
+get off
+get on
+get ready for
+get rid of
+get tired of
+get to
+get up
+give sb. a hand
+give up
+go ahead
+go for a swim
+go hiking
+go home
+go in for
+go on
+go on a diet
+go on a picnic
+go on with/doing sth.
+go out
+go over
+go sailing
+go shopping
+go sightseeing
+go to (the) hospital
+go to bed
+go to college
+go to school
+go to sleep
+go to the cinema/movie(s)
+go wrong
+grow up
+had better
+hand in
+happen to do
+happen to sb.
+have (got) to
+have a class/lesson
+have a good time
+have breakfast
+have no idea
+have pity on sb.
+have sports
+hear from
+hear of
+help sb. with sth.
+here and there
+hold a meeting
+hold on
+hold one's breath
+huge amounts of
+in addition
+in a hurry
+in all
+in a minute
+in brief
+in charge of
+in class
+in danger
+in English
+in fact
+in favour of
+in front of
+in hospital
+in one's fifties
+in one's opinion
+in order to
+in other words
+in return
+in surprise
+in the end
+in the future
+in the middle of
+in the past
+in this way
+in time
+in trouble
+instead of
+jump to a conclusion
+just now
+keep a diary
+keep doing sth.
+keep fit
+keep...from
+keep in touch (with)
+keep off
+keep quiet
+keep sb. busy
+laugh at
+lay the table
+learn from
+leave (secondary) school
+leave a message
+leave for
+less/more than
+listen to
+live on
+look after
+look at
+look for
+look forward to
+look like
+look out
+look up
+lose one's life
+lose one's way
+lose temper
+lose weight
+make a decision
+make a film
+make a fire
+make a living
+make a mistake
+make a noise
+make friends with
+make fun of
+make money
+make progress
+make the bed
+make up one's mind
+mobile phone
+next to
+no longer/not...any longer
+not...at all
+now and then/again
+of course
+on average
+on business
+on foot
+on holiday
+on one's side
+on the phone
+on the other hand
+on the/one's way (to)
+on time
+on weekdays
+once every four years
+once more/again
+one after another
+out of
+out of date
+over and over
+pay for
+pay attention to
+pick out
+pick up
+play a trick on
+play with
+plenty of
+point out
+praise sb. for sth.
+prefer...to
+prepare for
+prevent...from
+protect...from
+provide...with
+put off
+put on
+put out
+put up
+refer to
+rely on
+run away
+run out of
+save one's life
+search for
+see...off
+sell out
+set out
+shake hands with
+share...with
+shopping mall
+show off
+show sb. around
+shut up
+so far
+so that
+some day
+sooner or later
+stand for
+stay up
+stop...from
+such as
+surf the Internet
+take a look
+take an underground
+take a message for sb.
+take action
+take away
+take care of
+take charge of
+take hold of
+take notes
+take off
+take one's advice
+take out
+take part in
+take place
+take the place of
+take up
+talk about
+talk to/with sb.
+tell...from
+tell a lie
+the same...as
+the week after next
+think about
+think of
+think over
+throw away
+to one's joy/surprise
+too...to
+tour guide
+try on
+turn down/up
+turn into
+turn off
+turn on
+turn out
+turn over
+used to
+wait for
+wake up
+what's more
+with great care
+with pleasure
+with the help of
+work out
+worry about
+would like/love (to)
+would rather
