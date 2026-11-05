@@ -191,6 +191,10 @@ def test_spa_serves_built_files_with_cache_policy(settings, frozen_clock):
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("<!doctype html><title>word-Dance</title><div id=root></div>", encoding="utf-8")
     (dist / "assets" / "app-abc123.js").write_text("console.log(1)", encoding="utf-8")
+    (dist / "icons").mkdir()  # the installability surface Vite copies from frontend/public (FRONTEND §1)
+    (dist / "manifest.webmanifest").write_text('{"name": "word-Dance", "start_url": "/today"}', encoding="utf-8")
+    (dist / "icons" / "icon-192.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (dist / "apple-touch-icon.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     cfg = replace(settings, frontend_dist=dist)
     with TestClient(create_app(cfg, clock=frozen_clock, configure_logs=False)) as c:
         r = c.get("/")
@@ -200,6 +204,14 @@ def test_spa_serves_built_files_with_cache_policy(settings, frozen_clock):
         r = c.get("/assets/app-abc123.js")
         assert r.status_code == 200 and r.headers["Cache-Control"] == "public, max-age=31536000, immutable"
         assert "Cache-Control" in r.headers and "X-Content-Type-Options" in r.headers
+        r = c.get("/manifest.webmanifest")  # revalidated on every install / update check; Chrome wants the manifest MIME
+        assert r.status_code == 200 and r.headers["Cache-Control"] == "no-cache"
+        assert r.headers["content-type"].startswith("application/manifest+json")
+        r = c.get("/icons/icon-192.png")  # icons live outside /assets on purpose: refreshable, not immutable
+        assert r.status_code == 200 and r.headers["Cache-Control"] == "public, max-age=3600" and r.headers["content-type"] == "image/png"
+        assert c.get("/apple-touch-icon.png").status_code == 200
+        r = c.get("/assets/app-old999.js")  # a chunk of a previous snapshot: 404, never index.html served as a script
+        assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
         assert c.get("/../etc/passwd").status_code in (200, 404)  # never escapes dist (resolved path check)
         assert c.get("/api/nothing").status_code == 404
 

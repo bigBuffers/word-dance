@@ -6,7 +6,12 @@ Package `frontend/`. Pins: `react@^19.3`, `react-dom@^19.3`, `react-router@^7.18
 
 ```
 frontend/
-├── index.html                      # <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">, theme-color, lang="zh-CN"
+├── index.html                      # <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">, theme-color, lang="zh-CN",
+│                                   # the apple-mobile-web-app-* / mobile-web-app-capable metas, <link rel="manifest"> and <link rel="apple-touch-icon"> (home-screen install)
+├── public/                         # copied verbatim to the dist root by Vite: favicon.svg · manifest.webmanifest (id "/", start_url "/today", scope "/", display standalone,
+│                                   # colours = the light --bg, icons below, Android shortcuts 开始学习 → /study and 生词库 → /bank) · apple-touch-icon.png (180², opaque: iOS paints
+│                                   # transparent pixels black) · icons/icon-{192,512}.png (purpose any, from favicon.svg) + icons/icon-maskable-{192,512}.png (from icon-maskable.svg:
+│                                   # full-bleed brand square, glyph inside the 80 % safe zone). Regenerate on macOS with sips, no dependency: see "Icons" under Build below
 ├── vite.config.ts                  # base '/', build.outDir 'dist', server.proxy {'/api','/media'} → http://127.0.0.1:8000
 ├── tsconfig.json                   # strict, noUncheckedIndexedAccess
 ├── package.json                    # scripts: dev, build, typecheck (tsc --noEmit), test (vitest run), lint
@@ -34,7 +39,7 @@ frontend/
 
 Import example: `import { StateBadge } from '@/components/word/StateBadge'` (alias `@` → `src`); no component lives directly under `components/`.
 
-Build: `npm run build` → `frontend/dist`; FastAPI mounts `dist/assets` at `/assets` (immutable cache) and serves `index.html` (`no-cache`) for every non-`/api`, non-`/media` path. Dev: Vite on :5173 proxies `/api` and `/media` to :8000 (same-origin cookies).
+Build: `npm run build` → `frontend/dist`; FastAPI serves the files of `dist` itself — `/assets/*` `public, max-age=31536000, immutable`; `manifest.webmanifest` (and a future `sw.js` / `registerSW.js`) `no-cache`, so an install or update check always sees the current one; every other file of the snapshot (icons, `favicon.svg`) `public, max-age=3600` — and answers `index.html` (`no-cache`) for every other non-`/api`, non-`/media` path, **except** a path under `/assets/` that is not a file: that is a 404 `not_found` (a tab left open across a deploy asks for the old hashed chunk and must not receive `index.html` as a script). The installability surface is static (manifest, PNG icons, `apple-touch-icon`, the two `*-web-app-capable` metas): no service worker, no install prompt, no offline cache — on iOS 26 the home-screen bookmark opens standalone by itself, Android Chrome installs from the browser menu. Icons: `cd frontend && sips -s format png -z 192 192 public/favicon.svg --out public/icons/icon-192.png` and likewise 512 from `favicon.svg`, 192/512 `icon-maskable-*.png` and the 180² `apple-touch-icon.png` from `public/icon-maskable.svg` (macOS `sips` renders SVG; on Linux use `npx @vite-pwa/assets-generator` or `@resvg/resvg-js`). Dev: Vite on :5173 proxies `/api` and `/media` to :8000 (same-origin cookies).
 
 ## 2. Routes and pages
 

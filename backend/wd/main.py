@@ -252,9 +252,13 @@ def _mount_spa(app: FastAPI, cfg: Settings) -> None:
             if candidate.is_file():
                 if path.startswith("assets/"):
                     cache = "public, max-age=31536000, immutable"
+                elif path in ("sw.js", "registerSW.js", "manifest.webmanifest"):
+                    cache = "no-cache"  # an install / update check must see a new manifest or service worker at once (FRONTEND §1)
                 else:
-                    cache = "public, max-age=3600"
+                    cache = "public, max-age=3600"  # icons and the other root files of the snapshot: refreshable within the hour
                 return FileResponse(candidate, headers={"Cache-Control": cache})
+            if path.startswith("assets/"):
+                raise ApiError("not_found")  # a hashed chunk of a previous snapshot is a 404, never index.html with status 200
         index = dist / "index.html"
         if index.is_file():
             return FileResponse(index, headers={"Cache-Control": "no-cache"})
