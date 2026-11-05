@@ -16,11 +16,11 @@
 ### 0.1 问题一：词库今天是怎么更新和维护的
 
 - 词库是四张全局表：`words`/`word_forms`（词典层）、`word_contents`（例句等 AI 内容）、`word_images`（配图）。学习者的一切数据都在每用户表里。所有前端看到的词库就是 `is_public = 1` 的那组行。
-- 词典层只有一个管理员写入通道：改种子文件 `data/seed/vocab.jsonl.gz`，然后 `wd import-seed` 或重启服务自动导入。这是幂等的按 lemma 合并，只改词典列，不删词，不碰内容、配图和用户数据。全量 9,162 词导入实测 0.2 秒。种子文件自 2026-10-14 提交后从未改过。
+- 词典层只有一个管理员写入通道：改种子文件 `data/seed/vocab.jsonl.gz`，然后 `wd import-seed` 或重启服务自动导入。这是幂等的按 lemma 合并，只改词典列，不删词，不碰内容、配图和用户数据。全量导入实测 0.2 秒（记录数见 `data/seed/stats.json`）。种子文件自 2026-10-14 提交后的首次改版是 K-12 五阶段发布（`docs/releases/2026-11-k12-stages.md`）：阶段归属改为只取 `data/lists/` 里官方词表的词头。
 - 内容层只能由 Claude 写：唯一写入点是 `generate_content` 任务处理器，9 个触发点里 7 个由学习者的操作触发（标不熟悉、构建今日词汇、点「生成例句」、自添词校验通过等），管理员只有「预生成」和「重新生成」两个杠杆，而且和用户共用同一个 AI 开关。没有写入、编辑、导入、导出内容的接口或命令。
 - 运行时词库增长的唯一非管理员路径是用户自添词：安装了 ECDICT 时，真实英文词不经 AI 即成为公开词条（例句仍会排队生成）；没有 ECDICT（你 Mac 上就没装）时，每个未知词都会变成私有临时行并排一个 Claude 校验任务，校验通过才公开。
 - 现在的「关闭 AI」是暂停不是禁止：`WD_AI_ENABLED=0` 让 worker 空转并让两个显式接口返回 503，但用户的添加、标记、夜间整理仍会往队列里塞任务，AI 一恢复就全部执行；前端也不读这个开关。
-- 你 Mac 上这套库的现状：9,162 个种子词全部公开有效，48 个词有内容，31 张图（30 张是 Claude SVG），0 个用户自添词，ECDICT 未安装，从未跑过预生成。
+- 你 Mac 上这套库的现状（2026-11-04 快照，K-12 发布之前；发布后的记录数以 `data/seed/stats.json` 为准）：9,162 个种子词全部公开有效，48 个词有内容，31 张图（30 张是 Claude SVG），0 个用户自添词，ECDICT 未安装，从未跑过预生成。
 
 ### 0.2 问题二：管理员在服务端维护、所有前端只读，是否可行
 
@@ -60,9 +60,9 @@
 
 | 表 | 存什么 | 谁在写 | 位置 |
 |---|---|---|---|
-| `words` | 每个词条一行，`lemma` 全局唯一。词典字段（phonetic / translation / definition / pos / frq / bnc / collins / oxford / exchange / stage_zk·gk·cet4·cet6 / stage_min / exam_tags / cet6_star）；来源与信任标志（`source` ∈ seed·ecdict·claude·user，`is_public`，`is_valid_english`，`safe_for_sharing`，`created_by_user_id`，`merged_into_word_id`）；状态指针（`active_content_id`·`content_state`，`active_image_id`·`image_state`，`difficulty`） | 种子导入 `seed.py`；用户添加时的 `services/words.resolve`；三个 AI 处理器（lookup / content / consolidate）改标志与空字段 | `migrations/0001_init.sql:166-216` |
+| `words` | 每个词条一行，`lemma` 全局唯一。词典字段（phonetic / translation / definition / pos / frq / bnc / collins / oxford / exchange / stage_xs·zk·gk·cet4·cet6 / stage_min / exam_tags / cet6_star）；来源与信任标志（`source` ∈ seed·ecdict·claude·user，`is_public`，`is_valid_english`，`safe_for_sharing`，`created_by_user_id`，`merged_into_word_id`）；状态指针（`active_content_id`·`content_state`，`active_image_id`·`image_state`，`difficulty`） | 种子导入 `seed.py`；用户添加时的 `services/words.resolve`；三个 AI 处理器（lookup / content / consolidate）改标志与空字段 | `migrations/0001_init.sql:166-216` |
 | `word_forms` | 词形 → 原形（went → go），由 ECDICT 的 exchange 代码重建 | `seed.py`；lookup / consolidate 写 `alt` 行 | `0001_init.sql:219-228` |
-| `word_contents` | AI 内容：meaning_zh / meaning_en / examples[{en, zh}]×3–4 / collocations / mnemonic_zh / image_keywords / image_alt_zh / difficulty；按词版本化（version，prompt_version=`content-v1`，model），每词至多一条 `active` | **只有** `ai/content.py` 的 `store_content`（全后端唯一的 INSERT / UPDATE） | `0001_init.sql:230-243`，`ai/content.py:212-218` |
+| `word_contents` | AI 内容：meaning_zh / meaning_en / examples[{en, zh}]×3–4 / collocations / mnemonic_zh / image_keywords / image_alt_zh / difficulty；按词版本化（version，prompt_version=当前 `content.PROMPT_VERSION`（`content-v2`），model），每词至多一条 `active` | **只有** `ai/content.py` 的 `store_content`（全后端唯一的 INSERT / UPDATE） | `0001_init.sql:230-243`，`ai/content.py:212-218` |
 | `word_images` | 每词至多一张 `active` 图：provider ∈ wikimedia·openverse·pixabay·pexels·claude_svg，许可与署名字段；文件在 `数据目录/images/<2hex>/<sha256>.jpg|svg` | **只有** `images/store.py` 的 `activate` 插入；反馈路径写 `rejected`，`images-prune` 删除 | `0001_init.sql:245-276` |
 
 每用户：`user_words`（生词库，含 needs_attention / attention_msg / SRS 字段）、`review_logs`、`daily_stats`、`push_batches` / `push_items`（今日词汇）、`bank_suggestions` / `consolidation_runs`（整理建议）、`user_settings`。
@@ -71,22 +71,22 @@
 
 ### 1.2 词典层：种子文件是唯一的管理员写入通道
 
-**来源与构建。** ECDICT 1.0.28（MIT，`data/licenses/ECDICT-LICENSE`）加 mahavivo 的中考 / 高考 / 四级 / 六级考纲词表，由 `scripts/build_seed.py` 生成、`scripts/pack_seed.sh` 打包（`gzip -9 -n`，同样输入得到同样哈希）。共 9,162 词、15 个字段，**没有例句、搭配、助记**。种子文件自 2026-10-14 提交后从未改动。考研 / 托福 / 雅思 / GRE 只是展示用标签，不是阶段。种子里有 4 条译文只有「[网络]」的词条和 165 条空音标，导入时不做质量检查，全部按可信公开词处理。
+**来源与构建。** 词典字段（音标、释义、词频、词形变化）来自 ECDICT 1.0.28（MIT，`data/licenses/ECDICT-LICENSE`）；**阶段归属只来自 `data/lists/` 里官方文件的词头**——教育部 2022 课标二级（小学 `xs`）、三级与附表（初中 `zk`）、上海市教育考试院 2020 初中词汇表（单词、附表、词组 → `zk`）、高中课标 2020 修订 ∪ 2025 修订（`gk`）；四级 / 六级沿用 ECDICT 考试标签与可选的 mahavivo CET 四表（表缺席时现有行的 CET 旗标逐字保留）。构建器是 `backend/wd/seedbuild/`（`make seed`：`scripts/build_seed.py` 按 `data/lists/manifest.json` 做集合代数与 12 条归一化规则 → `scripts/seed_diff.py` 写 `data/seed/DIFF.md` 并断言「旧 lemma 一个不少」「xs ⊆ zk」→ `scripts/pack_seed.sh` 以 `gzip -9 -n` 打包并核对 `stats.json.content_sha256`），两次构建字节相同。记录数、每阶段词数、课标外词数一律以 `data/seed/stats.json` 为准（本文不抄数字）。种子**没有例句、搭配、助记**；考研 / 托福 / 雅思 / GRE 只是展示用标签，不是阶段；掉出所有官方表的老词不删除，变成 `stage_min` 为空的「课标外」词典词（只在「全部」页签与搜索可见，不进筛词与推荐词），旧出处以 `legacy:zk` / `legacy:gk` 令牌保留；导入时不做释义质量检查（人工修正走 `data/lists/overrides.tsv`，上限 30 条）。要改阶段来源，改的是 `data/lists/` 的词表文件与 manifest 再重建种子，而不是数据库里的 `words.sources`。
 
-**导入入口三个。** `wd import-seed [--file PATH] [--force]`（`seed.py:356-359`）；`deploy/install.sh` 第 6 步；以及**每次 `wd serve` 启动**时 `main.seed_check` 比较 `kv.seed_version` 与文件 sha256，不同就自动导入（`main.py:303-315`）。没有任何 HTTP 或管理页入口。
+**导入入口三个。** `wd import-seed [--file PATH] [--force] [--dry-run] [--report PATH]`（`--dry-run` 只读文件与 `words` 表，打印或保存将要发生的插入、更新、孤儿、各阶段旗标增减与 `stage_min` 迁移矩阵，不写任何东西）；`deploy/install.sh` 第 6 步；以及**每次 `wd serve` 启动**时 `main.seed_check` 比较 `kv.seed_version` 与文件**解压后内容**的 sha256（`seed.seed_digest`），不同就自动导入——所以 Mac 与 Linux 用不同的 gzip 重打包同一份记录不会触发重导，而迁移 0011 删掉 `kv.seed_version` 则恰好强制一次重导。没有任何 HTTP 或管理页入口。
 
 **导入语义**（`seed.py:72-82`，已在临时库和你库的副本上实测）：
 
-- `INSERT … ON CONFLICT(lemma) DO UPDATE`，只在 20 个种子管理列或 5 个信任标志有差异时更新该行；
+- `INSERT … ON CONFLICT(lemma) DO UPDATE`，只在种子管理列（含五个阶段旗标 `stage_xs … stage_cet6` 与 `stage_min`）或信任标志有差异时更新该行；`stage_min` = 记录 `stages[]` 中最低阶段的索引（1 小学 … 5 六级），空列表 → NULL；未知阶段码只计数告警、不拒绝（硬门在构建器）；
 - 对文件里的每个 lemma 强制 `source='seed'`、`is_public=1`、`is_valid_english=1`、`safe_for_sharing=1`、`merged_into_word_id=NULL`。同名的用户临时词会被「转正」，词典列被种子记录覆盖，`created_by_user_id` 保留；
-- **从不删除** `words` 行（文件里删掉的词留在库里）；非 `alt` 的词形行会被删除重建；
+- **从不删除** `words` 行（文件里删掉的词留在库里；掉出全部官方表的词只是变成课标外）；非 `alt` 的词形行会被删除重建，包括由记录 `aliases[]` 写入的 `kind='alias'` 官方拼写行（`Mr` → `mr.`，迁移 0013）；
 - **从不触碰** `word_contents`、`word_images`、`active_*`、`content_state`、`difficulty` 以及任何每用户表；
 - 所有写入在一个 `BEGIN IMMEDIATE` 事务里；成功后写 `kv.seed_version`、`kv.seed_imported_at` 和一条 `system_events('seed_imported')`，管理页「词库版本」显示的就是这个哈希；
-- 实测：你库副本上全量 `--force` 导入 9,162 条，`import_seed` 内 0.2 秒，持有写锁 0.21 秒，进程总耗时 0.5 秒；词库、内容、配图、用户表字节级不变。`import-seed` 不检查 worker 租约，可以在服务运行时执行。
+- 实测（75df534 种子）：你库副本上全量 `--force` 导入 9,162 条，`import_seed` 内 0.2 秒，持有写锁 0.21 秒，进程总耗时 0.5 秒；词库、内容、配图、用户表字节级不变。`import-seed` 不检查 worker 租约，可以在服务运行时执行——但 K-12 发布的首次导入要在停服务、迁移 0011 之后做（`docs/releases/2026-11-k12-stages.md`）。
 
-**所以管理员今天已经可以**：改一行 JSONL 的释义或音标、追加新词（只需 `word` 字段；不给 `stages` 则 `stage_min` 为空，只在「全部」标签可见，不会进入筛词与推荐词）、修正词形，然后打包、提交、部署或重启。**不能**：删词或下架、提供例句、在网页上操作。
+**所以管理员今天已经可以**：改一行 JSONL 的释义或音标（更稳的做法是写进 `data/lists/overrides.tsv` 再 `make seed`，重建可复现）、追加新词（只需 `word` 字段；不给 `stages` 则 `stage_min` 为空，只在「全部」标签可见，不会进入筛词与推荐词）、修正词形，然后打包、提交、部署或重启。**不能**：删词或下架、提供例句、在网页上操作。
 
-**一个陷阱（已复现）。** `kv` 只记录哈希，不记录路径。`wd import-seed --file 自定义文件` 之后，下次服务启动或下次 `install.sh`（第 6 步也是不带 `--file` 的 `wd import-seed`）会再次导入仓库种子，把两边都有且被你改过的 lemma 改回原值；只在自定义文件里的词因为不删除而保留。你 Mac 的 `.env` 里 `WD_SEED_PATH=""`，等价于未设置，也在这个陷阱范围内。要么替换 `data/seed/vocab.jsonl.gz`，要么把 `WD_SEED_PATH` 指向自定义文件。另外 `seed_check` 对损坏的种子文件（如截断的 gzip）不做防御，会让服务启动失败并进入重启循环；改种子前应先在副本上 `wd import-seed --file` 验证。
+**一个陷阱（已复现）。** `kv` 只记录哈希，不记录路径。`wd import-seed --file 自定义文件` 之后，下次服务启动或下次 `install.sh`（第 6 步也是不带 `--file` 的 `wd import-seed`）会再次导入仓库种子，把两边都有且被你改过的 lemma 改回原值；只在自定义文件里的词因为不删除而保留。你 Mac 的 `.env` 里 `WD_SEED_PATH=""`，等价于未设置，也在这个陷阱范围内。要么替换 `data/seed/vocab.jsonl.gz`，要么把 `WD_SEED_PATH` 指向自定义文件。`seed_check` 对损坏或不配套的种子文件（截断的 gzip、未知阶段码）现在有防御：导入异常被捕获并记录为 `system_events('seed_import_failed')`（管理页事件表可见），服务用库里已有的词表继续启动，下次启动再试；改种子前仍应先在副本上 `wd import-seed --file … --dry-run` 看计划，导入后 `wd check db` 看四条不变量。
 
 **运行时的非管理员增长路径。**
 
@@ -162,7 +162,7 @@ SPA 没有 service worker、没有缓存库，请求带 `cache: 'no-store'`，�
 
 | 项 | 值 |
 |---|---|
-| words | 9,162，全部 source=seed、公开、有效；用户添加 0；`difficulty` 为空 9,114 |
+| words | 9,162（K-12 发布前的种子；发布后见 `data/seed/stats.json.total_words`），全部 source=seed、公开、有效；用户添加 0；`difficulty` 为空 9,114 |
 | word_contents | 48 个词有内容（content-v1，claude-sonnet-5-5） |
 | word_images | 31（30 张 Claude SVG，1 张 Wikimedia） |
 | content_state | none 9,114 / ready 48 |
@@ -180,7 +180,7 @@ SPA 没有 service worker、没有缓存库，请求带 `cache: 'no-store'`，�
 
 - 共享词库就是服务端的四张全局表，前端无缓存，写入即可见（1.6）。
 - 词典层已经有幂等的服务端更新通道，全量导入 0.2 秒，可在服务运行时做（1.2）。
-- 内容层接受直接写入（核验 C4，在真实应用上执行）：插入一条 `status='active'` 的 `word_contents`，`content_json` 含全部 14 个键（word、valid、meaning_zh、meaning_en、examples、collocations、mnemonic_zh、image_keywords、image_alt_zh、difficulty、version、prompt_version、model、created_at），把旧的 active 行置 superseded，更新 `words.active_content_id`、`content_state='ready'` 并刷新 `updated_at`，详情、内容接口、今日词汇的学习项、SVG 卡片就全部显示它，不产生任何任务，`ai_calls` 为 0，「生成例句」按钮自动消失。缺键或多键会让这些接口返回 500（包括整个今日页），所以导入器必须复用 `content.validate_item` 并写全 14 个键；`prompt_version` 列要写 `content-v1`，否则残留的普通任务会重新生成并覆盖手工内容。
+- 内容层接受直接写入（核验 C4，在真实应用上执行）：插入一条 `status='active'` 的 `word_contents`，`content_json` 含全部 14 个键（word、valid、meaning_zh、meaning_en、examples、collocations、mnemonic_zh、image_keywords、image_alt_zh、difficulty、version、prompt_version、model、created_at），把旧的 active 行置 superseded，更新 `words.active_content_id`、`content_state='ready'` 并刷新 `updated_at`，详情、内容接口、今日词汇的学习项、SVG 卡片就全部显示它，不产生任何任务，`ai_calls` 为 0，「生成例句」按钮自动消失。缺键或多键会让这些接口返回 500（包括整个今日页），所以导入器必须复用 `content.validate_item` 并写全 14 个键；`prompt_version` 列要写当前的 `content.PROMPT_VERSION`（`content-v2`），否则残留的普通任务会重新生成并覆盖手工内容。
 - 内容的模型与来源字段是自由文本的非空列，`model='human'` 或国产模型 id 都能存，不需要改表。
 
 ### 2.2 四档清单

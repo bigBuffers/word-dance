@@ -10,7 +10,7 @@
 
 ## 0. 一页结论
 
-**0.1 怎么做。** 租一台腾讯云轻量应用服务器（中国站，东京地域，2 vCPU / 4 GB，约 ¥42/月；新加坡同价作备选），用仓库自带的 `deploy/install.sh --with-caddy DOMAIN --with-ecdict` 安装，服务用户就叫 `sqin`（仓库默认路径、单元文件、提示文案全都不用改）。**安装前先把 Mac 上的数据库和图片复制过去**：同一提交、同一 schema（迁移 1/8/9）、同一种子哈希，不需要迁移也不会重导种子；数据库里已经有管理员，所以「第一个注册者自动成为管理员」的竞态根本不会出现。邀请朋友之前不需要改一行代码，所有必做项都是配置或操作。节奏：第 1 天上线，第 2–3 天先请 2–3 位朋友试用，第 4–7 天全员进来，第 14 天关闭注册。
+**0.1 怎么做。** 租一台腾讯云轻量应用服务器（中国站，东京地域，2 vCPU / 4 GB，约 ¥42/月；新加坡同价作备选），用仓库自带的 `deploy/install.sh --with-caddy DOMAIN --with-ecdict` 安装，服务用户就叫 `sqin`（仓库默认路径、单元文件、提示文案全都不用改）。**安装前先把 Mac 上的数据库和图片复制过去**：同一提交、同一 schema、同一种子哈希时不需要迁移也不会重导种子（部署 K-12 五阶段提交则会在停服务后应用迁移 0011–0013 并重导新种子：顺序与排练见 1.3 节末与 `docs/releases/2026-11-k12-stages.md`）；数据库里已经有管理员，所以「第一个注册者自动成为管理员」的竞态根本不会出现。邀请朋友之前不需要改一行代码，所有必做项都是配置或操作。节奏：第 1 天上线，第 2–3 天先请 2–3 位朋友试用，第 4–7 天全员进来，第 14 天关闭注册。
 
 **0.2 移动端怎么办。** 第一个月，「App」就是添加到主屏幕的网页：iOS 26 起任何网站加到主屏幕都默认以独立窗口打开（不需要 manifest），安卓各浏览器都有「添加到桌面」；每日提醒用后端已有的 webhook 渠道（iPhone 用 Bark，其他一切有微信的手机用 Server酱），零代码。只补两个小东西：约 1 小时的图标 + manifest，以及 3–4 小时的「微信里打开请切到浏览器」提示。真正的 App 走 Capacitor「远程壳」：WebView 直接加载线上站点，**后端零改动**，网站一发布 App 就更新；iOS 通过 TestFlight 内部测试分发（免审核），Android 通过自签名 APK 下载链接分发；双端约 6 人日加 ¥688/年苹果开发者费。它对无 Google 服务的国产安卓机收益最大（本机定时提醒 + 原生发音），对 iPhone 只是便利，对鸿蒙 NEXT 手机无能为力（装不了 APK，只能用网页）。建议第 14 天按证据决定是否启动；如果你已经决定要做，苹果账号注册和 Xcode 下载可以第 0 天就开始，它们不影响服务器那条线。
 
@@ -77,7 +77,7 @@ UPDATE words SET content_state='none' WHERE content_state='queued'
   AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.dedupe_key='content:'||words.id AND j.status IN ('queued','running'));
 ```
 
-预生成是可选项：每日批次会在推送前 3 小时内为当天的词生成内容；不预生成只是朋友从筛词/词库点开没人学过的词时会看到「例句生成中」。按阶段的缺内容词数与成本（$0.0045–0.0059/词，60 次/小时）：初中 2,099 词 $9.5–12.4（3.5 小时）、高中 3,829 词 $17–23、四级 4,674 词 $21–28、六级 7,624 词 $34–45、全部 9,114 词 $41–54（15 小时，小时上限提到 120 可减半）；每个阶段最高频 1,000 词约 $4.5–6、1.7 小时。（security F7–F11 及核验）
+预生成是可选项：每日批次会在推送前 3 小时内为当天的词生成内容；不预生成只是朋友从筛词/词库点开没人学过的词时会看到「例句生成中」。按阶段的缺内容词数 ≈ 阶段累计词数（K-12 五阶段种子，以 `data/seed/stats.json.per_stage` / `total_words` 为准：小学 ≈ 600 · 初中 ≈ 2,549 · 高中 ≈ 3,260 · 四级 ≈ 4,722 · 六级 ≈ 7,671 · 全部 ≈ 9,618）减去已有内容的 ≈ 49 个词；成本 = 词数 × $0.0045–0.0059，时间 = 词数 ÷ 600/小时：小学 ≈ $2.7–3.5（1 小时）、初中 ≈ $11.5–15（4.2 小时）、高中 ≈ $14.7–19、四级 ≈ $21–28、六级 ≈ $35–45、全部 ≈ $43–57（16 小时，小时上限提到 120 可减半）；每个阶段最高频 1,000 词约 $4.5–6、1.7 小时。（security F7–F11 及核验；词数按 2026-11 种子更新）
 
 ### 1.4 前端的移动端就绪度
 
@@ -152,6 +152,8 @@ scp /Users/sqin/wd-migrate.db sqin@VPS_IP:/home/sqin/word-dance-data/word-dance.
 scp /Users/sqin/wd-images.tgz sqin@VPS_IP:/home/sqin/
 ssh sqin@VPS_IP 'tar -C /home/sqin/word-dance-data -xzf /home/sqin/wd-images.tgz && chmod 600 /home/sqin/word-dance-data/word-dance.db && rm /home/sqin/wd-images.tgz && sqlite3 /home/sqin/word-dance-data/word-dance.db "select username, role from users"'   # sqin|admin
 ```
+
+**升级到 K-12 五阶段提交（迁移 0011–0013 + 新种子）时的顺序——先备份、再停、再切、再起。** `wd serve` 启动即执行迁移，0011/0013 是表重建、不可逆、只能用迁移前快照回滚，所以无论 Mac（launchd）还是 Lighthouse（systemd）都不能先切代码再想备份：① `wd backup --with-images`；② 停服务（Mac 上两个 launchd 代理都停，见上）；③ `git checkout <新提交>` 并发布前端快照；④ `wd migrate --dry-run` 恰好列出 0011/0012/0013 → `wd migrate` → `wd import-seed --dry-run --report …` 与排练报告一致 → `wd import-seed`；⑤ `wd check db` 四条不变量 ok；⑥ 起服务并验证。上线前先在本机、部署前在目标机对数据库**拷贝**各跑一次 `.venv/bin/python -I scripts/rehearse_migration.py <拷贝>`（退出 0；目标机 SQLite ≥ 3.26）。逐步命令、验证项与回滚（库与代码一起回；只回代码不会 500，而是主攻阶段静默显示错位）见 `docs/releases/2026-11-k12-stages.md` §6–§7（= PLAN §8）。Linux 上 `deploy/install.sh` 自己完成「停 → 迁移 → 导种子 → 起」，但这次**不可**带 `--no-restart`；复制过来的 Mac 库若已在 Mac 上完成迁移与导种子，VPS 上就什么都不会再发生（同一提交、同一内容哈希）。
 
 **1.4 克隆、演练、安装**（`npm ci` 占大头，15–25 分钟）：
 
