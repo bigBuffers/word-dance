@@ -23,14 +23,16 @@ from ..config import Settings
 from ..interfaces import Job
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
+from ..schemas import STAGE_ORDER
 
 log = logging.getLogger("wd.ai.prewarm")
 
 PRIORITY = 90
 PASS_MULTIPLIER = 5
 PASS_INTERVAL = timedelta(minutes=2)
-STAGE_COLUMNS: dict[str, str] = {"zk": "stage_zk", "gk": "stage_gk", "cet4": "stage_cet4", "cet6": "stage_cet6"}
-STAGES: tuple[str, ...] = ("zk", "gk", "cet4", "cet6", "all")
+# derived from the one stage enum (schemas.py, PLAN R-1): the flag column per code, plus "all" = every word in some list
+STAGE_COLUMNS: dict[str, str] = {s: f"stage_{s}" for s in STAGE_ORDER}
+STAGES: tuple[str, ...] = (*STAGE_ORDER, "all")
 
 
 def _stage_sql(stage: str) -> str:

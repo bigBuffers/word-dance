@@ -454,6 +454,13 @@ dialog.confirm::backdrop {
   flex: 1 1 0;
 }
 
+/* six vocab tabs on a phone: 6 × 48 + 5 × 4 = 308 px fits 343 px @375 / 328 px @360 without scrolling */
+@media (max-width: 479.98px) {
+  .tabs--fill .tab {
+    padding-inline: var(--space-2);
+  }
+}
+
 .tab {
   flex: none;
   display: inline-flex;

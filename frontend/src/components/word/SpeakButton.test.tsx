@@ -88,7 +88,7 @@ describe('WordHeader', () => {
   it('renders display, phonetic, stage chips (with ★) and the kind badge', () => {
     render(
       <WordHeader
-        word={{ display: 'abandon', phonetic: 'əˈbændən', stages: ['cet6', 'gk', 'cet4'], stage_min: 2, cet6_star: true }}
+        word={{ display: 'abandon', phonetic: 'əˈbændən', stages: ['cet6', 'gk', 'cet4'], stage_min: 3, cet6_star: true }}
         kind="review"
         as="h1"
         size="lg"
@@ -100,5 +100,26 @@ describe('WordHeader', () => {
     expect(chips).toEqual([zh.stages.gk, zh.stages.cet4, `${zh.stages.cet6}★`]);
     expect(screen.getByText(zh.study.kind.review)).toBeTruthy();
     expect(screen.getByRole('img', { name: zh.stages.star })).toBeTruthy();
+  });
+
+  // PLAN §6 S4: `hasMeta` no longer requires `stages.length > 0`. A word outside every official list (`stages: []`,
+  // PLAN P6) often has no ECDICT phonetic either; without this the meta row — and its dashed outside-the-lists chip — would vanish.
+  it('a word outside every list with neither phonetic nor kind still renders the meta row with the dashed chip', () => {
+    const { container } = render(<WordHeader word={{ display: 'selfie', phonetic: null, stages: [], stage_min: null, cet6_star: false }} />);
+    expect(container.querySelector('.word-head__meta')).not.toBeNull();
+    const chips = screen.getAllByRole('listitem');
+    expect(chips.map((li) => li.textContent)).toEqual([zh.stages.outside]);
+    expect(chips[0]?.classList.contains('chip--outside')).toBe(true);
+  });
+
+  it('renders no meta row at all when the chips are hidden and there is neither phonetic nor kind', () => {
+    const { container } = render(<WordHeader word={{ display: 'apple', phonetic: null, stages: ['xs', 'zk'], stage_min: 1, cet6_star: false }} showStages={false} />);
+    expect(container.querySelector('.word-head__meta')).toBeNull();
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  it('`onlyStages` narrows the chips to the learner\'s target stages plus the word\'s lowest stage', () => {
+    render(<WordHeader word={{ display: 'apple', phonetic: 'ˈæpl', stages: ['xs', 'zk', 'gk', 'cet4'], stage_min: 1, cet6_star: false }} onlyStages={['gk']} />);
+    expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual([zh.stages.xs, zh.stages.gk]);
   });
 });

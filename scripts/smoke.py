@@ -349,8 +349,10 @@ def run_scenario(s: Smoke) -> None:
 
     with s.step("stages + vocab browsing + search + letters"):
         stages = alice.get("/api/stages")["items"]
-        expect([x["stage"] for x in stages] == ["zk", "gk", "cet4", "cet6"], f"stages {stages}")
-        expect(all(x["total"] > 0 for x in stages), "empty stage totals — seed not imported?")
+        expect([x["stage"] for x in stages] == ["xs", "zk", "gk", "cet4", "cet6"], f"stages {stages}")
+        # every stage of the shipped K-12 seed has words (PLAN §7.3: smoke expects five populated stages)
+        empty = [x["stage"] for x in stages if x["total"] == 0]
+        expect(empty == [], f"empty stage totals {empty} — seed not imported? (every stage of the K-12 seed has words, PLAN §7.3)")
         page = alice.get("/api/vocab", params={"stage": "cet4", "page_size": 30, "sort": "freq"})
         expect(page["total"] > 100 and len(page["items"]) == 30, f"vocab page {page['total']}")
         ids["vocab"] = [w for w in page["items"] if w["kind"] == "word" and w["my_state"] is None and w["lemma"] != "abandon"]
@@ -611,7 +613,7 @@ def run_scenario(s: Smoke) -> None:
         expect(one["batch"]["id"] == ids["batch"] and one["batch"]["gradable"] is True, "batch replay")
         bob.get(f"/api/batches/{ids['batch']}", expect_status=404)
         stats = alice.get("/api/stats")
-        expect(len(stats["stages"]) == 4 and len(stats["heatmap"]) == 84, f"stats shape {len(stats['stages'])} {len(stats['heatmap'])}")
+        expect(len(stats["stages"]) == 5 and len(stats["heatmap"]) == 84, f"stats shape {len(stats['stages'])} {len(stats['heatmap'])}")
         # total_mastered counts words mastered *now*: the one word mastered above was deliberately re-added (times_added 2)
         expect(stats["total_graded"] >= 1 and isinstance(stats["total_mastered"], int) and stats["streak_days"] >= 1, f"stats {stats['total_graded']} {stats['total_mastered']} {stats['streak_days']}")
         expect(stats["bank"]["new"] + stats["bank"]["learning"] >= 1 and stats["bank"]["known"] >= 1, f"bank {stats['bank']}")

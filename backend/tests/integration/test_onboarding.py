@@ -95,7 +95,7 @@ def test_fresh_user_has_next_push_at_from_defaults(client: TestClient, settings)
     assert expected == "2026-10-15T00:00:00Z"
     assert alice["settings"]["next_push_at"] == expected
     row = settings_row(settings, alice["user"]["id"])
-    assert row["next_push_at"] == expected and row["current_stage"] == 3 and row["stages_json"] == '["cet4","cet6"]'
+    assert row["next_push_at"] == expected and row["current_stage"] == 1 and row["stages_json"] == '["xs","zk"]'  # K-12 DDL defaults (0011 / bank.DEFAULT_*)
 
 
 def test_complete_straight_after_registration_is_409(client: TestClient):
@@ -117,7 +117,7 @@ def test_step1_then_complete_is_idempotent(client: TestClient, settings):
     expected = to_iso(compute_next_push(NOW, "America/New_York", "07:30"))
     assert st["next_push_at"] == expected == "2026-10-14T11:30:00Z" and st["updated_at"] == NOW_ISO
     row = settings_row(settings, alice["user"]["id"])
-    assert row["current_stage"] == 3 and row["stages_json"] == '["gk","cet4"]' and row["next_push_at"] == expected  # 'cet4' stored as 3
+    assert row["current_stage"] == 4 and row["stages_json"] == '["gk","cet4"]' and row["next_push_at"] == expected  # 'cet4' stored as 4 (xs=1 … cet6=5)
     assert client.get("/api/auth/me").json()["user"]["onboarding_state"] == "screen"
     assert client.get("/api/settings").json()["current_stage"] == "cet4"  # read back as the Stage string
     r = client.post("/api/onboarding/complete")
@@ -136,7 +136,7 @@ def test_step1_can_be_reposted_until_done(client: TestClient, settings):
     assert r.status_code == 200 and r.json()["onboarding_state"] == "screen"
     st = r.json()["settings"]
     assert st["stages"] == ["zk"] and st["current_stage"] == "zk" and st["next_push_at"] == "2026-10-14T13:00:00Z"
-    assert settings_row(settings, alice["user"]["id"])["current_stage"] == 1
+    assert settings_row(settings, alice["user"]["id"])["current_stage"] == 2  # 'zk' stored as 2
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ import { Field } from '@/components/ui/Field';
 import { Sheet } from '@/components/ui/Sheet';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Tabs } from '@/components/ui/Tabs';
+import { STAGE_ORDER } from '@/components/word/StageChips';
 import { useApi } from '@/hooks/useApi';
 import { useLocalPref } from '@/hooks/useLocalPref';
 import { usePageTitle } from '@/hooks/usePageTitle';
@@ -33,7 +34,7 @@ const L = zh.admin.labels;
 const TABS: readonly AdminTab[] = ['overview', 'users', 'jobs', 'ai', 'reports', 'events', 'config'];
 const PAGE_SIZE = 50;
 const JOB_STATUSES = ['queued', 'running', 'done', 'failed', 'dead', 'cancelled'] as const;
-const PREWARM_STAGES: readonly PrewarmStage[] = ['zk', 'gk', 'cet4', 'cet6', 'all'];
+const PREWARM_STAGES: readonly PrewarmStage[] = [...STAGE_ORDER, 'all'];
 const REPORT_STATUSES: readonly ReportStatusFilter[] = ['open', 'resolved', 'dismissed'];
 
 function isAdminTab(value: unknown): value is AdminTab {

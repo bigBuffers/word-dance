@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 import httpx
@@ -13,6 +14,8 @@ from wd import db, security
 from wd.delivery import webhook
 from wd.delivery.mailer import RecordingMailer
 from wd.routers.settings import CURATED_TIMEZONES
+from wd.schemas import stage_to_index
+from wd.services import bank
 
 PW = "Correct-Horse-7"
 NOW = datetime(2026, 10, 14, 0, 0, 0, tzinfo=timezone.utc)
@@ -54,8 +57,8 @@ def test_get_settings_defaults(client: TestClient, alice):
         "daily_new_count": 10,
         "daily_screen_count": 15,
         "max_reviews": 60,
-        "stages": ["cet4", "cet6"],
-        "current_stage": "cet4",
+        "stages": ["xs", "zk"],  # the K-12 DDL defaults (0011 / bank.DEFAULT_*): 主攻 小学, 目标 小学 + 初中
+        "current_stage": "xs",
         "show_images": True,
         "zh_examples": "tap",
         "auto_pronounce": True,
@@ -71,12 +74,42 @@ def test_get_settings_defaults(client: TestClient, alice):
     assert client.get("/api/settings/timezones").status_code == 200
 
 
+def test_settings_with_an_unknown_stage_code_fall_back_like_the_study_paths(client: TestClient, alice, settings, caplog):
+    """A stored stages_json naming no known stage code (hand-edited, or written by a newer server): GET /api/settings and
+    GET /api/auth/me answer 200 with bank.DEFAULT_STAGES plus one stage_fallback warning — the same fallback /api/today
+    already applied through bank.user_settings_row (PLAN §2.1) — instead of failing response validation with a 500 that
+    kept the SPA from booting (impl-review final F2). Known codes beside an unknown one are kept; PUT repairs the row."""
+
+    def store(stages_json: str, current_stage: int) -> None:
+        c = db.connect(settings.db_path)
+        try:
+            c.execute("UPDATE user_settings SET stages_json = ?, current_stage = ? WHERE user_id = ?", (stages_json, current_stage, alice["id"]))
+        finally:
+            c.close()
+
+    store('["cet9"]', stage_to_index("xs"))
+    with caplog.at_level(logging.WARNING, logger="wd.bank"):
+        r = client.get("/api/settings")
+    assert r.status_code == 200, r.text
+    assert r.json()["stages"] == list(bank.DEFAULT_STAGES) and r.json()["current_stage"] == "xs"
+    fallbacks = [rec for rec in caplog.records if getattr(rec, "event", None) == "stage_fallback"]
+    assert len(fallbacks) == 1 and fallbacks[0].user_id == alice["id"] and "cet9" in fallbacks[0].getMessage()
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200 and me.json()["settings"]["stages"] == list(bank.DEFAULT_STAGES)
+    store('["cet9", "gk"]', stage_to_index("gk"))
+    r = client.get("/api/settings")
+    assert r.status_code == 200 and r.json()["stages"] == ["gk"] and r.json()["current_stage"] == "gk"  # unknown dropped, known kept
+    r = client.put("/api/settings", json={"stages": ["zk"], "current_stage": "zk"})
+    assert r.status_code == 200 and r.json()["stages"] == ["zk"] and r.json()["current_stage"] == "zk"
+    assert client.get("/api/settings").json()["stages"] == ["zk"]
+
+
 def test_partial_update_recomputes_next_push_at(client: TestClient, alice, settings, frozen_clock):
     r = client.put("/api/settings", json={"push_time": "21:00", "daily_new_count": 20, "zh_examples": "always", "accent": "en-GB", "show_images": False})
     assert r.status_code == 200, r.text
     st = r.json()
     assert st["push_time"] == "21:00" and st["daily_new_count"] == 20 and st["zh_examples"] == "always" and st["accent"] == "en-GB" and st["show_images"] is False
-    assert st["timezone"] == "Asia/Shanghai" and st["stages"] == ["cet4", "cet6"] and st["max_reviews"] == 60  # untouched
+    assert st["timezone"] == "Asia/Shanghai" and st["stages"] == ["xs", "zk"] and st["max_reviews"] == 60  # untouched
     assert st["next_push_at"] == "2026-10-14T13:00:00Z"  # 21:00 Shanghai later today
     frozen_clock.advance(minutes=5)
     r = client.put("/api/settings", json={"timezone": "Europe/London"})
@@ -86,7 +119,7 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
     c = db.connect(settings.db_path)
     try:
         row = c.execute("SELECT current_stage, stages_json, push_enabled FROM user_settings WHERE user_id = ?", (alice["id"],)).fetchone()
-        assert row[0] == 2 and json.loads(row[1]) == ["zk", "gk"] and row[2] == 0
+        assert row[0] == 3 and json.loads(row[1]) == ["zk", "gk"] and row[2] == 0  # 'gk' stored as 3
     finally:
         c.close()
     assert client.get("/api/settings").json()["current_stage"] == "gk"
@@ -108,8 +141,8 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
         ({"stages": []}, "stages"),
         ({"stages": ["cet9"]}, "stages"),
         ({"stages": ["zk"], "current_stage": "gk"}, "body"),  # cross-field in the request itself
-        ({"stages": ["zk"]}, "current_stage"),  # stored current_stage cet4 would fall outside
-        ({"current_stage": "zk"}, "current_stage"),  # stored stages are cet4/cet6
+        ({"stages": ["zk"]}, "current_stage"),  # stored current_stage xs would fall outside
+        ({"current_stage": "gk"}, "current_stage"),  # stored stages are xs/zk
         ({"zh_examples": "never"}, "zh_examples"),
         ({"accent": "en-AU"}, "accent"),
         ({"webhook_format": "slack"}, "webhook_format"),
@@ -121,7 +154,7 @@ def test_update_validation(client: TestClient, alice, body, field):
     assert r.status_code == 400 and error(r)["code"] == "validation_error", r.text
     fields = error(r)["details"]["fields"]
     assert any(k == field or k.startswith(field + ".") for k in fields), error(r)  # list items are reported as stages.0
-    assert client.get("/api/settings").json()["current_stage"] == "cet4"  # nothing changed
+    assert client.get("/api/settings").json()["current_stage"] == "xs"  # nothing changed
 
 
 def test_email_enabled_requires_verified_email_and_smtp(client: TestClient, alice, app, settings):

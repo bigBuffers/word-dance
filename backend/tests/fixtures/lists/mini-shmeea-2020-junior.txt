@@ -1,0 +1,16 @@
+# mini-shmeea-2020-junior.txt — 15 verbatim lines of data/lists/shmeea-2020-junior.txt (format `heads`, policy main → zk); aliases, R4 suffix, R1 fold, drop override, R7 participles
+A.M. (a.m.)
+although/though
+book
+bund (the Bund)
+café
+e-mail (email)
+exam=examination
+excited
+hot-dog
+ice-cream
+manner(s)
+Mr
+P.E.
+stuck
+united

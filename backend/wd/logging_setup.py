@@ -1,7 +1,7 @@
 """Logging (DEPLOY §6): JSON lines to stdout → journald, optional rotating file, in-memory ring buffer.
 
 Fields: ``ts level logger msg request_id user_id method path status duration_ms job_id job_type worker
-cost_usd provider event`` — any of them passed as ``extra={...}`` on a log call appears in the line.
+cost_usd provider event word_ids word_id`` — any of them passed as ``extra={...}`` on a log call appears in the line.
 ``RING`` keeps the last 2000 formatted lines for ``wd logs --tail N`` (WP5 ``diag``).
 Bodies, passwords, tokens and prompts are never logged (prompts only as word lists at DEBUG).
 """
@@ -30,6 +30,8 @@ EXTRA_FIELDS = (
     "cost_usd",
     "provider",
     "event",
+    "word_ids",  # scheduler.maintenance `image_retry`: which failed-image words were requeued (PLAN §5.1 C7)
+    "word_id",  # images.handler `query_ignored` (PLAN §5.1 C5): the word whose admin query was dropped — an extra not listed here never reaches the journal
 )
 
 RING: deque[str] = deque(maxlen=2000)

@@ -74,8 +74,13 @@ class Candidate:
 class ImageProvider(Protocol):
     name: str
 
-    def search(self, query: str, limit: int) -> list[Candidate]:
-        """One HTTP request; raises :class:`ProviderError` (status, retry_after_s) on failure."""
+    def search(self, query: str, limit: int, *, style: str = "neutral") -> list[Candidate]:
+        """One HTTP request; raises :class:`ProviderError` (status, retry_after_s) on failure.
+
+        ``style`` is the round's picture style (``images.style.STYLES``: ``neutral`` = the photo chain as before,
+        ``kid`` = the illustration-first round of DESIGN §9 / PLAN §5.1 C8); a provider without an illustration filter
+        ignores it. ``runtime_checkable`` only checks that the attribute exists, so the keyword is free to grow.
+        """
         ...
 
 

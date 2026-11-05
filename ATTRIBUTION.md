@@ -11,25 +11,34 @@ word-Dance itself is MIT-licensed (see [`LICENSE`](LICENSE)). The vocabulary dat
 | Work | **ECDICT — Free English to Chinese Dictionary Database**, by Linwei (GitHub [skywind3000/ECDICT](https://github.com/skywind3000/ECDICT)) |
 | Release used | 1.0.28, asset `ecdict-sqlite-28.zip` → `stardict.db` (3,402,564 entries) |
 | Licence | MIT License, Copyright (c) 2025 Linwei — full text in [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE) (downloaded from the repository's `LICENSE` file on 2026-10-14) |
-| What we ship | [`data/seed/vocab.jsonl.gz`](data/seed/vocab.jsonl.gz): 9,162 records, one per headword, built by [`scripts/build_seed.py`](scripts/build_seed.py) (`make seed`). Fields taken from ECDICT: `word`, `phonetic`, `definition`, `translation`, `pos`, `collins`, `oxford`, `tag` (→ `stages`, `exam_tags`), `bnc`, `frq`, `exchange` and `id` (→ `ecdict_id`). Phonetics are normalised (`ә→ə`, `:→ː`); nothing else is altered. Counts: [`data/seed/stats.json`](data/seed/stats.json); field notes: [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md). |
+| What we ship | [`data/seed/vocab.jsonl.gz`](data/seed/vocab.jsonl.gz): one record per headword (the record count, per-stage counts and the content sha256 are in [`data/seed/stats.json`](data/seed/stats.json) — `total_words`, `per_stage`, `content_sha256`; never hand-copied here), built by `backend/wd/seedbuild/` through [`scripts/build_seed.py`](scripts/build_seed.py) (`make seed`). Fields taken from ECDICT: `word`, `phonetic`, `definition`, `translation`, `pos`, `collins`, `oxford`, `tag` (→ `exam_tags`; the `cet4`/`cet6` tags → CET flags of new rows), `bnc`, `frq`, `exchange` and `id` (→ `ecdict_id`). Phonetics are normalised (`ә→ə`, `:→ː`); a `[网络] ` prefix is removed from the first translation line of a new row; up to 30 glosses are replaced by the repository's own text (section 2c). Field notes and the generated source table: [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md). |
 | Optional full dictionary | `deploy/fetch_ecdict.sh` can download the same release into the data directory (`WD_ECDICT_DB_PATH`) for instant lookup of words outside the seed. It is never committed to this repository and stays under the same MIT licence. |
 
 Redistributing the seed, the imported `words` / `word_forms` tables or the optional `stardict.db` requires keeping ECDICT's copyright notice and the MIT permission notice.
 
-## 2. Exam-syllabus word lists — mahavivo/english-wordlists (membership facts only)
+## 2. Word lists — membership facts only
 
-Stage membership (初中 / 高中 / 四级 / 六级 — the `stage_zk` / `stage_gk` / `stage_cet4` / `stage_cet6` flags and `cet6_star`) is the union of ECDICT's own exam tags (`zk gk cet4 cet6`) and the head words of these plain-text lists from <https://github.com/mahavivo/english-wordlists>:
+Stage membership — the `stage_xs` / `stage_zk` / `stage_gk` / `stage_cet4` / `stage_cet6` flags, `stage_min` and `cet6_star` — is decided from the **headwords** of the lists below and from ECDICT's CET tags. Only the fact that a headword appears in a given list is used; the lists' glosses, phonetics, numbering, star marks as typography and page layout are not copied into the seed — every shipped dictionary field comes from ECDICT (section 1). The exact set algebra, the normalisation rules and the `sources` tokens that record each list are specified in `docs/analysis/2026-11-05-stages-regions-images/design/PLAN.md` §4 and listed per seed build in [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md) §2–§5.
 
-| File | Used for |
-|---|---|
-| `中考英语词汇表.txt` | 初中 (zk) |
-| `Highschool_edited.txt` | 高中 (gk) |
-| `CET4_edited.txt` | 四级 (cet4) |
-| `CET6_edited.txt` | 六级 (cet6) |
-| `CET_4+6_edited.txt` | combined CET-4/6 list (2016 全国大学英语四、六级考试大纲 vocabulary); words not in the CET-4 list count as cet6 |
-| `英语六级词汇（星标，1726）.txt` | `cet6_star` (1,714 seed words carry it; 7 list entries match no seed headword) |
+### 2a. Official curriculum and examination-authority word lists (小学 / 初中 / 高中) — headword lists in `data/lists/`
 
-Only the **fact that a head word appears in a given list** is used. No list file, and none of the lists' phonetics, glosses, numbering or ordering, is copied into this repository or into the seed: every shipped field comes from ECDICT (section 1). The repository publishes no licence file (checked 2026-10-14); its README states that the CET lists transcribe public exam syllabi (the 2016 全国大学英语四、六级考试大纲 vocabulary and a university's published CET-4 list). We thank its author for the careful transcription. Anyone who wants to redistribute the raw lists themselves should obtain them from, and credit, that repository.
+| File(s) | Original | Used for |
+|---|---|---|
+| `moe-2022-level2.txt`, `moe-2022-level3.txt`, `moe-2022-appendix.tsv` | 教育部《义务教育英语课程标准（2022 年版）》附录 3 词汇表（二级 505 词、三级 1600 词、附表：数词、月份星期、地理名称、缩写、节日与中国文化专有名词；不规则动词表只存档） | 小学 (`xs`) = level 2 plus the numeral / month / weekday appendix groups; 初中 (`zk`) = level 3 plus the remaining appendix groups |
+| `shmeea-2020-junior.txt`, `shmeea-2020-junior-phrases.txt`, `shmeea-2020-junior-appendix.tsv` (`shmeea-2020-junior-forms.tsv` archived only) | 上海市教育考试院《2020 年上海市初中英语课程终结性评价指南》词汇表（单词、词组、附表） | 初中 (`zk`); phrases enter as `kind='phrase'` rows when ECDICT has an entry |
+| `moe-2020-senior.tsv`, `moe-2025rev-senior.tsv` (the two country-name appendices `*-senior-appendix.tsv` archived only) | 教育部《普通高中英语课程标准（2017 年版 2020 年修订）》与《…日常修订版（2017 年版 2025 年修订）》附录 2 词汇表（3000 / 3100 词，星级保留在 `sources` 令牌 `hs20:<level>` / `hs25:<level>`） | 高中 (`gk`) = the union of both editions; the 2025 revision comes from an unofficial mirror and is marked `provisional` |
+
+What is kept is close to factual data — the headword spelling as printed, parallel forms (`a/an`), bracketed variants (`colour (AmE color)`) and the star level; no definitions, parts of speech, examples, typography or explanatory text of the originals are included. The originals are government / examination-authority publications that declare no licence; whether Article 5 of the PRC Copyright Law (official documents) applies to a curriculum vocabulary appendix has **not** been verified (`data/lists/README.md` §3). Provenance — source URLs, checksums of the originals, page ranges, transcription rules and the reconciliation of every count — is documented in `data/lists/README.md` and the three README files next to the lists; `data/lists/SHA256SUMS` pins the files the builder reads.
+
+### 2b. CET-4 / CET-6 — mahavivo/english-wordlists (optional build input)
+
+CET-4 / CET-6 membership of the existing rows comes from the head words of the plain-text lists at <https://github.com/mahavivo/english-wordlists> (`CET4_edited.txt`, `CET6_edited.txt`, `CET_4+6_edited.txt` — the 2016 全国大学英语四、六级考试大纲 vocabulary; words not in the CET-4 list count as cet6 — and `英语六级词汇（星标，1726）.txt` → `cet6_star`), recorded as the `cet4` / `cet6` / `cet46` tokens. The lists are an **optional** input of `make seed` (`WORDLISTS_DIR`): when absent, existing rows keep the flags of the previous seed and new rows take ECDICT's `cet4` / `cet6` tags. No list file, and none of the lists' phonetics, glosses, numbering or ordering, is copied into this repository or into the seed. The repository publishes no licence file (checked 2026-10-14); its README states that the CET lists transcribe public exam syllabi. We thank its author for the careful transcription. Anyone who wants to redistribute the raw lists themselves should obtain them from, and credit, that repository.
+
+The same repository's `中考英语词汇表.txt` and `Highschool_edited.txt` were the 初中 / 高中 sources of the seed until 2026-11; they are **no longer inputs** (section 2a replaces them). Their former contribution survives only as the provenance tokens `legacy:zk` / `legacy:gk` in `words.sources`, which grant no stage.
+
+### 2c. Hand-written glosses — `data/lists/overrides.tsv`
+
+At most 30 rows replace an ECDICT translation whose sense is wrong for the curriculum word (`bund` 外滩, `mum`, `p.e.`, abbreviations such as `AI`, `UN`, `WTO`) or fix a display spelling. These glosses are written for this repository and are released under its MIT licence; they are neither ECDICT nor official-list text.
 
 ## 3. Pictures
 
@@ -38,12 +47,12 @@ Every picture shown in word-Dance is either a photo downloaded from one of the p
 ### 3.1 Wikimedia Commons (primary provider)
 
 - Files on Wikimedia Commons are licensed individually by their uploaders; the app reads `LicenseShortName`, `LicenseUrl` and `Artist` from the file's `extmetadata` and links to its description page.
-- API access follows the Wikimedia Foundation User-Agent policy and the MediaWiki API etiquette: descriptive header `User-Agent: word-Dance/<version> (self-hosted vocabulary trainer; +<WD_PUBLIC_URL>; <WD_CONTACT_EMAIL>)`, at most one request per second, 800-px thumbnails only.
+- API access follows the Wikimedia Foundation User-Agent policy and the MediaWiki API etiquette: descriptive header `User-Agent: word-Dance/<version> (self-hosted vocabulary trainer; +<WD_PUBLIC_URL>; <WD_CONTACT_EMAIL>)`, at most one request per second, 800-px thumbnails only. Searches ask for photographs (`filetype:bitmap`) and request `thumbmime` with the image info; every request carries `maxlag=5` and a `maxlag` reply is treated as a 503 with the server's `Retry-After` (the app backs off instead of retrying at once). When the operator enables the child-friendly illustration round (`WD_IMAGE_KID_STAGES`, off by default) the first round searches drawings (`filetype:drawing`) before falling back to photographs.
 - Reuse guide: <https://commons.wikimedia.org/wiki/Commons:Reusing_content_outside_Wikimedia> · User-Agent policy: <https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy> · API etiquette: <https://www.mediawiki.org/wiki/API:Etiquette>
 
 ### 3.2 Openverse (secondary provider)
 
-- Openverse (<https://openverse.org>, a WordPress project) indexes openly licensed and public-domain images from many hosts (for example Flickr). The app queries `https://api.openverse.org/v1/images/` with `license_type=commercial&mature=false`, accepts the licences `cc0`, `pdm`, `by` and `by-sa`, stores `title`, `creator`, `creator_url`, `license`, `license_version`, `license_url`, `foreign_landing_url` and Openverse's own `attribution` sentence, and downloads the image from its original host — never the thumbnail on `api.openverse.org`.
+- Openverse (<https://openverse.org>, a WordPress project) indexes openly licensed and public-domain images from many hosts (for example Flickr). The app queries `https://api.openverse.org/v1/images/` with `license_type=commercial&mature=false` and `page_size=10`, adding `category=illustration` only in the optional child-friendly illustration round (`WD_IMAGE_KID_STAGES`, off by default); it accepts the licences `cc0`, `pdm`, `by` and `by-sa`, stores `title`, `creator`, `creator_url`, `license`, `license_version`, `license_url`, `foreign_landing_url`, the result's `category` and Openverse's own `attribution` sentence, and downloads the image from its original host — never the thumbnail on `api.openverse.org`.
 - Anonymous use stays within Openverse's published limits (20 requests per minute, 200 per day; the app enforces 15 per minute and 160 per day and honours `Retry-After`). Operators may register an application (`WD_OPENVERSE_CLIENT_ID` / `WD_OPENVERSE_CLIENT_SECRET`) under the Openverse API terms of service.
 - Licence metadata is as reported by the Openverse index; the source page linked from the caption is the authority. API documentation: <https://api.openverse.org/v1/> · Terms of service: <https://docs.openverse.org/terms_of_service.html>
 
@@ -53,7 +62,7 @@ Disabled unless the operator supplies an API key (`WD_PIXABAY_KEY`, `WD_PEXELS_K
 
 ### 3.4 Generated images
 
-- **AI 生成示意图** — flat-style SVG concept cards drawn by Claude (section 4) when no acceptable photo exists for a word a user studies; sanitised server-side before storage (`provider='claude_svg'`, `license='generated'`).
+- **AI 生成示意图** — flat-style SVG concept cards drawn by Claude (section 4) when no acceptable photo exists for a word a user studies; sanitised server-side before storage (`provider='claude_svg'`, `license='generated'`). The picture contains no text (the sanitiser drops any `<text>`/`<tspan>` the model emits, so the card never spells the word), and the SVG file carries a generation marker `<desc id="aigc-label">…</desc>` naming the generator, the project, the model and the date, so a copied file still identifies itself as AI-generated.
 - **系统生成卡片** — a deterministic text-only SVG rendered from dictionary data when neither a photo nor an AI card is available.
 
 Neither contains third-party material; both are labelled as generated in the UI.
@@ -74,8 +83,8 @@ Backend packages (FastAPI, uvicorn, Pydantic, bcrypt, httpx, Pillow, defusedxml,
 | Where | What is shown |
 |---|---|
 | Under every picture | `图片：{title} · {creator} · {license} ↗` linking to the source page; `AI 生成示意图` / `系统生成卡片` for generated images |
-| 设置 → 关于与数据来源 | version, ECDICT (MIT), the syllabus-list sources, the picture providers, the 「例句由 AI 生成」 notice |
+| 设置 → 关于与数据来源 | version, ECDICT (MIT), the word-list sources (curriculum / examination-authority lists and the CET syllabi), the picture providers, the 「例句由 AI 生成」 notice |
 | API | `ImageMeta.attribution` (`license`, `license_url`, `landing_url`, `text`) on every word image ([`docs/API.md`](docs/API.md) §9) |
-| Repository | this file, [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md), [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE), [`LICENSE`](LICENSE) |
+| Repository | this file, [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md) (generated per build), [`data/lists/README.md`](data/lists/README.md) (provenance of the official lists), [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE), [`LICENSE`](LICENSE) |
 
 Corrections to any attribution are welcome as an issue or pull request.

@@ -1,7 +1,9 @@
 """Pexels (optional keyed provider, ``WD_PEXELS_KEY``).
 
 ``GET https://api.pexels.com/v1/search?query=<kw>&per_page=<n>&orientation=landscape`` with ``Authorization: <key>``.
-``src.large`` (940 px) is downloaded and re-encoded to ≤ 800 px. Licence: the Pexels License.
+``src.large`` (940 px) is downloaded and re-encoded to ≤ 800 px. Licence: the Pexels License. Pexels has no
+illustration filter, so ``search`` accepts the ``style`` keyword of ``interfaces.ImageProvider`` and ignores it; the
+handler keeps Pexels out of the ``kid`` round altogether (PLAN §5.1 C8).
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ class PexelsProvider:
     def params(self, query: str, limit: int) -> dict[str, object]:
         return {"query": query, "per_page": max(1, min(int(limit), 80)), "orientation": "landscape"}
 
-    def search(self, query: str, limit: int) -> list[Candidate]:
+    def search(self, query: str, limit: int, *, style: str = "neutral") -> list[Candidate]:
         if not self.cfg.pexels_key:
             raise ProviderError("pexels: WD_PEXELS_KEY is not configured")
         with self._client_factory() as client:

@@ -141,7 +141,7 @@ def test_overview_numbers(client: TestClient, seeded, admin):
     o = r.json()
     assert o["users"] == {"total": 2, "active_7d": 2}  # both sessions were seen "now"
     w = o["words"]
-    assert w["total"] == 60 and w["with_content"] == 4 and (w["with_photo"], w["with_claude_svg"], w["card_only"]) == (2, 1, 1)
+    assert w["total"] == 62 and w["with_content"] == 4 and (w["with_photo"], w["with_claude_svg"], w["card_only"]) == (2, 1, 1)
     assert w["user_added"] == 0 and w["pending_validation"] == 0
     assert o["bank_entries"] == 1 and o["batches_today"] == 1
     assert o["jobs"] == {"queued": 1, "running": 0, "dead": 1, "by_type": {"generate_content": 1}}
@@ -152,7 +152,7 @@ def test_overview_numbers(client: TestClient, seeded, admin):
     assert ai["avg_cost_per_word_7d"] == pytest.approx(0.04)
     assert isinstance(o["images"]["providers"], list) and {p["provider"] for p in o["images"]["providers"]} >= {"wikimedia", "openverse"}
     assert o["scheduler"] == {"last_tick_at": "2026-10-13T23:59:30Z", "alive": True}
-    recent = [e for e in o["events_24h"] if e["kind"] != "seed_imported"]  # the seed import logs its own event
+    recent = [e for e in o["events_24h"] if e["kind"] not in ("seed_imported", "migration")]  # the seed import and 0011 log their own events
     assert [e["kind"] for e in recent] == ["budget_daily"] and recent[0]["detail"] == {"cap_usd": 3}
 
 
@@ -478,6 +478,20 @@ def test_prewarm_stops_at_budget_and_cancels_leftovers(client: TestClient, seede
     assert client.post("/api/admin/content/prewarm", json={"stage": "cet4", "limit": 0, "max_budget_usd": 1}).status_code == 400
 
 
+def test_prewarm_accepts_the_primary_school_stage(client: TestClient, seeded, admin):
+    """API.md 67 / PLAN §6 S2: 小学 is a valid prewarm target; its candidates are exactly the stage_xs words lacking content
+    (prewarm.STAGE_COLUMNS is derived from schemas.STAGE_ORDER, so no stage can be forgotten there)."""
+    from wd.ai import prewarm
+
+    xs_ids = {int(r[0]) for r in seeded.execute("SELECT id FROM words WHERE stage_xs = 1 AND is_public = 1 AND is_valid_english = 1 AND content_state = 'none'")}
+    assert xs_ids and prewarm.STAGES == ("xs", "zk", "gk", "cet4", "cet6", "all") and prewarm.STAGE_COLUMNS["xs"] == "stage_xs"
+    assert set(prewarm.candidates(seeded, "xs", 100)) == xs_ids and prewarm.count_candidates(seeded, "xs") == len(xs_ids)
+    r = client.post("/api/admin/content/prewarm", json={"stage": "xs", "limit": 100, "max_budget_usd": 1})
+    assert r.status_code == 202, r.text
+    assert r.json()["planned"] == len(xs_ids)
+    assert queue.get_job(seeded, r.json()["job_id"]).payload["stage"] == "xs"
+
+
 # ---------------------------------------------------------------------------------- regenerate / image
 def test_regenerate_uses_the_r_suffix_and_refetch_image_enqueues(client: TestClient, seeded, admin):
     wid = word_ids(seeded, 1)[0]
@@ -532,7 +546,7 @@ def test_regenerate_keeps_the_live_content_visible_and_requeues_a_failed_word(cl
 def test_events_and_config(client: TestClient, seeded, admin, settings):
     for i in range(3):
         seeded.execute("INSERT INTO system_events(kind, detail_json, created_at) VALUES (?, ?, ?)", (f"k{i}", json.dumps({"i": i}), f"2026-10-1{i}T00:00:00Z"))
-    seeded.execute("DELETE FROM system_events WHERE kind = 'seed_imported'")
+    seeded.execute("DELETE FROM system_events WHERE kind IN ('seed_imported', 'migration')")  # the fixture's own traces (seed import, 0011)
     r = client.get("/api/admin/events?page_size=2")
     assert r.status_code == 200 and r.json()["total"] == 3 and [e["kind"] for e in r.json()["items"]] == ["k2", "k1"] and r.json()["items"][0]["detail"] == {"i": 2}
     assert [e["kind"] for e in client.get("/api/admin/events?page=2&page_size=2").json()["items"]] == ["k0"]

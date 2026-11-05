@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 
 from wd import db
 from wd.deps import hash_token
+from wd.schemas import STAGE_ORDER, stage_to_index
 
 FAR = "2030-01-01T00:00:00Z"
+N = 62  # mini-seed records
 FULL_SEED_DB = os.environ.get("WD_FULL_SEED_DB")  # read at collection time: the test_env fixture strips WD_* variables
 
 
@@ -66,17 +68,19 @@ def test_stages_totals_and_progress(client: TestClient, settings, alice):
     r = client.get("/api/stages")
     assert r.status_code == 200, r.text
     items = r.json()["items"]
-    assert [i["stage"] for i in items] == ["zk", "gk", "cet4", "cet6"] and [i["index"] for i in items] == [1, 2, 3, 4]
-    assert [i["name_zh"] for i in items] == ["初中", "高中", "四级", "六级"]
+    assert [i["stage"] for i in items] == ["xs", "zk", "gk", "cet4", "cet6"] == list(STAGE_ORDER) and [i["index"] for i in items] == [1, 2, 3, 4, 5]
+    assert [i["name_zh"] for i in items] == ["小学", "初中", "高中", "四级", "六级"]
     for i in items:
-        assert i["total"] == q1(settings, f"SELECT COUNT(*) FROM words WHERE stage_{i['stage']} = 1 AND is_public = 1 AND merged_into_word_id IS NULL")
+        assert i["total"] == q1(settings, f"SELECT COUNT(*) FROM words WHERE stage_{i['stage']} = 1 AND is_public = 1 AND merged_into_word_id IS NULL") > 0
         assert i["new_only_total"] == q1(settings, "SELECT COUNT(*) FROM words WHERE stage_min = ? AND is_public = 1", (i["index"],))
         assert i["unseen"] == i["total"] and i["unfamiliar"] == i["known"] == i["mastered"] == 0
-    cet6 = items[3]
-    assert cet6["new_only_total"] == 3  # absorption, axe, ought to
+    xs = items[0]
+    assert xs["new_only_total"] == xs["total"]  # 小学 is the lowest stage: every one of its words is "new" there
+    cet6 = items[4]
+    assert cet6["stage"] == "cet6" and cet6["new_only_total"] == 3  # absorption, axe, ought to
     abandon = q1(settings, "SELECT id FROM words WHERE lemma = 'abandon'")
     assert client.post(f"/api/words/{abandon}/mark", json={"action": "unfamiliar"}).status_code == 200
-    cet6 = client.get("/api/stages").json()["items"][3]
+    cet6 = client.get("/api/stages").json()["items"][4]
     assert (cet6["unfamiliar"], cet6["unseen"]) == (1, cet6["total"] - 1)
 
 
@@ -90,13 +94,15 @@ def test_vocab_default_is_everything_sorted_by_frequency(client: TestClient, set
     r = client.get("/api/vocab")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["total"] == 60 and body["page"] == 1 and body["page_size"] == 50 and len(body["items"]) == 50
+    assert body["total"] == N and body["page"] == 1 and body["page_size"] == 50 and len(body["items"]) == 50
     lemmas = [i["lemma"] for i in body["items"]]
     assert lemmas[0] == "be"  # frq 2
     frqs = [i["frq"] for i in body["items"] if i["frq"]]
     assert frqs == sorted(frqs)
     page2 = client.get("/api/vocab?page=2").json()
-    assert len(page2["items"]) == 10 and page2["items"][-1]["frq"] is None  # NULL/0 frequency sorts last
+    assert len(page2["items"]) == N - 50 and page2["items"][-1]["frq"] is None  # NULL/0 frequency sorts last
+    shelf = next(i for i in page2["items"] if i["lemma"] == "bookshelf")
+    assert shelf["stages"] == [] and shelf["stage_min"] is None  # a 课标外 word is listed under 全部 (PLAN P6)
     assert set(body["items"][0]) == {
         "id", "lemma", "display", "kind", "phonetic", "translation_short", "stages", "stage_min", "cet6_star", "frq", "collins", "oxford",
         "difficulty", "is_public", "is_valid_english", "my_state", "content_state", "image_state",
@@ -108,10 +114,17 @@ def test_vocab_stage_and_new_only(client: TestClient, settings, alice):
     r = client.get("/api/vocab?stage=cet6&new_only=1")
     assert r.status_code == 200 and r.json()["total"] == 3
     assert sorted(i["lemma"] for i in r.json()["items"]) == ["absorption", "axe", "ought to"]
-    assert all(i["stage_min"] == 4 for i in r.json()["items"])
+    assert all(i["stage_min"] == stage_to_index("cet6") == 5 for i in r.json()["items"])
     r = client.get("/api/vocab?new_only=1")  # needs a stage
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
     assert client.get("/api/vocab?stage=cet6&new_only=0").json()["total"] == q1(settings, "SELECT COUNT(*) FROM words WHERE stage_cet6 = 1")
+    # the 小学 tab: stage_xs words; "仅本阶段新增" there is every 小学 word (the lowest stage has stage_min 1 by construction)
+    xs_total = q1(settings, "SELECT COUNT(*) FROM words WHERE stage_xs = 1 AND is_public = 1")
+    assert xs_total > 0 and client.get("/api/vocab?stage=xs").json()["total"] == xs_total
+    r = client.get("/api/vocab?stage=xs&new_only=1")
+    assert r.status_code == 200 and r.json()["total"] == q1(settings, "SELECT COUNT(*) FROM words WHERE stage_min = 1 AND is_public = 1") == xs_total
+    assert all(i["stages"][0] == "xs" and i["stage_min"] == 1 for i in r.json()["items"])
+    assert client.get("/api/vocab?stage=cet9").status_code == 400
 
 
 def test_vocab_search_prefix_forms_and_chinese(client: TestClient, settings, alice):
@@ -142,23 +155,29 @@ def test_vocab_status_filters(client: TestClient, settings, alice):
     assert get("known") == {"apple": "known"}
     assert get("mastered") == {"bank": "mastered"}
     unmarked = get("unmarked")
-    assert len(unmarked) == 57 and unmarked["glass"] == "removed" and "abandon" not in unmarked
-    assert client.get("/api/vocab?status=all&page_size=100").json()["total"] == 60
+    assert len(unmarked) == N - 3 and unmarked["glass"] == "removed" and "abandon" not in unmarked
+    assert client.get("/api/vocab?status=all&page_size=100").json()["total"] == N
     assert client.get("/api/vocab?status=bogus").status_code == 400
 
 
 def test_vocab_sort_alpha_and_difficulty(client: TestClient, settings, alice):
     alpha = [i["lemma"] for i in client.get("/api/vocab?sort=alpha&page_size=100").json()["items"]]
     assert alpha == sorted(alpha) and alpha[0] == "a"
-    # difficulty: COALESCE(difficulty, stage_min, 5) — a cet6-only word with difficulty 1 sorts before a stage_min-2 word with NULL difficulty
+    # difficulty: COALESCE(difficulty + 1, stage_min, 6) — Claude's unchanged 1–5 scale sits one below the 1..5 stage index (API.md 20,
+    # PLAN R-2): a cet6-only word with difficulty 1 (key 2) sorts before a gk-first word with NULL difficulty (key 3) and a cet4-first
+    # one (key 4); a 课标外 word (stage_min NULL, no difficulty) is last (key 6)
     run(settings, "UPDATE words SET difficulty = 1 WHERE lemma = 'absorption'")
-    order = [i["lemma"] for i in client.get("/api/vocab?sort=difficulty&page_size=100").json()["items"]]
-    assert order.index("absorption") < order.index("abandon") < order.index("absolutely")  # 1 < stage_min 2 < stage_min 3
-    assert order[-1] == "ought to" or order[-3:] == sorted(order[-3:], key=lambda l: l)  # stage_min 4 group, NULL frq last
+    items = client.get("/api/vocab?sort=difficulty&page_size=100").json()["items"]
+    order = [i["lemma"] for i in items]
+    assert order.index("absorption") < order.index("abandon") < order.index("absolutely") < order.index("ought to") < order.index("bookshelf")
+    assert order[-1] == "bookshelf" and items[-1]["stage_min"] is None
+    sort_key = lambda i: (i["difficulty"] + 1 if i["difficulty"] else i["stage_min"] or 6, i["frq"] is None or i["frq"] == 0, i["frq"] or 0, i["lemma"])
+    keys = [sort_key(i) for i in items]
+    assert keys == sorted(keys) and keys[0][0] == 1  # the 小学 words (stage_min 1) open the list
     again = [i["lemma"] for i in client.get("/api/vocab?sort=difficulty&page_size=100").json()["items"]]
     assert again == order  # deterministic
     zk = [i for i in client.get("/api/vocab?sort=difficulty&stage=zk&page_size=100").json()["items"]]
-    keys = [(i["difficulty"] or i["stage_min"] or 5, i["frq"] is None or i["frq"] == 0, i["frq"] or 0, i["lemma"]) for i in zk]
+    keys = [sort_key(i) for i in zk]
     assert keys == sorted(keys)
 
 
@@ -170,7 +189,7 @@ def test_vocab_letter_filter_and_letters_endpoint(client: TestClient, settings, 
     letters = client.get("/api/vocab/letters").json()["items"]
     assert [l["letter"] for l in letters] == list("abcdefghijklmnopqrstuvwxyz")
     counts = {l["letter"]: l["count"] for l in letters}
-    assert counts["a"] == a["total"] and counts["z"] == 0 and sum(counts.values()) == 60
+    assert counts["a"] == a["total"] and counts["z"] == 0 and sum(counts.values()) == N
     cet6 = {l["letter"]: l["count"] for l in client.get("/api/vocab/letters?stage=cet6&new_only=1").json()["items"]}
     assert cet6 == {**{ch: 0 for ch in "abcdefghijklmnopqrstuvwxyz"}, "a": 2, "o": 1}
     # letters ignores letter/q: the counts cover the whole filter
@@ -213,7 +232,9 @@ def test_admin_sees_private_words(client: TestClient, settings, alice):
 # ------------------------------------------------------------------------------------------ full seed
 @pytest.mark.full_seed
 def test_cet6_new_only_on_the_full_seed(settings, frozen_clock):
-    """``stage=cet6&new_only=1`` → 3,694 (the CET-6 increment) and the sort/filter performance on 9,162 words."""
+    """``stage=cet6&new_only=1`` → the CET-6 increment (``stats.json.first_stage.cet6``, PLAN R-17: numbers come from the builder's
+    stats, never hand-typed) and the sort/filter performance on the full seed."""
+    import json
     from dataclasses import replace
 
     from wd.main import create_app
@@ -222,16 +243,21 @@ def test_cet6_new_only_on_the_full_seed(settings, frozen_clock):
     src = Path(FULL_SEED_DB)
     dst = settings.data_dir / "full.db"
     shutil.copy(src, dst)
-    seed_gz = Path(__file__).resolve().parents[3] / "data" / "seed" / "vocab.jsonl.gz"
-    cfg = replace(settings, db_path=dst, seed_path=seed_gz)
+    seed_dir = Path(__file__).resolve().parents[3] / "data" / "seed"
+    stats = json.loads((seed_dir / "stats.json").read_text(encoding="utf-8"))
+    cfg = replace(settings, db_path=dst, seed_path=seed_dir / "vocab.jsonl.gz")
     with TestClient(create_app(cfg, clock=frozen_clock, configure_logs=False)) as c:
         c.headers["X-WD-Request"] = "1"
         _, token = make_user(cfg, "full")
         as_user(c, token)
         r = c.get("/api/vocab?stage=cet6&new_only=1")
-        assert r.status_code == 200 and r.json()["total"] == 3694
-        assert c.get("/api/vocab?stage=cet6").json()["total"] == 7671
-        assert c.get("/api/stages").json()["items"][3]["new_only_total"] == 3694
+        assert r.status_code == 200 and r.json()["total"] == stats["first_stage"]["cet6"]
+        assert c.get("/api/vocab?stage=cet6").json()["total"] == stats["per_stage"]["cet6"]
+        items = c.get("/api/stages").json()["items"]
+        assert [i["stage"] for i in items] == list(STAGE_ORDER)
+        assert [i["total"] for i in items] == [stats["per_stage"][s] for s in STAGE_ORDER]
+        assert [i["new_only_total"] for i in items] == [stats["first_stage"][s] for s in STAGE_ORDER]
+        assert c.get("/api/vocab?stage=xs&new_only=1").json()["total"] == stats["first_stage"]["xs"]
         import time
 
         t = time.perf_counter()

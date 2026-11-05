@@ -6,8 +6,12 @@ missing, the query fails or no row exists, so :func:`wd.services.words.resolve` 
 to the provisional step. The database is opened read-only per call — the file is an 851 MB read-only artefact and a
 lookup is one indexed SELECT, so there is no shared connection to protect across request threads.
 
-The record → ``words`` column mapping (:meth:`EcdictEntry.word_columns`) mirrors ``scripts/build_seed.py``
-(``make_record`` / ``norm_phonetic`` / ``parse_exchange``) so an ECDICT-derived row looks exactly like a seed row.
+The record → ``words`` column mapping (:meth:`EcdictEntry.word_columns`) mirrors the seed builder (``norm_phonetic`` /
+``parse_exchange`` / the field list) so an ECDICT-derived row looks like a seed row — except for the stage flags: since
+the official word lists became the only source of 小学/初中/高中 membership (PLAN R-10 / SM D-14), ECDICT's ``zk``/``gk``
+tags no longer grant a stage at runtime; only :data:`MEMBER_TAGS` (``cet4``/``cet6``) do. :data:`STAGE_TAGS` keeps all four
+tag names for :attr:`EcdictEntry.has_stage_tag` ("carries any exam-stage tag"), which ``words.resolve`` uses to decide
+whether an inflected ECDICT row points back to its lemma — that heuristic is unchanged.
 Rows whose only translation lines start with ``[网络]`` (network slang of doubtful validity) are flagged by
 :attr:`EcdictEntry.is_network_only`; the resolver creates those as private provisional words (DESIGN §5.2).
 """
@@ -22,10 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..schemas import STAGE_ORDER, stage_to_index
+
 log = logging.getLogger("wd.ecdict")
 
 ENV_VAR = "WD_ECDICT_DB_PATH"
-STAGE_TAGS: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")
+STAGE_TAGS: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")  # ECDICT's exam-stage tag names (has_stage_tag); NOT the stage enum
+MEMBER_TAGS: tuple[str, ...] = ("cet4", "cet6")  # the tags that still grant a words.stage_* flag at runtime (PLAN R-10)
 EXAM_TAGS: tuple[str, ...] = ("ky", "toefl", "ielts", "gre")
 FORM_CODES: tuple[str, ...] = ("p", "d", "i", "3", "s", "r", "t")  # word_forms.kind values derived from ECDICT exchange codes
 NETWORK_PREFIX = "[网络]"
@@ -116,11 +123,14 @@ class EcdictEntry:
     # ------------------------------------------------------------------ derived
     @property
     def stages(self) -> list[str]:
-        return [t for t in STAGE_TAGS if t in self.tags]
+        """Stage codes this row grants (``STAGE_ORDER`` order): only the CET tags; ``zk``/``gk`` come from the official lists."""
+        return [s for s in STAGE_ORDER if s in MEMBER_TAGS and s in self.tags]
 
     @property
     def has_stage_tag(self) -> bool:
-        return bool(self.stages)
+        """True when the row carries any of ECDICT's four exam-stage tags — the lemma-pointer heuristic of ``words.resolve``
+        (an inflection whose row has no tag and no frequency points back to its lemma); deliberately wider than :attr:`stages`."""
+        return any(t in self.tags for t in STAGE_TAGS)
 
     @property
     def exam_tags(self) -> list[str]:
@@ -170,11 +180,8 @@ class EcdictEntry:
             "bnc": self.bnc,
             "frq": self.frq,
             "exchange_json": json.dumps(dict(self.exchange), ensure_ascii=False, sort_keys=True) if self.exchange else None,
-            "stage_zk": int("zk" in stages),
-            "stage_gk": int("gk" in stages),
-            "stage_cet4": int("cet4" in stages),
-            "stage_cet6": int("cet6" in stages),
-            "stage_min": (STAGE_TAGS.index(stages[0]) + 1) if stages else None,
+            **{f"stage_{s}": int(s in stages) for s in STAGE_ORDER},
+            "stage_min": min(stage_to_index(s) for s in stages) if stages else None,
             "cet6_star": 0,
             "sources": "ecdict",
             "ecdict_id": self.ecdict_id,

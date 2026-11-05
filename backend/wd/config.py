@@ -155,6 +155,7 @@ class Settings:
     # --- images ---------------------------------------------------------------------
     images_enabled: bool = True
     image_providers: tuple[str, ...] = ("wikimedia", "openverse")
+    image_kid_stages: tuple[str, ...] = ()  # stage codes drawn in the child style (+ the illustration-first round); empty = off (PLAN §5.1 C3)
     svg_via_claude: bool = True
     image_max_bytes: int = 8_000_000
     image_max_edge: int = 800
@@ -368,6 +369,34 @@ class Settings:
         if pexels_key and "pexels" not in providers:
             providers.append("pexels")
 
+        # WD_IMAGE_KID_STAGES: the stage codes whose words get the child picture style (images/style.style_for; DEPLOY §4).
+        # Empty = off — the default until the pilot of design/images/SYNTHESIS.md §3.6 clears it for `xs`. The import is
+        # function-level on purpose: schemas imports only pydantic + clock and config only clock, so there is no cycle, but
+        # config must stay importable before the rest of the package.
+        kid_raw = text("WD_IMAGE_KID_STAGES", "")
+        kid_stages: list[str] = []
+        if kid_raw.strip():
+            from .schemas import STAGE_ORDER
+
+            for code in (x.strip().lower() for x in kid_raw.split(",")):
+                if not code:
+                    continue
+                if code not in STAGE_ORDER:
+                    raise ConfigError(f"WD_IMAGE_KID_STAGES contains an unknown stage {code!r}; allowed: {', '.join(STAGE_ORDER)}")
+                if code not in kid_stages:
+                    kid_stages.append(code)
+
+        # WD_CLAUDE_BIN (DEPLOY §4): a bare command name stays a PATH lookup in the child (runner.claude_env); a path with a
+        # separator is made absolute against the start-up working directory like every other path setting above, because
+        # the CLI is spawned in `claude_cwd`, not where the service started — a relative `backend/tests/fake_claude.py`
+        # used to fail there with `spawn_error` and pause Claude for the cooldown (the PLAN §6 S5 rehearsal command).
+        # An absolute path is kept verbatim: no symlink resolution, the CLI may locate its install through argv[0].
+        claude_bin = text("WD_CLAUDE_BIN", "/home/sqin/.local/bin/claude")
+        if os.sep in claude_bin:
+            claude_bin = os.path.expanduser(claude_bin)
+            if not os.path.isabs(claude_bin):
+                claude_bin = os.path.abspath(claude_bin)
+
         log_level = text("WD_LOG_LEVEL", "INFO").upper()
         if log_level not in LOG_LEVELS:
             raise ConfigError(f"WD_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
@@ -472,7 +501,7 @@ class Settings:
             tick_seconds=integer("WD_TICK_SECONDS", 60, 1, 3600),
             prebuild_hours=integer("WD_PREBUILD_HOURS", 3, 0, 23),
             contact_email=text("WD_CONTACT_EMAIL", ""),
-            claude_bin=text("WD_CLAUDE_BIN", "/home/sqin/.local/bin/claude"),
+            claude_bin=claude_bin,
             claude_home=text("WD_CLAUDE_HOME", ""),
             claude_path=text("WD_CLAUDE_PATH", "/home/sqin/.local/bin:/usr/local/bin:/usr/bin:/bin"),
             claude_cwd=claude_cwd,
@@ -521,6 +550,7 @@ class Settings:
             ecdict_db_path=ecdict_db_path,
             images_enabled=flag("WD_IMAGES_ENABLED", True),
             image_providers=tuple(providers),
+            image_kid_stages=tuple(kid_stages),
             svg_via_claude=flag("WD_SVG_VIA_CLAUDE", True),
             image_max_bytes=integer("WD_IMAGE_MAX_BYTES", 8_000_000, 10_000, 1 << 30),
             image_max_edge=integer("WD_IMAGE_MAX_EDGE", 800, 100, 4096),

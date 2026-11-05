@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
@@ -10,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from wd import cli, db, security
+from wd import cli, db, schemas, security
+from wd.services import bank
 from wd.clock import compute_next_push, to_iso
 from wd.deps import hash_token
 from wd.errors import ApiError
@@ -312,12 +314,32 @@ def test_create_user_writes_settings_with_next_push_at(conn: sqlite3.Connection)
     assert dto == {"id": uid, "username": "张三", "display_name": "张三", "email": None, "email_verified": False, "role": "user", "onboarding_state": "pending", "created_at": "2026-10-14T00:00:00Z"}
     settings = security.settings_dto(conn, uid)
     assert settings["next_push_at"] == to_iso(compute_next_push(NOW, "Asia/Shanghai", "08:00")) == "2026-10-15T00:00:00Z"
-    assert settings["stages"] == ["cet4", "cet6"] and settings["current_stage"] == "cet4" and settings["email_verified"] is False
+    assert settings["stages"] == ["xs", "zk"] and settings["current_stage"] == "xs" and settings["email_verified"] is False  # K-12 DDL defaults
     assert settings["push_enabled"] is True and settings["webhook_url"] is None and settings["updated_at"] == "2026-10-14T00:00:00Z"
     assert security.load_user_by_name(conn, "张三")["id"] == uid and security.load_user_by_name(conn, "nobody") is None
     assert security.username_taken(conn, "张三") and not security.username_taken(conn, "李四")
     with pytest.raises(ValueError):
         security.create_user(conn, username="x", password_hash="h", now=NOW, role="root")
+
+
+def test_settings_row_to_dto_falls_back_on_unknown_stage_codes_and_indices(conn: sqlite3.Connection, caplog):
+    """The DTO shares bank.known_stages with the study paths (PLAN §2.1): a stages_json naming no known code → DEFAULT_STAGES
+    plus a stage_fallback warning instead of a response-validation 500; an index this build does not know (older server,
+    newer row) → the first target stage, so `current_stage ∈ stages` holds on the wire (impl-review final F2)."""
+    uid = make_user(conn, "legacy")
+    row = security.load_settings_row(conn, uid)
+    assert row is not None
+    with caplog.at_level(logging.WARNING):
+        dto = security.settings_row_to_dto({**row, "stages_json": '["cet9"]'})
+        assert dto["stages"] == list(bank.DEFAULT_STAGES) and dto["current_stage"] == "xs"
+        schemas.Settings.model_validate(dto)
+        dto = security.settings_row_to_dto({**row, "stages_json": '["gk","cet4"]', "current_stage": 9})
+        assert dto["stages"] == ["gk", "cet4"] and dto["current_stage"] == "gk"
+        schemas.Settings.model_validate(dto)
+        dto = security.settings_row_to_dto({**row, "stages_json": '["cet9","gk"]', "current_stage": 3})
+        assert dto["stages"] == ["gk"] and dto["current_stage"] == "gk"  # unknown codes dropped, known ones kept, no fallback
+    events = [r for r in caplog.records if getattr(r, "event", None) == "stage_fallback"]
+    assert len(events) == 2 and all(r.user_id == uid for r in events)
 
 
 def test_last_admin_guard_helpers(conn: sqlite3.Connection):

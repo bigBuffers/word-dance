@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -308,6 +309,165 @@ def test_upgrade_strips_ipa_delimiters_from_stored_phonetics(settings, tmp_path:
         assert not c.in_transaction
     finally:
         c.close()
+
+
+# ----------------------------------------------------------------------------------- 0011: primary stage (小学, index 1..5)
+# Tables whose rows must survive the rebuild of words / user_settings: FK children of the two tables plus the user history
+# that the account-deletion cascade would wipe if DROP TABLE ran with enforcement on (the runner disables it, see above).
+PRE_0011_ROW_TABLES = ("users", "user_settings", "words", "sessions", "user_words", "review_logs", "push_batches", "push_items", "word_contents", "word_images", "content_reports", "bank_suggestions")
+
+
+def _seed_pre_0011_data(conn: sqlite3.Connection) -> None:
+    """A database at the OLD stage index (1=zk 2=gk 3=cet4 4=cet6): the two live users' settings shapes (sqin: four stages, 主攻 3=cet4;
+    kimi: ["zk"], 主攻 1=zk), one seed word per old stage_min plus a 课标外 one (NULL) and a private user word that references
+    another word and a user, and one row in every child table so the rebuild's DROP TABLE can be shown not to cascade."""
+    with db.tx(conn):
+        conn.executemany("INSERT INTO users(id, username, password_hash) VALUES (?, ?, '$2b$12$x')", [(1, "sqin"), (2, "kimi")])
+        conn.executemany(
+            "INSERT INTO user_settings(user_id, stages_json, current_stage, next_push_at) VALUES (?, ?, ?, '2026-11-07T00:00:00Z')",
+            [(1, '["zk","gk","cet4","cet6"]', 3), (2, '["zk"]', 1)],
+        )
+        conn.executemany(
+            "INSERT INTO words(id, lemma, display, source, stage_zk, stage_gk, stage_cet4, stage_cet6, stage_min, difficulty, sources)"
+            " VALUES (?, ?, ?, 'seed', ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, "a", "a", 1, 1, 1, 1, 1, 1, "cet4 cet46 ecdict gk zk"),  # old 1 = zk; Claude difficulty 1 = stage_min (old scale)
+                (2, "abandon", "abandon", 0, 1, 1, 1, 2, 2, "cet4 cet46 ecdict gk"),  # old 2 = gk
+                (3, "absolutely", "absolutely", 0, 0, 1, 1, 3, None, "cet4 cet46 ecdict"),  # old 3 = cet4, no AI content yet
+                (4, "ought to", "ought to", 0, 0, 0, 1, 4, 4, "cet6 ecdict"),  # old 4 = cet6
+                (5, "bungalow", "bungalow", 0, 0, 0, 0, None, 5, None),  # outside every list: stays NULL
+            ],
+        )
+        conn.execute("INSERT INTO words(id, lemma, display, source, merged_into_word_id, created_by_user_id, is_public) VALUES (6, 'abandonned', 'abandonned', 'user', 2, 1, 0)")
+        conn.execute("INSERT INTO sessions(token_hash, user_id, expires_at) VALUES ('tok', 1, '2026-12-01T00:00:00Z')")
+        conn.executemany("INSERT INTO user_words(id, user_id, word_id, state, origin) VALUES (?, ?, ?, ?, ?)", [(1, 1, 2, "learning", "browse"), (2, 2, 1, "new", "screen")])
+        conn.execute("INSERT INTO review_logs(user_id, word_id, user_word_id, action, context, local_date) VALUES (1, 2, 1, 'good', 'today', '2026-11-05')")
+        conn.execute(
+            "INSERT INTO push_batches(id, user_id, local_date, timezone, trigger, settings_json) VALUES (1, 1, '2026-11-05', 'Asia/Shanghai', 'scheduled', ?)",
+            ('{"stages": ["zk", "gk", "cet4", "cet6"], "current_stage": 3}',),  # snapshot written at the OLD index (write-only column)
+        )
+        conn.execute("INSERT INTO push_items(batch_id, word_id, user_word_id, kind, position) VALUES (1, 2, 1, 'review', 1)")
+        conn.execute("INSERT INTO word_contents(id, word_id, version, prompt_version, model, content_json) VALUES (1, 2, 1, 'content-v1', 'claude-sonnet-4-5', '{}')")
+        conn.execute("INSERT INTO word_images(id, word_id, provider, file_path, file_bytes, sha256, mime) VALUES (1, 2, 'wikimedia', 'ab/ab12.jpg', 1, 'sha', 'image/jpeg')")
+        conn.execute("UPDATE words SET active_content_id = 1, active_image_id = 1, content_state = 'ready', image_state = 'ready' WHERE id = 2")
+        conn.execute("INSERT INTO content_reports(user_id, word_id, target, reason) VALUES (1, 2, 'content', 'other')")
+        conn.execute("INSERT INTO bank_suggestions(user_id, type, user_word_id, target_word_id, payload_json) VALUES (1, 'fix_spelling', 1, 2, '{}')")
+        conn.execute("INSERT INTO kv(key, value) VALUES ('seed_version', 'deadbeef')")
+
+
+def _row_counts(conn: sqlite3.Connection, tables: tuple[str, ...]) -> dict[str, int]:
+    return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+
+
+def test_upgrade_0011_renumbers_stages_and_rebuilds_two_tables(settings, tmp_path: Path):
+    """0011 adds the 小学 stage (code xs). SQLite cannot widen a CHECK list or change a DEFAULT, so words and user_settings are
+    rebuilt (CREATE new → INSERT … SELECT → DROP → RENAME → indexes → view): every stored stage_min / current_stage moves +1
+    (old 1=zk … 4=cet6 → new 2..5, NULL stays NULL), stage_xs starts at 0 for every row (the seed re-import derives it from the
+    official lists), stages_json holds codes and is copied as is — nobody is enrolled in xs automatically —, the new-user
+    default becomes K-12 ('["xs","zk"]' / 1), kv.seed_version is cleared so the next start re-imports unconditionally, and
+    an operator-visible system_events('migration') row is left behind. The DROP TABLEs must not cascade into the history."""
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    shutil.copy(db.MIGRATIONS_DIR / "0001_init.sql", baseline / "0001_init.sql")
+    c = db.connect(settings.db_path)
+    try:
+        assert db.run_migrations(c, migrations_dir=baseline).applied == [(1, "init")]
+        _seed_pre_0011_data(c)
+        before_counts = _row_counts(c, PRE_0011_ROW_TABLES)
+        before_min = {r["id"]: r["stage_min"] for r in c.execute("SELECT id, stage_min FROM words")}
+        assert sorted(sm for sm in before_min.values() if sm is not None) == [1, 2, 3, 4]
+        before_settings_cols = [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")]
+        before_words_cols = [r["name"] for r in c.execute("PRAGMA table_info(words)")]
+        batch_snapshot = c.execute("SELECT settings_json FROM push_batches WHERE id = 1").fetchone()[0]
+
+        result = db.run_migrations(c)  # the same call as `wd migrate` / the service startup
+
+        assert (11, "primary_stage") in result.applied
+        assert not c.in_transaction
+        assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert set(db.table_names(c)) == EXPECTED_TABLES  # rebuilt in place: no table gained or lost
+        assert db.view_names(c) == ["v_bank"]  # dropped before the rebuild and re-created afterwards …
+        assert c.execute("SELECT COUNT(*) FROM v_bank").fetchone()[0] == 2  # … and it joins the NEW words table (both bank rows are new/learning)
+
+        # --- renumbering: exactly +1 per row, NULL (课标外) stays NULL, stage_xs is 0 until the seed re-import
+        after_min = {r["id"]: r["stage_min"] for r in c.execute("SELECT id, stage_min FROM words")}
+        assert after_min == {wid: (None if sm is None else sm + 1) for wid, sm in before_min.items()}
+        assert sorted(sm for sm in after_min.values() if sm is not None) == [2, 3, 4, 5]
+        assert tuple(c.execute("SELECT SUM(stage_xs), SUM(stage_zk), SUM(stage_gk), SUM(stage_cet4), SUM(stage_cet6) FROM words").fetchone()) == (0, 1, 2, 3, 4)
+        # the Claude difficulty scale is NOT renumbered (1 初中 … 5 beyond): where it matched stage_min before, it is now stage_min − 1
+        assert c.execute("SELECT COUNT(*) FROM words WHERE difficulty IS NOT NULL AND stage_min IS NOT NULL AND difficulty + 1 != stage_min").fetchone()[0] == 0
+        assert {r["user_id"]: (r["stages_json"], r["current_stage"]) for r in c.execute("SELECT user_id, stages_json, current_stage FROM user_settings")} == {
+            1: ('["zk","gk","cet4","cet6"]', 4),  # 3 (cet4) → 4 (cet4); the codes are untouched, xs is not added
+            2: ('["zk"]', 2),  # 1 (zk) → 2 (zk)
+        }
+        assert c.execute("SELECT settings_json FROM push_batches WHERE id = 1").fetchone()[0] == batch_snapshot  # old snapshots are not rewritten
+
+        # --- every other column and every child row survived the two DROP TABLEs (no cascade; FK targets still resolve)
+        assert _row_counts(c, PRE_0011_ROW_TABLES) == before_counts
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert tuple(c.execute("SELECT merged_into_word_id, created_by_user_id, is_public, source FROM words WHERE id = 6").fetchone()) == (2, 1, 0, "user")
+        assert tuple(c.execute("SELECT active_content_id, active_image_id, content_state, image_state, difficulty, sources FROM words WHERE id = 2").fetchone()) == (1, 1, "ready", "ready", 2, "cet4 cet46 ecdict gk")
+        assert tuple(c.execute("SELECT timezone, push_time, daily_new_count, next_push_at FROM user_settings WHERE user_id = 1").fetchone()) == ("Asia/Shanghai", "08:00", 10, "2026-11-07T00:00:00Z")
+
+        # --- the new DDL: stage_xs in front of the other flags (seed.SEED_COLUMNS order), CHECKs 1..5, every index back, K-12 defaults
+        words_cols = [r["name"] for r in c.execute("PRAGMA table_info(words)")]
+        assert words_cols == before_words_cols[: before_words_cols.index("stage_zk")] + ["stage_xs"] + before_words_cols[before_words_cols.index("stage_zk") :]
+        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_settings_cols
+        ddl = {r["name"]: r["sql"] for r in c.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}
+        assert "CHECK (stage_min BETWEEN 1 AND 5)" in ddl["words"] and "CHECK (stage_xs   IN (0,1))" in ddl["words"]
+        assert "CHECK (difficulty BETWEEN 1 AND 5)" in ddl["words"]  # unchanged scale
+        assert "CHECK (current_stage BETWEEN 1 AND 5)" in ddl["user_settings"]
+        index_names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('words', 'user_settings')")}
+        assert {"ux_words_lemma", "ix_words_frq", "ix_words_stage_min", "ix_words_content", "ix_words_created_by", "ix_words_public", "ix_user_settings_next_push"} <= index_names
+        defaults = {r["name"]: r["dflt_value"] for r in c.execute("PRAGMA table_info(user_settings)")}
+        assert (defaults["stages_json"], defaults["current_stage"]) == ("'[\"xs\",\"zk\"]'", "1")
+        c.execute("INSERT INTO users(id, username, password_hash) VALUES (3, 'newbie', '$2b$12$x')")
+        c.execute("INSERT INTO user_settings(user_id, next_push_at) VALUES (3, '2026-11-07T00:00:00Z')")
+        assert tuple(c.execute("SELECT stages_json, current_stage FROM user_settings WHERE user_id = 3").fetchone()) == ('["xs","zk"]', 1)
+        for stmt in (
+            "UPDATE words SET stage_min = 0 WHERE id = 1",
+            "UPDATE words SET stage_min = 6 WHERE id = 1",
+            "UPDATE words SET stage_xs = 2 WHERE id = 1",
+            "UPDATE user_settings SET current_stage = 0 WHERE user_id = 1",
+            "UPDATE user_settings SET current_stage = 6 WHERE user_id = 1",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                c.execute(stmt)
+        c.execute("UPDATE words SET stage_xs = 1, stage_min = 1 WHERE id = 1")  # the new lowest stage is storable
+        c.execute("UPDATE user_settings SET stages_json = '[\"xs\",\"zk\"]', current_stage = 1 WHERE user_id = 2")
+        with pytest.raises(sqlite3.IntegrityError):  # the rebuilt words table is still the FK parent of user_words
+            c.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (1, 999999, 'new', 'browse')")
+
+        # --- forced seed re-import + operator trace
+        assert db.kv_get(c, "seed_version") is None
+        assert c.execute("SELECT kind FROM system_events ORDER BY id DESC LIMIT 1").fetchone()[0] == "migration"
+        events = [json.loads(r["detail_json"]) for r in c.execute("SELECT detail_json FROM system_events WHERE kind = 'migration' ORDER BY id")]
+        assert any(e.get("version") == 11 and e.get("name") == "primary_stage" for e in events)
+
+        assert db.run_migrations(c).applied == []  # idempotent
+        assert not c.in_transaction
+    finally:
+        c.close()
+
+
+def test_fresh_database_has_the_five_stage_ddl(conn):
+    """The fresh path (the ``conn`` fixture: 0001 → latest on an empty database) lands on the five-stage DDL and the K-12
+    defaults as well: 0011 rebuilds words / user_settings from the same file whether or not they hold rows, so this is
+    the empty-database counterpart of the upgrade test above (a few DDL fragments, defaults and column order — not a
+    comparison of the two DDL texts). It also pins what every other test inherits from the fixture: 0011 leaves a
+    system_events('migration') row (PLAN §2.2 / D-3), so a migrated test database is never event-free — tests that count
+    the whole table filter ``kind != 'migration'`` the way they already filter the seed import's 'seed_imported'."""
+    ddl = {r["name"]: r["sql"] for r in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}
+    assert "CHECK (stage_min BETWEEN 1 AND 5)" in ddl["words"] and "stage_xs" in ddl["words"]
+    assert "CHECK (current_stage BETWEEN 1 AND 5)" in ddl["user_settings"]
+    defaults = {r["name"]: r["dflt_value"] for r in conn.execute("PRAGMA table_info(user_settings)")}
+    assert (defaults["stages_json"], defaults["current_stage"]) == ("'[\"xs\",\"zk\"]'", "1")
+    assert [r["name"] for r in conn.execute("PRAGMA table_info(words)") if r["name"].startswith("stage_")] == ["stage_xs", "stage_zk", "stage_gk", "stage_cet4", "stage_cet6", "stage_min"]
+    assert (11, "primary_stage") in [(r[0], r[1]) for r in conn.execute("SELECT version, name FROM schema_migrations")]
+    kinds = [r[0] for r in conn.execute("SELECT kind FROM system_events ORDER BY id")]
+    assert kinds and set(kinds) == {"migration"}  # the fixture's only events are migration traces (0011's; a later rebuild may add its own)
+    traces = [json.loads(r[0]) for r in conn.execute("SELECT detail_json FROM system_events WHERE kind = 'migration' ORDER BY id")]
+    assert {(t.get("version"), t.get("name")) for t in traces} >= {(11, "primary_stage")}
 
 
 def test_list_migration_files_rejects_duplicates(tmp_path: Path):

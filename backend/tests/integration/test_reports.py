@@ -26,7 +26,7 @@ def make_user(conn, username: str, role: str = "user") -> tuple[int, str]:
 
 
 def insert_word(conn, lemma: str, **cols) -> int:
-    row = {"lemma": lemma, "display": lemma, "source": "seed", "is_public": 1, "is_valid_english": 1, "translation": "vt. 放弃, 抛弃\nn. 放纵", "stage_gk": 1, "stage_cet4": 1, "stage_min": 2, "frq": 1234, "collins": 3, "oxford": 1}
+    row = {"lemma": lemma, "display": lemma, "source": "seed", "is_public": 1, "is_valid_english": 1, "translation": "vt. 放弃, 抛弃\nn. 放纵", "stage_gk": 1, "stage_cet4": 1, "stage_min": 3, "frq": 1234, "collins": 3, "oxford": 1}  # stage_min 3 = gk (xs=1 … cet6=5)
     row.update(cols)
     # the client fixture's lifespan imports the mini seed (WP1), which already holds `abandon`/`apple`; the tests
     # assert exactly these columns (stages, frq, oxford …), so replace any seeded row (children cascade)
@@ -84,7 +84,7 @@ def test_list_reports_pagination_and_shape(client: TestClient, dbconn, admin):
     assert first["note"] == "配图无关" and first["status"] == "open" and first["resolution"] is None and first["resolved_at"] is None
     word = first["word"]
     assert word["id"] == w1 and word["lemma"] == "abandon" and word["translation_short"] == "vt. 放弃, 抛弃" and word["stages"] == ["gk", "cet4"]
-    assert word["stage_min"] == 2 and word["frq"] == 1234 and word["oxford"] is True and word["my_state"] == "learning" and word["is_valid_english"] is True
+    assert word["stage_min"] == 3 and word["frq"] == 1234 and word["oxford"] is True and word["my_state"] == "learning" and word["is_valid_english"] is True
     assert body["items"][0]["word"]["is_valid_english"] is None and body["items"][0]["word"]["is_public"] is False and body["items"][0]["word"]["my_state"] is None
     r = client.get("/api/admin/reports", params={"page_size": 1, "page": 2})
     assert r.json()["total"] == 2 and [x["id"] for x in r.json()["items"]] == [r1]

@@ -5,7 +5,7 @@
 * ``settings`` / ``conn`` (migrated DB) / ``frozen_clock`` / ``app`` / ``client`` (TestClient running the
   lifespan, ``X-WD-Request: 1`` preset) / ``raw_client`` (no preset header);
 * ``login`` — register-or-login helper through the WP2 auth endpoints;
-* ``seeded`` — the 60-record mini seed imported with ``wd.seed.import_seed``;
+* ``seeded`` — the 62-record mini seed (v2, PLAN §6 S2) imported with ``wd.seed.import_seed``;
 * ``mock_http`` — ``httpx.MockTransport`` for api.openverse.org / commons.wikimedia.org / thumb.wikimedia.org /
   upload.wikimedia.org / live.staticflickr.com (probe fixtures + a Pillow-generated 640×400 JPEG; query strings
   ignored; matches on the ``Host`` header first so DNS-pinned IP URLs still hit); installed as the default
@@ -38,7 +38,7 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     if os.environ.get("WD_FULL_SEED_DB"):
         return
-    skip = pytest.mark.skip(reason="needs the full 9,162-word seed (set WD_FULL_SEED_DB)")
+    skip = pytest.mark.skip(reason="needs the full seed (data/seed/stats.json total_words records; set WD_FULL_SEED_DB=<imported db>)")
     for item in items:
         if "full_seed" in item.keywords:
             item.add_marker(skip)

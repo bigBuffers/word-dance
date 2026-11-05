@@ -8,7 +8,7 @@
 // no skeleton, no generateExamples; none/failed → dictionary copy + generateExamples. Buttons disable while a grade is in flight.
 import type { MouseEvent, ReactNode } from 'react';
 import { Link } from 'react-router';
-import type { Grade, ScreenVerdict, StudyItem } from '@/api/types';
+import type { Grade, ScreenVerdict, Stage, StudyItem } from '@/api/types';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { Skeleton } from '@/components/ui/Skeleton';
@@ -48,6 +48,8 @@ export interface StudyCardProps {
   /** Replay of a past batch: back face only, no grade bar, outcome chip. */
   readOnly?: boolean;
   accent?: Accent;
+  /** The learner's target stages: the header shows only these chips plus the word's lowest stage (`StageChips.only`). */
+  onlyStages?: readonly Stage[];
   onRequestContent?: () => void;
   requestingContent?: boolean;
   onImageRefresh?: () => void;
@@ -126,6 +128,7 @@ export function StudyCard({
   total,
   readOnly = false,
   accent,
+  onlyStages,
   onRequestContent,
   requestingContent = false,
   onImageRefresh,
@@ -169,7 +172,7 @@ export function StudyCard({
       <article className={cx('study-card', 'study-card--screen', className)} role="group" aria-label={word.display}>
         {header}
         <div className="study-card__face study-card__front">
-          <WordHeader word={word} size="lg" as="h2" accent={accent} className="study-card__word" />
+          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
           {showBack ? (
             <p className="study-card__peek" lang="zh-CN">
               {meaning}
@@ -204,7 +207,7 @@ export function StudyCard({
       <article className={cx('study-card', className)} role="group" aria-label={word.display}>
         {header}
         <div className="study-card__face study-card__front study-card__front--tappable" onClick={onReveal}>
-          <WordHeader word={word} size="lg" as="h2" accent={accent} className="study-card__word" />
+          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
           {hint && hintText && (
             <p className="study-card__hint" lang="en">
               {hintText}
@@ -295,7 +298,7 @@ export function StudyCard({
     <article className={cx('study-card', 'study-card--revealed', className)} role="group" aria-label={word.display}>
       {header}
       <div className="study-card__face study-card__back">
-        <WordHeader word={word} size="md" as="h2" accent={accent} className="study-card__word" />
+        <WordHeader word={word} size="md" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
         <p className="study-card__meaning" lang="zh-CN" aria-live="polite">
           {meaning}
         </p>

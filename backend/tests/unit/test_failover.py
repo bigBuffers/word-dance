@@ -415,7 +415,7 @@ def test_never_triggers_change_nothing(conn, settings):
         d = rf(conn, cfg, provider="fallback", result=res(status, error, provider="fallback", ok=status == "success"), kind="lookup", now=NOW)
         assert d == failover.Decision("none", None, None, None), (status, error)
     assert conn.execute("SELECT key, value FROM kv ORDER BY key").fetchall() == before
-    assert conn.execute("SELECT COUNT(*) FROM system_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM system_events WHERE kind != 'migration'").fetchone()[0] == 0  # 0011 leaves a migration trace (PLAN §2.2)
 
 
 # --------------------------------------------------------------------------------- the fallback side

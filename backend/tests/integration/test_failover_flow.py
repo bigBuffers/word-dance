@@ -138,8 +138,8 @@ def calls(conn):
 
 
 def events(conn):
-    """AI-related event kinds in order (the seed import's own event is not under test)."""
-    return [str(r[0]) for r in conn.execute("SELECT kind FROM system_events WHERE kind != 'seed_imported' ORDER BY id")]
+    """AI-related event kinds in order (the seed import's own event and 0011's migration trace are not under test)."""
+    return [str(r[0]) for r in conn.execute("SELECT kind FROM system_events WHERE kind NOT IN ('seed_imported', 'migration') ORDER BY id")]
 
 
 def event_details(conn, kind: str) -> list[dict]:

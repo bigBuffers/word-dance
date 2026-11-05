@@ -1,0 +1,202 @@
+{
+  "format": 2,
+  "title": "test fixture — the data/lists/manifest.json shape on six mini lists (backend/tests/fixtures/lists/README.md)",
+  "checksums": "SHA256SUMS",
+  "aliases": "aliases.tsv",
+  "overrides": "overrides.tsv",
+  "ecdict_member_tags": [
+    "cet4",
+    "cet6"
+  ],
+  "inherit_stages": {
+    "be": [
+      "am",
+      "is",
+      "are",
+      "was",
+      "were",
+      "been",
+      "being"
+    ],
+    "have": [
+      "has",
+      "had"
+    ],
+    "do": [
+      "does",
+      "did",
+      "done"
+    ]
+  },
+  "lists": [
+    {
+      "id": "moe22:l2",
+      "file": "mini-moe-2022-level2.txt",
+      "format": "heads",
+      "policy": "main",
+      "stages": [
+        "xs"
+      ],
+      "expect_rows": 17,
+      "title": "义务教育英语课程标准（2022 年版）附录 3 二级词汇表（迷你）"
+    },
+    {
+      "id": "moe22:l3",
+      "file": "mini-moe-2022-level3.txt",
+      "format": "heads",
+      "policy": "main",
+      "stages": [
+        "zk"
+      ],
+      "expect_rows": 24,
+      "title": "义务教育英语课程标准（2022 年版）附录 3 三级词汇表（含二级；迷你）"
+    },
+    {
+      "id": "moe22:app",
+      "file": "mini-moe-2022-appendix.tsv",
+      "format": "tsv",
+      "policy": "appendix",
+      "expect_rows": 19,
+      "columns": [
+        "group",
+        "word",
+        "extra1",
+        "extra2"
+      ],
+      "title": "同上 附表（迷你）",
+      "groups": {
+        "数词-基数词": {
+          "stages": [
+            "xs",
+            "zk"
+          ],
+          "single_token": true
+        },
+        "数词-序数词": {
+          "stages": [
+            "xs",
+            "zk"
+          ],
+          "single_token": true
+        },
+        "月份": {
+          "stages": [
+            "xs",
+            "zk"
+          ]
+        },
+        "星期": {
+          "stages": [
+            "xs",
+            "zk"
+          ]
+        },
+        "地理名称": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "地理名称-派生": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "缩写": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "节日": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "地名景点": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "其他专有名词": {
+          "stages": [
+            "zk"
+          ]
+        },
+        "不规则动词": {
+          "member": false
+        }
+      }
+    },
+    {
+      "id": "shmeea20",
+      "file": "mini-shmeea-2020-junior.txt",
+      "format": "heads",
+      "policy": "main",
+      "stages": [
+        "zk"
+      ],
+      "expect_rows": 15,
+      "title": "上海市教育考试院 2020 词汇表 · 单词（迷你）"
+    },
+    {
+      "id": "shmeea20:phr",
+      "file": "mini-shmeea-2020-junior-phrases.txt",
+      "format": "phrases",
+      "policy": "phrases",
+      "stages": [
+        "zk"
+      ],
+      "expect_rows": 9,
+      "title": "同上 词组（迷你）"
+    },
+    {
+      "id": "hs25",
+      "file": "mini-moe-2025rev-senior.tsv",
+      "format": "tsv",
+      "policy": "main",
+      "stages": [
+        "gk"
+      ],
+      "expect_rows": 8,
+      "columns": [
+        "word",
+        "level"
+      ],
+      "level_token": "hs25:{level}",
+      "provisional": true,
+      "title": "普通高中英语课程标准 2025 修订 附录 2 词汇表（迷你）"
+    }
+  ],
+  "external": {
+    "note": "mahavivo CET files; absent in the fixture (stats.external_lists = absent)",
+    "lists": [
+      {
+        "id": "cet4",
+        "file": "CET4_edited.txt",
+        "mode": "rich",
+        "stages": [
+          "cet4"
+        ]
+      },
+      {
+        "id": "cet6",
+        "file": "CET6_edited.txt",
+        "mode": "rich",
+        "stages": [
+          "cet6"
+        ]
+      },
+      {
+        "id": "cet46",
+        "file": "CET_4+6_edited.txt",
+        "mode": "plain",
+        "stages_rule": "cet4 if in cet4 else cet6"
+      },
+      {
+        "id": "cet6star",
+        "file": "英语六级词汇（星标，1726）.txt",
+        "mode": "plain",
+        "flag": "cet6_star"
+      }
+    ]
+  }
+}

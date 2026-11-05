@@ -49,7 +49,7 @@ function item(id: number, over: Partial<StudyItem> = {}): StudyItem {
       phonetic: null,
       translation_short: 'x',
       stages: ['cet4'],
-      stage_min: 3,
+      stage_min: 4,
       cet6_star: false,
       frq: null,
       collins: null,

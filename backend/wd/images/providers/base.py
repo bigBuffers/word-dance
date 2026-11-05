@@ -97,8 +97,12 @@ def parse_retry_after(value: str | None, *, now: datetime | None = None) -> int 
     return max(0, int((when - ref).total_seconds()))
 
 
-def get_json(client: httpx.Client, name: str, url: str, *, params: Mapping[str, object] | None = None, headers: Mapping[str, str] | None = None) -> dict:
-    """One GET expecting a JSON object; network / HTTP / decoding problems become :class:`ProviderError`."""
+def get_json_with_headers(
+    client: httpx.Client, name: str, url: str, *, params: Mapping[str, object] | None = None, headers: Mapping[str, str] | None = None
+) -> tuple[dict, httpx.Headers]:
+    """One GET expecting a JSON object, returned with the response headers; network / HTTP / decoding problems become
+    :class:`ProviderError`. The headers matter to a caller that must read ``Retry-After`` off a *200* answer — MediaWiki
+    reports ``maxlag`` that way (``wikimedia.py``), where :func:`get_json` alone would see a successful request."""
     try:
         response = client.get(url, params=params, headers=headers)
     except httpx.HTTPError as e:
@@ -115,6 +119,12 @@ def get_json(client: httpx.Client, name: str, url: str, *, params: Mapping[str, 
         raise ProviderError(f"{name}: response is not JSON", status=response.status_code) from e
     if not isinstance(data, dict):
         raise ProviderError(f"{name}: unexpected JSON shape", status=response.status_code)
+    return data, response.headers
+
+
+def get_json(client: httpx.Client, name: str, url: str, *, params: Mapping[str, object] | None = None, headers: Mapping[str, str] | None = None) -> dict:
+    """:func:`get_json_with_headers` without the headers (every provider but Commons)."""
+    data, _ = get_json_with_headers(client, name, url, params=params, headers=headers)
     return data
 
 

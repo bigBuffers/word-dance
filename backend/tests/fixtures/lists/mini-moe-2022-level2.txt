@@ -1,0 +1,18 @@
+# mini-moe-2022-level2.txt — 17 verbatim lines of data/lists/moe-2022-level2.txt (format `heads`, policy main → xs); one line per rule R1–R7 (README.md)
+a/an
+be (am, is, are)
+book
+China
+colour (AmE color)
+do
+excited
+I
+ice cream
+maths (=mathematics, AmE math)
+Miss
+mother (mum AmE mom)
+Mr (AmE Mr.)
+o'clock
+OK
+PE (=physical education)
+TV (=television)

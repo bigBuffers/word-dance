@@ -1,11 +1,14 @@
 """The fetch_image chain end to end (mock_http providers, DNS pinned to a public IP, synchronous queue drain):
 provider order, Openverse quota/priority rules, SVG fallback rules, exclude/refresh/report flows, sha reuse,
-the admin refetch payload, the CLI commands and activate_svg."""
+the admin refetch payload, the CLI commands and activate_svg; PLAN §5.1 C5–C8: the function-word gate, the lemma-token
+blocklist exemption, the adverb bare-lemma rule, the kid illustration round (default off), the unchanged default request
+shape, the Commons maxlag cooldown, the ignored admin query, the failed-image retry rules and `wd images-retry`."""
 
 from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import stat
 import zlib
@@ -15,7 +18,7 @@ import httpx
 import pytest
 from PIL import Image
 
-from wd import cli, db
+from wd import cli, db, logging_setup
 from wd.images import activate_svg, handler as image_handler, image_meta, photo_mix, quota, reject_active_image, request_refresh, service, store
 from wd.images.sanitize_svg import SvgRejected
 from wd.jobs import queue, registry, worker
@@ -128,6 +131,7 @@ def test_wikimedia_first_download_via_thumb_host(ctx, conn, cfg, mock_http, pinn
     assert img["source_url"].startswith("https://thumb.wikimedia.org/wikipedia/commons/thumb/") and "utm_" not in img["source_url"]
     assert img["provider_ref"] in (RED_REF, TREE_REF) and img["license"] in ("CC0", "CC BY 2.0") and img["mime"] == "image/jpeg"
     assert img["alt_zh"] == "一个红苹果" and img["query"] == "red apple" and img["width"] <= 800 and img["height"] <= 800
+    assert (img["prompt_version"], img["model"], img["text_free"], img["eval_json"]) == (None, None, 0, None)  # 0012 columns: a photo is never text-free by construction
     assert img["attribution_text"].endswith(img["license"]) and img["landing_url"].startswith("https://commons.wikimedia.org/wiki/File:")
     path = cfg.images_dir / img["file_path"]
     assert path.is_file() and stat.S_IMODE(os.stat(path).st_mode) == 0o600 and img["file_bytes"] == path.stat().st_size
@@ -159,7 +163,7 @@ def test_openverse_second_when_commons_is_empty_and_never_downloads_api_thumbnai
     assert img["attribution_text"].startswith('"Apples" by ') and "CC BY 2.0" in img["attribution_text"] and img["license"] == "CC BY 2.0"
     ov = mock_http.calls_to("api.openverse.org")
     assert len(ov) == 1 and ov[0].url.path == "/v1/images/"
-    assert dict(ov[0].url.params) == {"q": "apple", "page_size": "20", "license_type": "commercial", "mature": "false"}
+    assert dict(ov[0].url.params) == {"q": "apple", "page_size": "10", "license_type": "commercial", "mature": "false"}
     assert not any("/thumb" in r.url.path for r in ov)
     assert mock_http.calls_to("live.staticflickr.com") and all(r.headers["host"] == "live.staticflickr.com" for r in mock_http.calls_to("live.staticflickr.com"))
     assert quota.counts(conn, "openverse", ctx.now()) == (1, 1) and quota.counts(conn, "wikimedia", ctx.now()) == (1, 1)
@@ -533,8 +537,8 @@ def test_enqueue_fetch_queues_a_follow_up_behind_a_running_job(ctx, conn, mock_h
 
 
 def test_keywords_come_from_content_with_blocklist_and_shape_filter(ctx, conn, mock_http, pinned_dns):
-    wid = insert_word(conn, "chart")
-    set_content(conn, wid, ["bar chart", "http://evil", "", "x" * 60, "Stock market"])  # blocklist, bad shape, too long
+    wid = insert_word(conn, "apple")
+    set_content(conn, wid, ["bar chart", "http://evil", "", "x" * 60, "Stock market"])  # blocklist (chart is not an apple token), bad shape, too long
     enqueue(conn, wid)
     queue.run_once(ctx)
     assert mock_http.calls_to("commons.wikimedia.org")[0].url.params["gsrsearch"] == "stock market filetype:bitmap"
@@ -543,6 +547,29 @@ def test_keywords_come_from_content_with_blocklist_and_shape_filter(ctx, conn, m
     enqueue(conn, wid2)
     queue.run_once(ctx)
     assert mock_http.calls_to("commons.wikimedia.org")[-1].url.params["gsrsearch"] == "pear filetype:bitmap"
+    # clean_keywords reports what it dropped (the admin-query path logs it) and honours allow_lemma
+    assert image_handler.clean_keywords(["bar chart", "http://evil", "", "x" * 60, "Stock market", "stock  market"], "apple") == (["stock market"], ["bar chart", "http://evil", "", "x" * 60])
+    assert image_handler.clean_keywords(["bar chart"], "pear") == (["pear"], ["bar chart"])
+    assert image_handler.clean_keywords(["bar chart"], "pear", allow_lemma=False) == ([], ["bar chart"])
+    assert image_handler.clean_keywords(["bar chart"], "chart") == (["bar chart"], [])
+    assert image_handler.clean_keywords(["a", "b c", "d e", "f g", 7, None], "x") == (["b c", "d e", "f g"], ["a"])  # ≤ 3 kept, non-strings ignored
+
+
+def test_lemma_token_is_exempt_from_the_non_photo_blocklist(ctx, conn, mock_http, pinned_dns):
+    """PLAN §5.1 C5 / D-images-10: `map`, `chart`, `flag`, `cover`, `text` are 小学 words — their own tokens pass the
+    non-photo list, so the card for `chart` may search "bar chart" (and select.rank lets a "Bar chart" title through)."""
+    wid = insert_word(conn, "chart")
+    set_content(conn, wid, ["bar chart", "stock market"])
+    enqueue(conn, wid)
+    queue.run_once(ctx)
+    assert mock_http.calls_to("commons.wikimedia.org")[0].url.params["gsrsearch"] == "bar chart filetype:bitmap"
+    assert active_image(conn, wid)["query"] == "bar chart"
+    # the unsafe list is never exempted: `gun`'s own keyword "toy gun" is dropped and the bare lemma is not searched either
+    gun = insert_word(conn, "gun")
+    set_content(conn, gun, ["toy gun", "water pistol"])
+    enqueue(conn, gun, now=ctx.now())
+    queue.run_once(ctx)
+    assert mock_http.calls_to("commons.wikimedia.org")[-1].url.params["gsrsearch"] == "water pistol filetype:bitmap"
 
 
 def test_handler_edge_cases(ctx, conn, connect, cfg, frozen_clock, mock_http, pinned_dns):
@@ -560,7 +587,7 @@ def test_handler_edge_cases(ctx, conn, connect, cfg, frozen_clock, mock_http, pi
 
 
 def test_handler_crash_is_recorded_as_a_failed_attempt(ctx, conn, monkeypatch, mock_http, pinned_dns):
-    wid = insert_word(conn, "apple")
+    wid = insert_word(conn, "apple", image_state="queued")
     jid = enqueue(conn, wid)
 
     def boom(*a, **k):
@@ -570,6 +597,29 @@ def test_handler_crash_is_recorded_as_a_failed_attempt(ctx, conn, monkeypatch, m
     queue.run_once(ctx)
     j = job(conn, jid)
     assert j["status"] == "queued" and "provider exploded" in j["last_error"] and j["attempts"] == 1
+    assert image_state(conn, wid) == "queued"  # a retry is pending; the state is reset only once the job goes dead (below)
+
+
+def test_dead_fetch_job_leaves_the_word_failed_or_ready_never_queued(ctx, conn, cfg, monkeypatch, mock_http, pinned_dns):
+    """A fetch_image job that crashes on its last attempt goes `dead` (queue.fail); the word must not stay `queued` for ever —
+    the nightly retry selects `failed` and requeue_dead_once revives only content/lookup jobs, so nothing else would ever
+    heal it (PLAN §5.1 C7; impl-review final M-3). Like ai.svg.mark_failed: `failed`, or `ready` when an image is active."""
+
+    def boom(*a, **k):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(image_handler, "fetch_for_word", boom)
+    wid = insert_word(conn, "apple", image_state="queued")
+    jid = queue.enqueue(conn, "fetch_image", {"word_id": wid}, dedupe_key=f"image:{wid}", priority=20, max_attempts=1, now=ctx.now())
+    queue.run_once(ctx)
+    assert job(conn, jid)["status"] == "dead" and image_state(conn, wid) == "failed" and active_image(conn, wid) is None
+    # an active image is kept and the word goes back to ready (a 换一张 that died must not demote the picture to a template card)
+    pear = insert_word(conn, "pear")
+    activate_svg(conn, cfg, pear, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="1" height="1"/></svg>', None, now=ctx.now())
+    store.set_image_state(conn, pear, "queued", now=ctx.now())
+    jid2 = queue.enqueue(conn, "fetch_image", {"word_id": pear}, dedupe_key=f"image:{pear}", priority=10, max_attempts=1, now=ctx.now())
+    queue.run_once(ctx)
+    assert job(conn, jid2)["status"] == "dead" and image_state(conn, pear) == "ready" and active_image(conn, pear)["provider"] == "claude_svg"
 
 
 def test_malformed_candidate_urls_and_provider_crashes_never_kill_the_job(ctx, conn, mock_http, pinned_dns, monkeypatch):
@@ -591,7 +641,7 @@ def test_malformed_candidate_urls_and_provider_crashes_never_kill_the_job(ctx, c
     # any other exception out of a provider is counted, recorded on the provider and the chain moves on
     from wd.images.providers import WikimediaProvider
 
-    def boom(self, query, limit):
+    def boom(self, query, limit, *, style="neutral"):
         raise TypeError("unexpected response shape")
 
     monkeypatch.setattr(WikimediaProvider, "search", boom)
@@ -604,16 +654,425 @@ def test_malformed_candidate_urls_and_provider_crashes_never_kill_the_job(ctx, c
     assert st["consecutive_errors"] == 1 and st["last_error"] == "TypeError: unexpected response shape" and st["cooldown_until"] is None
 
 
+# ------------------------------------------------------- function-word gate · bare lemma · rounds (PLAN §5.1 C5 / C8)
+def test_function_word_without_admin_override_gets_the_card_and_no_provider_call(ctx, conn, mock_http, pinned_dns, capsys):
+    """D-images-9: a word whose dominant pos is a function word (prep / conj / det / pron / art / int / inf) gets
+    image_state='failed' and the template card without a single provider request or an SVG job, even while studied."""
+    uid = None
+    for lemma, pos in (("of", "i:100"), ("despite", "i:100"), ("some", "p:1/d:99"), ("and", "c:100"), ("oh", "u:100")):
+        wid = insert_word(conn, lemma, pos=pos)
+        if uid is None:
+            uid = add_to_bank(conn, wid)
+        else:
+            conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'new','browse')", (uid, wid))
+        set_content(conn, wid, [f"{lemma} something"])
+        jid = enqueue(conn, wid)
+        queue.run_once(ctx)
+        assert json.loads(job(conn, jid)["result_json"]) == {"status": "skipped", "detail": "function word: card only"}, lemma
+        assert image_state(conn, wid) == "failed" and svg_jobs(conn, wid) == [] and active_image(conn, wid) is None
+        assert image_meta(conn, wid)["kind"] == "card"
+    assert mock_http.calls == []
+    # content words with the same shape of pos string are fetched as before
+    noun = insert_word(conn, "apple", pos="n:96/v:4")
+    enqueue(conn, noun)
+    queue.run_once(ctx)
+    assert active_image(conn, noun)["provider"] == "wikimedia"
+    # the CLI reports the gate and exits 0 (a skip is the design's answer, not a failed chain)
+    assert cli.main(["fetch-image", "of", "--no-svg"]) == 0
+    out = capsys.readouterr().out
+    assert "status: skipped" in out and "detail: function word: card only" in out
+    assert all("apple" in c.url.params["gsrsearch"] for c in mock_http.calls_to("commons.wikimedia.org"))  # only the noun ever reached Commons
+
+
+def test_function_word_with_an_active_image_keeps_it_and_stays_ready(ctx, conn, cfg, mock_http, pinned_dns, capsys):
+    """The gate never contradicts a live image (impl-review S5b F-1): `despite` (i:100) on the live DB carries an
+    admin-requested SVG with image_state='ready'. A 换一张 (request_refresh: no provider / query), a content re-generation's
+    fetch or `wd fetch-image despite --no-svg` still makes no provider request and queues no SVG, but the image stays
+    active and the state returns to `ready` from the `queued` enqueue_fetch wrote — `failed` beside an active_image_id
+    would under-count in diag and never heal, because the nightly retry skips function words."""
+    wid = insert_word(conn, "despite", pos="i:100")
+    add_to_bank(conn, wid)
+    set_content(conn, wid, ["despite the rain"])
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="800" height="500" fill="#eee"/></svg>'
+    image_id = activate_svg(conn, cfg, wid, svg, "雨中打伞的人", now=ctx.now())
+    assert image_state(conn, wid) == "ready" and image_meta(conn, wid)["kind"] == "svg"
+    rid = request_refresh(conn, wid, now=ctx.now())
+    assert image_state(conn, wid) == "queued"
+    drain_images(ctx)
+    assert json.loads(job(conn, rid)["result_json"]) == {"status": "skipped", "detail": "function word: current image kept"}
+    assert image_state(conn, wid) == "ready" and active_image(conn, wid)["id"] == image_id and image_meta(conn, wid)["kind"] == "svg"
+    assert svg_jobs(conn, wid) == [] and mock_http.calls == []
+    # the CLI runs the same gate and exits 0
+    assert cli.main(["fetch-image", "despite", "--no-svg"]) == 0
+    out = capsys.readouterr().out
+    assert "status: skipped" in out and "detail: function word: current image kept" in out
+    assert image_state(conn, wid) == "ready" and active_image(conn, wid)["id"] == image_id and mock_http.calls == []
+    # the report flow (不合适) clears the image first, so the same gate then puts the word on the card
+    jid = reject_active_image(conn, wid, reason="irrelevant_image", now=ctx.now())
+    drain_images(ctx)
+    assert json.loads(job(conn, jid)["result_json"]) == {"status": "skipped", "detail": "function word: card only"}
+    assert image_state(conn, wid) == "failed" and active_image(conn, wid) is None and image_meta(conn, wid)["kind"] == "card"
+    assert svg_jobs(conn, wid) == [] and mock_http.calls == []
+
+
+def test_function_word_with_admin_query_is_fetched(ctx, conn, mock_http, pinned_dns):
+    """An admin override (query / provider) is an explicit decision and bypasses the gate; without a query the function
+    word still gets no bare-lemma search (NO_BARE_LEMMA_POS), so an explicit provider alone ends on the card."""
+    wid = insert_word(conn, "of", pos="i:100")
+    jid = service.admin_refetch(conn, wid, query="box of apples", now=ctx.now())
+    queue.run_once(ctx)
+    result = json.loads(job(conn, jid)["result_json"])
+    assert result["status"] == "ready" and result["query"] == "box of apples" and "query ignored" not in result.get("detail", "")
+    assert mock_http.calls_to("commons.wikimedia.org")[0].url.params["gsrsearch"] == "box of apples filetype:bitmap"
+    assert image_state(conn, wid) == "ready" and image_meta(conn, wid)["kind"] == "photo"
+    sid = service.admin_refetch(conn, wid, provider="claude_svg", now=ctx.now())
+    drain_images(ctx)
+    assert json.loads(job(conn, sid)["result_json"])["status"] == "svg_queued" and len(svg_jobs(conn, wid)) == 1 and svg_jobs(conn, wid)[0]["status"] == "queued"
+    other = insert_word(conn, "despite", pos="i:100")
+    seen = len(mock_http.calls)
+    pid = service.admin_refetch(conn, other, provider="wikimedia", now=ctx.now())
+    drain_images(ctx)
+    result = json.loads(job(conn, pid)["result_json"])
+    assert result["status"] == "failed" and result["detail"] == "no acceptable photo from any provider" and len(mock_http.calls) == seen
+    assert image_state(conn, other) == "failed"
+
+
+def test_adverb_without_content_keywords_skips_the_bare_lemma_search(ctx, conn, mock_http, pinned_dns):
+    """D-images-9: adverbs are not gated (fast / today are drawable) but never searched by their bare lemma — without a
+    usable content keyword no provider is asked; the SVG fallback still applies to a studied word."""
+    very = insert_word(conn, "very", pos="r:100")
+    add_to_bank(conn, very)
+    jid = enqueue(conn, very)
+    drain_images(ctx)
+    assert json.loads(job(conn, jid)["result_json"])["status"] == "failed" and mock_http.calls == []
+    assert image_state(conn, very) == "failed" and len(svg_jobs(conn, very)) == 1 and svg_jobs(conn, very)[0]["status"] == "queued"  # the drawing is still worth a try
+    # content keywords that all fail the shape rule / blocklist → still no bare lemma
+    why = insert_word(conn, "why", pos="r:100")
+    set_content(conn, why, ["http://x", "world map"])
+    enqueue(conn, why)
+    drain_images(ctx)
+    assert mock_http.calls == [] and image_state(conn, why) == "failed"
+    # a usable content keyword is searched like for any other word
+    fast = insert_word(conn, "fast", pos="r:70/j:30")
+    set_content(conn, fast, ["fast runner"])
+    enqueue(conn, fast)
+    queue.run_once(ctx)
+    assert mock_http.calls_to("commons.wikimedia.org")[0].url.params["gsrsearch"] == "fast runner filetype:bitmap"
+    assert active_image(conn, fast)["query"] == "fast runner"
+    # an unknown pos (a phrase, a Claude word) keeps the bare-lemma search
+    phrase = insert_word(conn, "ice cream", kind="phrase", pos=None)
+    enqueue(conn, phrase)
+    queue.run_once(ctx)
+    assert mock_http.calls_to("commons.wikimedia.org")[-1].url.params["gsrsearch"] == "ice cream filetype:bitmap"
+
+
+def test_default_chain_shape_is_unchanged_except_thumbmime_maxlag_page_size(ctx, conn, cfg, mock_http, pinned_dns):
+    """PLAN §5.3: with WD_IMAGE_KID_STAGES empty the live request shapes differ from before only by `thumbmime` (iiprop),
+    `maxlag=5` and `page_size=10` — no kid round, no `category`, no `orientation`, `filetype:bitmap` as ever."""
+    assert cfg.image_kid_stages == ()
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    wid = insert_word(conn, "cat", stage_xs=1, stage_zk=1, stage_min=1)  # a 小学 word: neutral until the pilot clears `xs`
+    enqueue(conn, wid)
+    queue.run_once(ctx)
+    commons = mock_http.calls_to("commons.wikimedia.org")
+    openverse = mock_http.calls_to("api.openverse.org")
+    assert len(commons) == 1 and len(openverse) == 1
+    assert dict(commons[0].url.params) == {
+        "action": "query",
+        "generator": "search",
+        "gsrsearch": "cat filetype:bitmap",
+        "gsrnamespace": "6",
+        "gsrlimit": "10",
+        "prop": "imageinfo",
+        "iiprop": "url|extmetadata|size|mime|thumbmime",
+        "iiurlwidth": "800",
+        "format": "json",
+        "maxlag": "5",
+    }
+    assert dict(openverse[0].url.params) == {"q": "cat", "page_size": "10", "license_type": "commercial", "mature": "false"}
+    assert image_handler.search_rounds(cfg, "neutral", None) == (("neutral", ("wikimedia", "openverse")),)
+    assert image_handler.search_rounds(cfg, "neutral", "openverse") == (("neutral", ("openverse",)),)
+
+
+def test_kid_stage_word_tries_drawing_then_bitmap(cfg, conn, connect, frozen_clock, mock_http, pinned_dns):
+    """PLAN §5.1 C8: a word whose stage is listed in WD_IMAGE_KID_STAGES runs an illustration round first (Commons
+    `filetype:drawing`, Openverse `category=illustration`, Pexels left out) and falls back to the ordinary photo round."""
+    registry.load_handlers()
+    kid_cfg = replace(cfg, image_kid_stages=("zk",), pexels_key="pk", image_providers=("wikimedia", "openverse", "pexels"))
+    kid_ctx = JobContext(db=connect, cfg=kid_cfg, clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test")
+    assert image_handler.search_rounds(kid_cfg, "kid", None) == (("kid", ("wikimedia", "openverse")), ("neutral", ("wikimedia", "openverse", "pexels")))
+    assert image_handler.search_rounds(kid_cfg, "kid", "openverse") == (("kid", ("openverse",)),)  # an explicit provider: one round in the word's style
+    assert image_handler.search_rounds(replace(kid_cfg, image_providers=("pexels",)), "kid", None) == (("kid", ()), ("neutral", ("pexels",)))  # the empty kid round is skipped by the handler
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA if "filetype:drawing" in req.url.params["gsrsearch"] else mock_http.wikimedia)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE if "category" in req.url.params else mock_http.openverse)
+    cat = insert_word(conn, "cat", stage_zk=1, stage_min=2)
+    jid = enqueue(conn, cat)
+    queue.run_once(kid_ctx)
+    result = json.loads(job(conn, jid)["result_json"])
+    assert result["status"] == "ready" and result["provider"] == "wikimedia" and result["query"] == "cat"
+    assert [c.url.params["gsrsearch"] for c in mock_http.calls_to("commons.wikimedia.org")] == ["cat filetype:drawing", "cat filetype:bitmap"]
+    assert [dict(c.url.params) for c in mock_http.calls_to("api.openverse.org")] == [{"q": "cat", "page_size": "10", "license_type": "commercial", "mature": "false", "category": "illustration"}]
+    assert mock_http.calls_to("api.pexels.com") == []  # never in the kid round; the neutral round found the photo on Commons first
+    assert quota.counts(conn, "wikimedia", kid_ctx.now()) == (2, 2)
+    # a word of another stage under the same configuration: the single neutral round
+    mock_http.calls.clear()
+    dog = insert_word(conn, "dog", stage_gk=1, stage_min=3)
+    enqueue(conn, dog, now=kid_ctx.now())
+    queue.run_once(kid_ctx)
+    assert [c.url.params["gsrsearch"] for c in mock_http.calls_to("commons.wikimedia.org")] == ["dog filetype:bitmap"]
+    assert active_image(conn, dog)["provider"] == "wikimedia"
+    # an explicit admin provider on a kid word: one round, kid style, no neutral fallback
+    mock_http.calls.clear()
+    aid = service.admin_refetch(conn, cat, provider="openverse", now=kid_ctx.now())
+    queue.run_once(kid_ctx)
+    assert json.loads(job(conn, aid)["result_json"])["status"] == "failed"
+    assert [c.url.params.get("category") for c in mock_http.calls_to("api.openverse.org")] == ["illustration"] and mock_http.calls_to("commons.wikimedia.org") == []
+    # the default configuration never runs the kid round for the same word
+    mock_http.calls.clear()
+    plain = JobContext(db=connect, cfg=cfg, clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test")
+    conn.execute("UPDATE words SET active_image_id = NULL, image_state = 'none' WHERE id = ?", (cat,))
+    conn.execute("UPDATE word_images SET status = 'superseded' WHERE word_id = ?", (cat,))
+    enqueue(conn, cat, now=plain.now())
+    queue.run_once(plain)
+    assert [c.url.params["gsrsearch"] for c in mock_http.calls_to("commons.wikimedia.org")] == ["cat filetype:bitmap"]
+
+
+def test_prewarm_priority_skips_openverse_pixabay_and_pexels(cfg, conn, connect, frozen_clock, mock_http, pinned_dns):
+    """PREWARM_SKIP_PROVIDERS: at priority ≥ 90 only Commons is asked — the quota-bound and keyed providers are for words
+    somebody is about to study (Pixabay forbids systematic mass downloads)."""
+    registry.load_handlers()
+    keyed = replace(cfg, pixabay_key="k", pexels_key="p", image_providers=("wikimedia", "openverse", "pixabay", "pexels"))
+    kctx = JobContext(db=connect, cfg=keyed, clock=frozen_clock, enqueue=queue.enqueue, worker_id="io-1", boot_id="test")
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+    wid = insert_word(conn, "apple")
+    enqueue(conn, wid, priority=90)
+    queue.run_once(kctx)
+    assert {h for h in (mock_http.host_of(c) for c in mock_http.calls)} == {"commons.wikimedia.org"}
+    assert image_handler.PREWARM_SKIP_PROVIDERS == ("openverse", "pixabay", "pexels")
+    enqueue(conn, wid, priority=20, now=kctx.now())
+    queue.run_once(kctx)
+    hosts = {mock_http.host_of(c) for c in mock_http.calls}
+    assert {"api.openverse.org", "pixabay.com", "api.pexels.com"} <= hosts  # the keyed providers answer 404 from the mock, which is just a provider error
+
+
+def test_wikimedia_maxlag_body_puts_commons_in_cooldown_and_the_chain_moves_on(ctx, conn, cfg, mock_http, pinned_dns):
+    """A 200 answer with `error.code == "maxlag"` is a 503 for the quota layer: cooldown from Retry-After (or 30 s), the
+    request counted, Openverse answers the word."""
+    body = {"error": {"code": "maxlag", "info": "Waiting for a database server: 6 seconds lagged.", "lag": 6}}
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=body, headers={"Retry-After": "7"})
+    wid = insert_word(conn, "apple")
+    jid = enqueue(conn, wid)
+    queue.run_once(ctx)
+    assert json.loads(job(conn, jid)["result_json"])["provider"] == "openverse"
+    st = quota.state(conn, "wikimedia")
+    assert st["cooldown_until"] == "2026-10-14T00:00:07Z" and st["consecutive_errors"] == 1 and "maxlag" in st["last_error"]
+    assert quota.counts(conn, "wikimedia", ctx.now()) == (1, 1) and quota.check(conn, "wikimedia", cfg, ctx.now()) == "cooldown"
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=body)
+    quota.mark_ok(conn, "wikimedia", ctx.now())
+    conn.execute("UPDATE provider_state SET cooldown_until = NULL WHERE provider = 'wikimedia'")
+    enqueue(conn, insert_word(conn, "pear"), now=ctx.now())
+    queue.run_once(ctx)
+    assert quota.state(conn, "wikimedia")["cooldown_until"] == "2026-10-14T00:00:30Z"
+
+
+def test_admin_query_dropped_by_shape_rule_is_reported(ctx, conn, mock_http, pinned_dns, caplog):
+    """An API.md 69 query that fails the shape rule or the blocklist is not refused (the request stays a 202): the handler
+    logs `query_ignored`, prefixes the result detail and searches the content keywords (or the bare lemma) instead."""
+    distinct_photos(mock_http)  # the refetch excludes the current photo by sha: every candidate needs its own bytes
+    wid = insert_word(conn, "apple")
+    set_content(conn, wid, ["red apple"])
+    with caplog.at_level(logging.WARNING, logger="wd.images"):
+        jid = service.admin_refetch(conn, wid, query="http://evil", now=ctx.now())
+        queue.run_once(ctx)
+    result = json.loads(job(conn, jid)["result_json"])
+    assert result["status"] == "ready" and result["query"] == "red apple" and result["detail"] == "query ignored (shape/blocklist)"
+    assert mock_http.calls_to("commons.wikimedia.org")[0].url.params["gsrsearch"] == "red apple filetype:bitmap"
+    ignored = [r for r in caplog.records if getattr(r, "event", None) == "query_ignored" and r.word_id == wid]
+    assert ignored and json.loads(logging_setup.JsonFormatter().format(ignored[0]))["word_id"] == wid  # word_id is an EXTRA_FIELD: it reaches the journal (final M-4)
+    # a blocklisted query for a word whose tokens do not cover it is dropped the same way …
+    jid2 = service.admin_refetch(conn, wid, query="world map", now=ctx.now())
+    queue.run_once(ctx)
+    result = json.loads(job(conn, jid2)["result_json"])
+    assert result["detail"].startswith("query ignored (shape/blocklist)") and result["query"] == "red apple"
+    # … while the lemma's own token lets it through
+    world = insert_word(conn, "map")
+    jid3 = service.admin_refetch(conn, world, query="world map", now=ctx.now())
+    queue.run_once(ctx)
+    result = json.loads(job(conn, jid3)["result_json"])
+    assert result["status"] == "ready" and result["query"] == "world map" and "detail" not in result
+    assert mock_http.calls_to("commons.wikimedia.org")[-1].url.params["gsrsearch"] == "world map filetype:bitmap"
+    # no content keywords: a noun falls back to its bare lemma, and a failed chain keeps the prefix in front of its detail
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+    bare = insert_word(conn, "pear")
+    jid4 = service.admin_refetch(conn, bare, query="x" * 60, now=ctx.now())
+    queue.run_once(ctx)
+    result = json.loads(job(conn, jid4)["result_json"])
+    assert result["status"] == "failed" and result["detail"] == "query ignored (shape/blocklist); no acceptable photo from any provider"
+    assert mock_http.calls_to("commons.wikimedia.org")[-1].url.params["gsrsearch"] == "pear filetype:bitmap"
+
+
+# ------------------------------------------------------------------------------- failed-image retries (PLAN §5.1 C7)
+def all_empty(mock_http) -> None:
+    mock_http.overrides["commons.wikimedia.org"] = lambda req: httpx.Response(200, json=EMPTY_WIKIMEDIA)
+    mock_http.overrides["api.openverse.org"] = lambda req: httpx.Response(200, json=EMPTY_OPENVERSE)
+
+
+def fetch_jobs(conn, word_id: int) -> list[dict]:
+    return [db.row_to_dict(r) for r in conn.execute("SELECT * FROM jobs WHERE type='fetch_image' AND json_extract(payload_json,'$.word_id')=? ORDER BY id", (word_id,))]
+
+
+def test_failed_word_is_retried_when_marked_unfamiliar_after_six_hours(ctx, conn, mock_http, pinned_dns, frozen_clock):
+    """retry_if_failed (the hook for the bank / batch sites, R-16): a `failed` word is fetched again ≥ 6 h after its last
+    fetch_image job ended, never while a fetch job is live, never for a function word; the job carries retry:true."""
+    from wd.services import words
+
+    all_empty(mock_http)
+    wid = insert_word(conn, "apple")
+    add_to_bank(conn, wid)
+    enqueue(conn, wid)
+    drain_images(ctx)
+    assert image_state(conn, wid) == "failed" and service.last_fetch_finished_at(conn, wid) == "2026-10-14T00:00:00Z"
+    assert service.retry_due(conn, words.word_row(conn, wid), ctx.now()) is False
+    frozen_clock.advance(hours=1)
+    assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is None  # < 6 h
+    assert len(fetch_jobs(conn, wid)) == 1
+    frozen_clock.advance(hours=5)  # exactly 6 h: due
+    jid = service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now())
+    assert jid is not None
+    j = job(conn, jid)
+    assert j["type"] == "fetch_image" and j["dedupe_key"] == f"image:{wid}" and j["priority"] == 20 and j["status"] == "queued"
+    assert json.loads(j["payload_json"]) == {"word_id": wid, "retry": True} and image_state(conn, wid) == "queued"
+    assert service.auto_retries_30d(conn, wid, ctx.now()) == 1
+    # a live fetch job blocks a second retry even when the word is marked failed again meanwhile
+    conn.execute("UPDATE words SET image_state = 'failed' WHERE id = ?", (wid,))
+    assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is None
+    drain_images(ctx)  # the retry runs (and fails again: the providers are still empty); the handler ignores the retry key
+    assert image_state(conn, wid) == "failed" and job(conn, jid)["status"] == "done" and json.loads(job(conn, jid)["result_json"])["status"] == "failed"
+    frozen_clock.advance(hours=6)
+    assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is not None
+    # a function word the gate put on the card is never retried; a word that never had a fetch job is due at once
+    of = insert_word(conn, "of", pos="i:100", image_state="failed")
+    assert service.retry_if_failed(conn, words.word_row(conn, of), priority=20, now=ctx.now()) is None
+    pear = insert_word(conn, "pear", image_state="failed")
+    assert service.retry_if_failed(conn, words.word_row(conn, pear), priority=20, now=ctx.now()) is not None
+    assert json.loads(fetch_jobs(conn, pear)[0]["payload_json"]) == {"word_id": pear, "retry": True}
+    # a word that is not failed is left alone
+    ready = insert_word(conn, "plum")
+    assert service.retry_if_failed(conn, words.word_row(conn, ready), priority=20, now=ctx.now()) is None
+
+
+def test_retry_is_capped_at_three_per_thirty_days(ctx, conn, mock_http, pinned_dns, frozen_clock):
+    from wd.services import words
+
+    all_empty(mock_http)
+    wid = insert_word(conn, "apple")
+    add_to_bank(conn, wid)
+    enqueue(conn, wid)
+    drain_images(ctx)
+    for n in range(3):
+        frozen_clock.advance(hours=6)
+        assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is not None, n
+        drain_images(ctx)
+        assert image_state(conn, wid) == "failed"
+    frozen_clock.advance(hours=6)
+    assert service.auto_retries_30d(conn, wid, ctx.now()) == 3
+    assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is None
+    assert service.retry_failed_studied(conn, ctx.now()) == []
+    # a manual 换一张 / admin refetch is not an automatic retry: it still runs and is not counted
+    rid = request_refresh(conn, wid, now=ctx.now())
+    assert "retry" not in json.loads(job(conn, rid)["payload_json"])
+    drain_images(ctx)
+    assert service.auto_retries_30d(conn, wid, ctx.now()) == 3 and len(fetch_jobs(conn, wid)) == 5
+    frozen_clock.advance(days=31)
+    assert service.auto_retries_30d(conn, wid, ctx.now()) == 0
+    assert service.retry_if_failed(conn, words.word_row(conn, wid), priority=20, now=ctx.now()) is not None
+
+
+def test_nightly_retry_requeues_only_studied_failed_words_within_limit(ctx, conn, mock_http, pinned_dns, frozen_clock):
+    """retry_failed_studied: failed ∧ studied (bank new/learning or an open batch) ∧ retry_due, oldest first, ≤ limit;
+    dry_run lists without queueing; a live job or a fetch younger than 6 h excludes the word."""
+    all_empty(mock_http)
+    apple = insert_word(conn, "apple")
+    uid = add_to_bank(conn, apple)
+    pear = insert_word(conn, "pear")
+    conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'learning','browse')", (uid, pear))
+    lonely = insert_word(conn, "plum")  # in no bank and no batch
+    of = insert_word(conn, "of", pos="i:100")  # a function word in the bank
+    conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'new','browse')", (uid, of))
+    known = insert_word(conn, "fig")  # mastered: not studied any more
+    conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'known','browse')", (uid, known))
+    batch_word = insert_word(conn, "kiwi")  # in an open batch of today
+    bid = conn.execute("INSERT INTO push_batches(user_id, local_date, timezone, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'manual') RETURNING id", (uid,)).fetchone()[0]
+    conn.execute("INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, 'screen', 0)", (bid, batch_word))
+    for w in (apple, pear, lonely, of, known, batch_word):
+        enqueue(conn, w)
+    drain_images(ctx)
+    assert all(image_state(conn, w) == "failed" for w in (apple, pear, lonely, of, known, batch_word))
+    assert service.retry_failed_studied(conn, ctx.now()) == []  # all fetched just now
+    frozen_clock.advance(hours=6)
+    before = conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0]
+    dry = service.retry_failed_studied(conn, ctx.now(), dry_run=True)
+    assert dry == [apple, pear, batch_word]  # ORDER BY updated_at, id — of (function word), plum (unstudied), fig (known) excluded
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == before and image_state(conn, apple) == "failed"
+    assert service.retry_failed_studied(conn, ctx.now(), limit=1) == [apple]
+    j = fetch_jobs(conn, apple)[-1]
+    assert j["priority"] == service.RETRY_NIGHTLY_PRIORITY == 30 and j["status"] == "queued" and json.loads(j["payload_json"]) == {"word_id": apple, "retry": True}
+    assert image_state(conn, apple) == "queued"
+    assert service.retry_failed_studied(conn, ctx.now(), priority=35) == [pear, batch_word]  # apple has a live job now
+    assert fetch_jobs(conn, pear)[-1]["priority"] == 35
+    assert service.retry_failed_studied(conn, ctx.now()) == []
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == before + 3
+    drain_images(ctx)  # the retries run and fail again; a fetch 1 h old is too recent for the next sweep
+    frozen_clock.advance(hours=1)
+    assert service.retry_failed_studied(conn, ctx.now()) == []
+    frozen_clock.advance(hours=5)
+    assert service.retry_failed_studied(conn, ctx.now(), limit=0) == []
+    assert service.retry_failed_studied(conn, ctx.now()) == [apple, pear, batch_word]
+    assert (service.RETRY_MIN_AGE_H, service.RETRY_MAX_AUTO_30D, service.RETRY_NIGHTLY_LIMIT) == (6, 3, 50)
+
+
+def test_cli_images_retry_dry_run_lists_candidates(conn, capsys):
+    """`wd images-retry [--limit N] [--dry-run]` (DEPLOY §9): the nightly sweep by hand, lemmas printed."""
+    apple = insert_word(conn, "apple", image_state="failed")
+    uid = add_to_bank(conn, apple)
+    pear = insert_word(conn, "pear", image_state="failed")
+    conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'learning','browse')", (uid, pear))
+    of = insert_word(conn, "of", pos="i:100", image_state="failed")
+    conn.execute("INSERT INTO user_words(user_id, word_id, state, origin) VALUES (?,?,'new','browse')", (uid, of))
+    insert_word(conn, "plum", image_state="failed")  # nobody studies it
+    assert cli.main(["images-retry", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would requeue 2 failed-image word(s)" in out and "  apple\n" in out and "  pear\n" in out and "of" not in out.replace("would", "") and "plum" not in out
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0 and image_state(conn, apple) == "failed"
+    assert cli.main(["images-retry", "--limit", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "requeued 1 failed-image word(s)" in out and "(limit 1;" in out and "  apple" in out and "pear" not in out
+    j = fetch_jobs(conn, apple)[0]
+    assert j["priority"] == 30 and json.loads(j["payload_json"]) == {"word_id": apple, "retry": True} and image_state(conn, apple) == "queued"
+    assert cli.main(["images-retry"]) == 0
+    assert "requeued 1 failed-image word(s)" in capsys.readouterr().out and len(fetch_jobs(conn, pear)) == 1  # apple is live now
+    assert cli.main(["images-retry"]) == 0
+    assert "requeued 0" in capsys.readouterr().out
+
+
 # ------------------------------------------------------------------------------------------ svg + mix
 def test_activate_svg_sanitises_and_serves_a_svg_image(conn, cfg):
+    """CLAUDE_INTEGRATION §6.7: the drawing is cleaned with allow_text=False (the headword the model printed is gone — that
+    is what text_free = 1 certifies), labelled with exactly one <desc id="aigc-label">, stored and activated; a call without
+    model / prompt_version (this one) leaves those two columns NULL."""
     wid = insert_word(conn, "abandon")
     svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" onload="x()"><script>evil()</script><rect width="800" height="500" fill="#eee"/><text x="40" y="460" font-size="40">abandon</text></svg>'
     image_id = activate_svg(conn, cfg, wid, svg, "被遗弃在雪地里的汽车", now="2026-10-14T00:00:00Z")
     row = db.row_to_dict(conn.execute("SELECT * FROM word_images WHERE id=?", (image_id,)).fetchone())
     assert row["provider"] == "claude_svg" and row["mime"] == "image/svg+xml" and row["license"] == "generated" and row["status"] == "active"
     assert row["file_path"].endswith(".svg") and row["width"] == 800 and row["height"] == 500 and row["alt_zh"] == "被遗弃在雪地里的汽车"
+    assert row["text_free"] == 1 and row["prompt_version"] is None and row["model"] is None and row["eval_json"] is None
     stored = (cfg.images_dir / row["file_path"]).read_text(encoding="utf-8")
-    assert "<script" not in stored and "onload" not in stored and "<text" in stored and stored.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">')
+    assert "<script" not in stored and "onload" not in stored and "<text" not in stored and "abandon" not in stored
+    assert stored.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><desc id="aigc-label">AI-generated illustration · word-Dance · claude · 2026-10-14</desc>')
+    assert stored.count('id="aigc-label"') == 1 and '<rect width="800" height="500" fill="#eee"/>' in stored
     assert tuple(conn.execute("SELECT image_state, active_image_id FROM words WHERE id=?", (wid,)).fetchone()) == ("ready", image_id)
     meta = image_meta(conn, wid)
     ImageMeta.model_validate(meta)
@@ -621,6 +1080,99 @@ def test_activate_svg_sanitises_and_serves_a_svg_image(conn, cfg):
     with pytest.raises(SvgRejected):
         activate_svg(conn, cfg, wid, "<html>no</html>", None)
     assert conn.execute("SELECT COUNT(*) FROM word_images WHERE word_id=?", (wid,)).fetchone()[0] == 1  # nothing stored on rejection
+
+
+def test_svg_prompt_carries_scene_example_hook_and_style(conn, cfg):
+    """The v2 user prompt (CLAUDE_INTEGRATION §5.5): scene = image_alt_zh, example sentence 1, the 「联想：」 hook, and the
+    Style line chosen by images.style.style_for from WD_IMAGE_KID_STAGES — neutral by default, kid for a listed stage."""
+    from wd.ai import svg as svg_handler
+    from wd.services import words
+
+    wid = insert_word(conn, "cat", stage_zk=1, stage_min=2, translation="n. 猫")
+    content = {
+        "word": "cat", "valid": True, "meaning_zh": "n. 猫", "meaning_en": "a small furry pet", "collocations": [], "difficulty": 1,
+        "examples": [{"en": 'My cat sleeps on the "warm" sofa.', "zh": "我的猫睡在温暖的沙发上。"}, {"en": "Cats like fish.", "zh": "猫喜欢鱼。"}],
+        "mnemonic_zh": "联想：一只猫蜷在沙发上睡觉。记住 c-a-t。", "image_keywords": ["cat on sofa"], "image_alt_zh": "一只猫睡在沙发上。",
+    }
+    cid = conn.execute("INSERT INTO word_contents(word_id, version, prompt_version, model, content_json) VALUES (?,1,'content-v2','m',?) RETURNING id", (wid, json.dumps(content, ensure_ascii=False))).fetchone()[0]
+    conn.execute("UPDATE words SET active_content_id=?, content_state='ready' WHERE id=?", (cid, wid))
+    word = words.word_row(conn, wid)
+    neutral = svg_handler.prompt_for(conn, word, cfg=cfg)
+    assert neutral == (
+        'Draw an illustration for the word "cat" (n. 猫). Scene: 一只猫睡在沙发上。 Example sentence: "My cat sleeps on the \'warm\' sofa." '
+        "Memory hook: 一只猫蜷在沙发上睡觉 Style: " + svg_handler.STYLE_TEXT["neutral"]
+    )
+    kid = svg_handler.prompt_for(conn, word, cfg=replace(cfg, image_kid_stages=("zk",)))
+    assert kid.endswith("Style: " + svg_handler.STYLE_TEXT["kid"]) and kid.startswith(neutral[: neutral.index(" Style: ")])
+    assert "6–11-year-olds" in svg_handler.STYLE_TEXT["kid"] and "teenagers and adults" in svg_handler.STYLE_TEXT["neutral"]
+    assert svg_handler.prompt_for(conn, word, cfg=replace(cfg, image_kid_stages=("xs",))) == neutral  # the word is zk, not xs
+    with pytest.raises(TypeError):  # cfg is required (PLAN §5.1 C3): no silent neutral default for a caller that forgot it
+        svg_handler.prompt_for(conn, word)  # type: ignore[call-arg]
+    # no content: dictionary hint as meaning and scene, no example / hook segments
+    bare = insert_word(conn, "pear", translation="n. 梨\n[网络] 梨子")
+    assert svg_handler.prompt_for(conn, words.word_row(conn, bare), cfg=cfg) == 'Draw an illustration for the word "pear" (n. 梨). Scene: n. 梨。 Style: ' + svg_handler.STYLE_TEXT["neutral"]
+    assert svg_handler.hook_from("词根 ban 禁止") == "" and svg_handler.hook_from("联想: " + "猫" * 80) == "猫" * svg_handler.HOOK_MAX
+    # the cut is at the first full stop (HOOK_STOP_RE): 「。」 or an ASCII period ending a sentence — never a decimal point or
+    # an abbreviation, which used to leave `3` of a giraffe and `像 U` of a flag
+    assert svg_handler.hook_from("联想：3.5 米高的长颈鹿。记住 g 开头") == "3.5 米高的长颈鹿"
+    assert svg_handler.hook_from("联想：像 U.S. 国旗一样飘。") == "像 U.S. 国旗一样飘"
+    assert svg_handler.hook_from("联想：ban 像 banner. 旗帜被禁止。") == "ban 像 banner"
+    assert svg_handler.hook_from("联想：a dot at the very end.") == "a dot at the very end"
+    assert svg_handler.hook_from("联想：没有句号的联想") == "没有句号的联想"
+    assert svg_handler.SVG_PROMPT_VERSION == "svg-v2"
+
+
+def test_svg_activation_records_prompt_version_model_and_text_free(ctx, conn, cfg):
+    """The handler end to end with the fake claude (which still prints the headword in a <text>): the stored file carries no
+    <text> and one aigc-label, and the row records prompt_version = svg-v2, model = model_used, text_free = 1 (0012)."""
+    from wd.ai import svg as svg_handler
+
+    wid = insert_word(conn, "plum")
+    sid = queue.enqueue(conn, "generate_svg", {"word_id": wid, "requested": True}, dedupe_key=f"svg:{wid}:req", priority=10, now=ctx.now())
+    assert worker.drain(ctx, ("generate_svg",)) == 1
+    result = json.loads(job(conn, sid)["result_json"])
+    assert job(conn, sid)["status"] == "done" and result["cost_usd"] > 0 and "image_id" in result
+    row = db.row_to_dict(conn.execute("SELECT * FROM word_images WHERE id=?", (result["image_id"],)).fetchone())
+    assert (row["provider"], row["prompt_version"], row["model"], row["text_free"], row["eval_json"]) == ("claude_svg", svg_handler.SVG_PROMPT_VERSION, "claude-sonnet-fake", 1, None)
+    assert row["alt_zh"] == "一幅表示 plum 的简单示意图"  # the fake read the word from the v2 prompt's `for the word "…"` fragment
+    stored = (cfg.images_dir / row["file_path"]).read_text(encoding="utf-8")
+    assert "<text" not in stored and "plum" not in stored and stored.count('<desc id="aigc-label">') == 1
+    assert '<desc id="aigc-label">AI-generated illustration · word-Dance · claude-sonnet-fake · ' + ctx.now()[:10] + "</desc>" in stored
+    assert [c["kind"] for c in ai_calls(conn)] == ["svg"] and image_state(conn, wid) == "ready" and image_meta(conn, wid)["kind"] == "svg"
+    assert tuple(conn.execute("SELECT COUNT(*), SUM(text_free) FROM word_images WHERE provider = 'claude_svg'").fetchone()) == (1, 1)
+
+
+def test_svg_repaired_counts_the_sanitisers_repairs_and_only_for_an_accepted_drawing(ctx, conn, cfg, monkeypatch, caplog):
+    """`svg_repaired` reports sanitize_svg.count_bare_ampersands — bare `&` outside CDATA, exactly what the repair rewrites — and
+    only after activate_svg accepted the drawing; a rejected SVG logs svg_rejected alone (impl-review final M-2)."""
+    from wd.ai import svg as svg_handler
+
+    drawings = iter(
+        [
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><title><![CDATA[a & b]]></title><desc>c & d</desc><rect width="1" height="1"/></svg>',
+            "<html>a & b & c</html>",
+        ]
+    )
+    real_call = svg_handler.common.claude_call
+
+    def call_with_a_canned_drawing(ctx_, conn_, **kw):
+        return replace(real_call(ctx_, conn_, **kw), structured={"svg": next(drawings), "alt_zh": "测试"})
+
+    monkeypatch.setattr(svg_handler.common, "claude_call", call_with_a_canned_drawing)
+    plum = insert_word(conn, "plum")
+    sid = queue.enqueue(conn, "generate_svg", {"word_id": plum, "requested": True}, dedupe_key=f"svg:{plum}:req", priority=10, now=ctx.now())
+    with caplog.at_level(logging.INFO):
+        assert worker.drain(ctx, ("generate_svg",)) == 1
+    repaired = [r for r in caplog.records if getattr(r, "event", None) == "svg_repaired"]
+    assert len(repaired) == 1 and repaired[0].repairs == 1  # the `&` inside CDATA is repaired by nobody and counted by nobody
+    assert job(conn, sid)["status"] == "done" and "image_id" in json.loads(job(conn, sid)["result_json"]) and image_state(conn, plum) == "ready"
+    caplog.clear()
+    fig = insert_word(conn, "fig")
+    sid2 = queue.enqueue(conn, "generate_svg", {"word_id": fig, "requested": True}, dedupe_key=f"svg:{fig}:req", priority=10, now=ctx.now())
+    with caplog.at_level(logging.INFO):
+        assert worker.drain(ctx, ("generate_svg",)) == 1
+    assert [r.event for r in caplog.records if getattr(r, "event", None) in ("svg_repaired", "svg_rejected")] == ["svg_rejected"]
+    assert job(conn, sid2)["status"] == "done" and json.loads(job(conn, sid2)["result_json"])["rejected"].startswith("root element is not") and image_state(conn, fig) == "failed"
 
 
 def test_photo_mix_counts(conn, cfg, ctx, mock_http, pinned_dns):

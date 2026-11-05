@@ -1,5 +1,6 @@
-// VocabPage — `/vocab` (FRONTEND §5.5): tabs all / zk / gk / cet4 / cet6, new-only toggle for a specific
-// stage, search (prefix / forms / Chinese substring, debounced), status filter, sort, A–Z index, list with
+// VocabPage — `/vocab` (FRONTEND §5.5): tabs all / xs / zk / gk / cet4 / cet6, new-only toggle for a specific
+// stage above the lowest one (there it would be an identity filter), search (prefix / forms / Chinese substring,
+// debounced), status filter, sort, A–Z index, list with
 // inline unfamiliar / known (POST /api/words/{id}/mark {context:'browse'} patched in place + 5-s undo toast calling
 // `mark restore`), desktop bulk mode (POST /api/words/batch-mark), aria-live "total N words", pager.
 import { useCallback, useMemo, useState } from 'react';
@@ -7,6 +8,7 @@ import { errorMessage } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { BatchMarkAction, VocabQuery, VocabSort, VocabStageFilter, VocabStatusFilter } from '@/api/endpoints';
 import type { MarkAction, Page, UserState, WordBrief } from '@/api/types';
+import { useAuth } from '@/auth/AuthContext';
 import { LetterIndex } from '@/components/list/LetterIndex';
 import { Pager, usePagedList } from '@/components/list/Pager';
 import { SearchBox } from '@/components/list/SearchBox';
@@ -16,7 +18,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Switch } from '@/components/ui/Switch';
 import { Tabs } from '@/components/ui/Tabs';
-import { isStage } from '@/components/word/StageChips';
+import { STAGE_ORDER, isStage } from '@/components/word/StageChips';
 import { useApi } from '@/hooks/useApi';
 import { useLocalPref } from '@/hooks/useLocalPref';
 import { usePageTitle } from '@/hooks/usePageTitle';
@@ -26,7 +28,8 @@ import { routePaths } from '@/routes';
 import './VocabPage.css';
 
 const PAGE_SIZE = 50;
-const TABS: readonly VocabStageFilter[] = ['all', 'zk', 'gk', 'cet4', 'cet6'];
+/** One tab per stage after the all tab — kept as a literal next to StageChips.STAGE_ORDER (PLAN §3.6); VocabPage.test pins the length. */
+export const TABS: readonly VocabStageFilter[] = ['all', 'xs', 'zk', 'gk', 'cet4', 'cet6'];
 const STATUSES: readonly VocabStatusFilter[] = ['all', 'unmarked', 'unfamiliar', 'known', 'mastered'];
 const SORTS: readonly VocabSort[] = ['freq', 'alpha', 'difficulty'];
 
@@ -66,6 +69,7 @@ export function markUndoable(action: MarkAction, status: string): boolean {
 export default function VocabPage() {
   usePageTitle(zh.vocab.title);
   const toast = useToast();
+  const { settings } = useAuth();
   const [tabPref, setTabPref] = useLocalPref<string>('wd.vocabTab', 'all');
   const tab: VocabStageFilter = tabPref === 'all' || isStage(tabPref) ? tabPref : 'all';
   const [newOnly, setNewOnly] = useState(false);
@@ -78,7 +82,9 @@ export default function VocabPage() {
   const [busyIds, setBusyIds] = useState<ReadonlySet<number>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  const effectiveNewOnly = tab !== 'all' && newOnly;
+  // On the lowest stage the new-only filter is an identity (stage_min 1 ⇔ the xs flag), so the switch is hidden and ignored there (FRONTEND §5.5).
+  const newOnlyAvailable = tab !== 'all' && tab !== STAGE_ORDER[0];
+  const effectiveNewOnly = newOnlyAvailable && newOnly;
   const baseQuery = useMemo<VocabQuery>(
     () => ({
       stage: tab,
@@ -199,7 +205,7 @@ export default function VocabPage() {
 
   const total = list.total;
   const showEmptySearch = !list.loading && !list.error && q.length > 0 && total === 0;
-  const newOnlyLabel = tab === 'cet6' ? zh.stages.newOnlyCet6 : zh.stages.newOnly;
+  const newOnlyLabel = tab === 'cet6' ? zh.stages.newOnlyCet6 : tab === 'zk' ? zh.stages.newOnlyZk : zh.stages.newOnly;
 
   return (
     <section className="page vocab">
@@ -229,7 +235,7 @@ export default function VocabPage() {
               </option>
             ))}
           </select>
-          {tab !== 'all' && <Switch checked={newOnly} onChange={onNewOnly} label={newOnlyLabel} />}
+          {newOnlyAvailable && <Switch checked={newOnly} onChange={onNewOnly} label={newOnlyLabel} />}
           <div className="vocab__bulk">
             {bulk && selected.size > 0 && <span className="vocab__bulk-count">{zh.vocab.selected(selected.size)}</span>}
             {bulk && (
@@ -287,6 +293,7 @@ export default function VocabPage() {
                   selected={selected.has(word.id)}
                   onSelect={(on) => toggleSelected(word.id, on)}
                   busy={busyIds.has(word.id)}
+                  onlyStages={settings?.stages}
                 />
               ))}
             </ul>

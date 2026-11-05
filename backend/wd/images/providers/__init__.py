@@ -1,6 +1,6 @@
 """Image search providers (DESIGN §9): Wikimedia Commons (primary), Openverse (secondary), keyed Pixabay / Pexels.
 
-Each provider implements :class:`wd.interfaces.ImageProvider` (``name`` + ``search(query, limit)``) and raises
+Each provider implements :class:`wd.interfaces.ImageProvider` (``name`` + ``search(query, limit, *, style)``) and raises
 :class:`wd.interfaces.ProviderError` (status, retry_after_s) on HTTP / network failure. :func:`build_chain` turns
 the ordered ``WD_IMAGE_PROVIDERS`` list into instances, skipping keyed providers whose key is missing.
 """

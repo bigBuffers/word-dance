@@ -1,0 +1,7 @@
+# spelling<TAB>canonical<TAB>note   — 官方书写 → 库内 lemma；小写、NFKC、去重音后比较；导入时写 word_forms(kind='alias')（PLAN §4.3 R5；只作用于官方词头与变体，从不作用于上一版种子里已有的 lemma）
+Mr	mr.	2022 二级/三级与上海表写 Mr；ECDICT 无点条目 Mr 是「存储器回收程序」，带点 Mr. 才是「先生」
+Mrs	mrs.	同上
+Ms	ms.	同上；无点 MS 是「美国微软公司」
+PE	p.e.	官方 PE (=physical education)；ECDICT 无点 PE 是「相位编码」
+hot-dog	hot dog	上海表写 hot-dog；ECDICT hot-dog 是冲浪术语、hotdog 是「v. 卖弄」（现库 hotdog 行保留，只剩 cet6）
+humourous	humorous	2025 修订高中表第 1401 行的镜像原文拼写（moe-senior.README.md §9.4）；ECDICT 有该拼写条目（frq 0），现库也有此 lemma（旧 Highschool 表），该行保留但不授予阶段

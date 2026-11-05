@@ -1,0 +1,66 @@
+{
+  "format": 2,
+  "title": "word-Dance 阶段词表清单：官方词头文件 → 阶段成员（docs/analysis/2026-11-05-stages-regions-images/design/PLAN.md §4.1–4.3；阶段顺序与阶段名的唯一真相是 backend/wd/schemas.py）",
+  "checksums": "SHA256SUMS",
+  "aliases": "aliases.tsv",
+  "overrides": "overrides.tsv",
+  "ecdict_member_tags": ["cet4", "cet6"],
+  "inherit_stages": {
+    "be": ["am", "is", "are", "was", "were", "been", "being"],
+    "have": ["has", "had"],
+    "do": ["does", "did", "done"]
+  },
+  "lists": [
+    {"id": "moe22:l2", "file": "moe-2022-level2.txt", "format": "heads", "policy": "main", "stages": ["xs"], "expect_rows": 505,
+     "title": "义务教育英语课程标准（2022 年版）附录 3 二级词汇表"},
+    {"id": "moe22:l3", "file": "moe-2022-level3.txt", "format": "heads", "policy": "main", "stages": ["zk"], "expect_rows": 1600,
+     "title": "义务教育英语课程标准（2022 年版）附录 3 三级词汇表（含二级）"},
+    {"id": "moe22:app", "file": "moe-2022-appendix.tsv", "format": "tsv", "policy": "appendix", "expect_rows": 267,
+     "columns": ["group", "word", "extra1", "extra2"], "title": "同上 附表（数词、月份星期、地理名称、缩写、节日与中国文化专有名词、不规则动词）",
+     "groups": {
+       "数词-基数词": {"stages": ["xs", "zk"], "single_token": true},
+       "数词-序数词": {"stages": ["xs", "zk"], "single_token": true},
+       "月份": {"stages": ["xs", "zk"]},
+       "星期": {"stages": ["xs", "zk"]},
+       "地理名称": {"stages": ["zk"]},
+       "地理名称-派生": {"stages": ["zk"]},
+       "缩写": {"stages": ["zk"]},
+       "节日": {"stages": ["zk"]},
+       "地名景点": {"stages": ["zk"]},
+       "其他专有名词": {"stages": ["zk"]},
+       "不规则动词": {"member": false}
+     }},
+    {"id": "shmeea20", "file": "shmeea-2020-junior.txt", "format": "heads", "policy": "main", "stages": ["zk"], "expect_rows": 1724,
+     "title": "上海市教育考试院《2020 年上海市初中英语课程终结性评价指南》词汇表 · 单词"},
+    {"id": "shmeea20:app", "file": "shmeea-2020-junior-appendix.tsv", "format": "tsv", "policy": "appendix", "expect_rows": 158,
+     "columns": ["word", "group", "note"], "title": "同上 附表（代词、数词、月份星期、国家与国籍、学科）",
+     "groups": {
+       "基数词": {"stages": ["zk"], "single_token": true},
+       "序数词": {"stages": ["zk"], "single_token": true},
+       "*": {"stages": ["zk"]}
+     }},
+    {"id": "shmeea20:phr", "file": "shmeea-2020-junior-phrases.txt", "format": "phrases", "policy": "phrases", "stages": ["zk"], "expect_rows": 342,
+     "title": "同上 词组（Phrases and Expressions）；只收 ECDICT 有条目且通过 normalise_input 的展开形"},
+    {"id": "shmeea20:forms", "file": "shmeea-2020-junior-forms.tsv", "format": "tsv", "policy": "reference", "expect_rows": 146,
+     "columns": ["headword", "kind", "printed", "where"], "title": "同上 词条括号内词形信息（只存档；R2 文法测试样例来源）"},
+    {"id": "hs25", "file": "moe-2025rev-senior.tsv", "format": "tsv", "policy": "main", "stages": ["gk"], "expect_rows": 3099,
+     "columns": ["word", "level"], "level_token": "hs25:{level}", "provisional": true,
+     "title": "普通高中英语课程标准 日常修订版（2017 年版 2025 年修订）附录 2 词汇表（非官方镜像，印发文号待确认）"},
+    {"id": "hs20", "file": "moe-2020-senior.tsv", "format": "tsv", "policy": "main", "stages": ["gk"], "expect_rows": 3000,
+     "columns": ["word", "level"], "level_token": "hs20:{level}",
+     "title": "普通高中英语课程标准（2017 年版 2020 年修订）附录 2 词汇表"},
+    {"id": "hs25:app", "file": "moe-2025rev-senior-appendix.tsv", "format": "tsv", "policy": "reference", "expect_rows": 56,
+     "columns": ["country_zh", "country", "person", "adjective"], "title": "2025 修订版 部分国家名称及相关信息（供教学参考；不入成员）"},
+    {"id": "hs20:app", "file": "moe-2020-senior-appendix.tsv", "format": "tsv", "policy": "reference", "expect_rows": 55,
+     "columns": ["country_zh", "country", "person", "adjective"], "title": "2020 版 主要国家名称及相关信息（供教学参考；不入成员）"}
+  ],
+  "external": {
+    "note": "mahavivo/english-wordlists 的 CET 文件；通过 --wordlists DIR 提供，缺席时现有行保留上一版旗标、新行只取 ECDICT 标签（stats.external_lists = absent）",
+    "lists": [
+      {"id": "cet4", "file": "CET4_edited.txt", "mode": "rich", "stages": ["cet4"]},
+      {"id": "cet6", "file": "CET6_edited.txt", "mode": "rich", "stages": ["cet6"]},
+      {"id": "cet46", "file": "CET_4+6_edited.txt", "mode": "plain", "stages_rule": "cet4 if in cet4 else cet6"},
+      {"id": "cet6star", "file": "英语六级词汇（星标，1726）.txt", "mode": "plain", "flag": "cet6_star"}
+    ]
+  }
+}

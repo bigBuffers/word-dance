@@ -636,6 +636,7 @@ export default function StudyPage() {
             preview={previewAll(snapshotOf(item.mine), { uwId: item.mine?.id ?? null, timeZone })}
             zhForced={zhForced}
             accent={settings?.accent}
+            onlyStages={settings?.stages}
             position={Math.min(replayIndex + 1, list.length)}
             total={list.length}
           />
@@ -701,6 +702,7 @@ export default function StudyPage() {
           position={Math.min(done + 1, Math.max(total, 1))}
           total={total}
           accent={settings?.accent}
+          onlyStages={settings?.stages}
           onRequestContent={() => void requestContent(current)}
           requestingContent={requestingContent}
         />

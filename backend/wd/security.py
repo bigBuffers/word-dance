@@ -49,6 +49,7 @@ from .config import ConfigError, Settings, ensure_dirs
 from .deps import SESSION_COOKIE, hash_token
 from .errors import ApiError
 from .schemas import USERNAME_RE, index_to_stage
+from .services import bank
 
 log = logging.getLogger("wd.security")
 
@@ -585,7 +586,24 @@ def settings_dto(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
 
 
 def settings_row_to_dto(row: Mapping[str, Any]) -> dict[str, Any]:
-    stages = json.loads(row["stages_json"]) if row.get("stages_json") else []
+    # The unknown-code fallback the study paths already apply (bank.known_stages, PLAN §2.1): a stages_json naming no known
+    # stage used to fail response validation here — 500 on /api/auth/me and /api/settings, so the SPA could not boot —
+    # while /api/today kept working on the fallback; one helper keeps both views on the same stages (impl-review final F2).
+    user_id = int(row.get("user_id") or 0)
+    stages = bank.known_stages(row.get("stages_json"), user_id=user_id)
+    try:
+        current_stage = index_to_stage(int(row["current_stage"]))
+    except (TypeError, ValueError):
+        # an index this build does not know (the DDL CHECK forbids it today; an older server over a newer row could meet one):
+        # the user's first target stage keeps `current_stage ∈ stages` true on the wire, and the same event names the row
+        current_stage = stages[0]
+        log.warning(
+            "stage_fallback: user %s current_stage %r is not a known stage index; using %r",
+            user_id,
+            row.get("current_stage"),
+            current_stage,
+            extra={"event": "stage_fallback", "user_id": user_id},
+        )
     return {
         "timezone": row["timezone"],
         "push_time": row["push_time"],
@@ -593,8 +611,8 @@ def settings_row_to_dto(row: Mapping[str, Any]) -> dict[str, Any]:
         "daily_new_count": int(row["daily_new_count"]),
         "daily_screen_count": int(row["daily_screen_count"]),
         "max_reviews": int(row["max_reviews"]),
-        "stages": list(stages),
-        "current_stage": index_to_stage(int(row["current_stage"])),
+        "stages": stages,
+        "current_stage": current_stage,
         "show_images": bool(int(row["show_images"])),
         "zh_examples": row["zh_examples"],
         "auto_pronounce": bool(int(row["auto_pronounce"])),
@@ -610,7 +628,7 @@ def settings_row_to_dto(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def stages_json(stages: list[str]) -> str:
-    """``user_settings.stages_json`` in the compact form of the SCHEMA default (``'["cet4","cet6"]'``)."""
+    """``user_settings.stages_json`` in the compact form of the DDL default (``'["xs","zk"]'``, 0011_primary_stage.sql)."""
     return json.dumps(list(stages), separators=(",", ":"))
 
 

@@ -47,13 +47,13 @@ Build: `npm run build` → `frontend/dist`; FastAPI serves the files of `dist` i
 |---|---|---|---|---|
 | `/login` | 登录 | `LoginPage` | guest | 用户名 + 密码; link 注册 (hidden when `registration_mode='closed'` **unless** `needs_setup`); when `GET /api/health.needs_setup` is true a notice 「尚无账号，首个注册的账号将成为管理员」 with a 去注册 link replaces the normal hint |
 | `/register` | 注册 | `RegisterPage` | guest | 用户名、密码（强度提示）、昵称（可选）、邮箱（可选）、邀请码 (shown when `registration_mode='invite'` and not `needs_setup`); with `needs_setup` the form shows 「首个注册的账号将成为管理员」 and no invite field (API.md endpoint 2 bootstrap rule) |
-| `/welcome` | 欢迎使用 word-Dance | `WelcomePage` | user, `onboarding_state != 'done'` | step 1 我是… quick picks (初中生 / 高中生 / 大学生 / 职场人士) pre-selecting 目标阶段 chips, 主攻阶段 segmented, 推送时间 time input, 时区 select (auto-detected) → `POST /api/onboarding`; step 2 筛词 (20–30 cards from `/api/screen/next?stage=auto&count=30`) with 跳过引导 → `POST /api/onboarding/complete` → `/today` |
+| `/welcome` | 欢迎使用 word-Dance | `WelcomePage` | user, `onboarding_state != 'done'` | step 1 我是… quick picks (小学生 → 小学 · 初中生 → 小学+初中 · 高中生 → 初中+高中 · 大学生 → 高中+四级+六级 · 职场人士 → 四级+六级; default before a pick 小学+初中 / 小学) pre-selecting 目标阶段 chips, 主攻阶段 segmented, 推送时间 time input, 时区 select (auto-detected) → `POST /api/onboarding`; step 2 筛词 (20–30 cards from `/api/screen/next?stage=auto&count=30`) with 跳过引导 → `POST /api/onboarding/complete` → `/today` |
 | `/` | — | redirect | onboarded | → `/today` |
 | `/today` | 今日词汇 | `TodayPage` | onboarded | header (date, 连续学习 N 天), progress ring `done/total`, chips 复习 · 新词 · 推荐词 · 再来一组, 顺延 N 个复习 note, 「例句生成中 N 个」 notice (from `counts.pending_content`), 整理建议 badge, 「继续昨天的学习（还剩 N 个）」 card when `previous_open_batch` is set, CTA 开始学习/继续学习, empty states (§6.1) |
 | `/study` | 学习 | `StudyPage` | onboarded | the card session (Section 5); `?batch=<id>` loads `GET /api/batches/{id}`: with the grade bar when `batch.gradable` (today's, or yesterday's open batch), otherwise a read-only replay |
 | `/screen` | 筛词 | `ScreenPage` | user | stage picker cards with unseen counts (`GET /api/stages`) |
 | `/screen/:stage` | 筛词 · 四级 | `ScreenRunPage` | user | rapid 认识 / 不熟悉 triage (Section 5.4) |
-| `/vocab` | 词库 | `VocabPage` | user | tabs 全部 / 初中 / 高中 / 四级 / 六级, toggle 仅本阶段新增, search, status filter, sort, A–Z index, list with inline 不熟悉 / 认识, desktop bulk checkboxes |
+| `/vocab` | 词库 | `VocabPage` | user | tabs 全部 / 小学 / 初中 / 高中 / 四级 / 六级 (six `fill` tabs; ≤ 479 px narrows the tab padding so they fit 375 px without scrolling), toggle 仅本阶段新增 (hidden on 全部 and on the lowest stage), search, status filter, sort, A–Z index, list with inline 不熟悉 / 认识, desktop bulk checkboxes |
 | `/words/:idOrLemma` | 单词详情 | `WordDetailPage` | user | dictionary data, content, image (+ 换一张 / 不合适), SRS status, my history, actions 标为不熟悉 / 已掌握 / 移除 / 重置, 反馈问题 |
 | `/bank` | 生词库 | `BankPage` | user | tabs 待学 / 学习中 / 已掌握 / 已认识 / 已移除 / 待处理 (attention), counts, search, sort, row actions, FAB 添加生词, 整理建议 entry with badge |
 | `/bank/add` | 添加生词 | `AddWordsPage` | user | textarea (paste many), live preview per line, 备注, 今天就学 toggle, results list, ambiguous candidate chips; `?prefill=<text>` pre-fills the textarea (used by the 修改 button of a 待处理 row and by the 词库 「没有找到」 empty state) |
@@ -80,16 +80,16 @@ Navigation: phone (< 768 px) bottom tab bar 今日 · 词库 · 生词库 · 记
 | Component | Props (essential) | Behaviour |
 |---|---|---|
 | `layout/AppLayout` / `TopNav` / `TabBar` | — | responsive shell, safe-area padding, badges |
-| `study/StudyCard` | `item: StudyItem, revealed, onReveal, onGrade(grade), onMaster, onSkip, zhMode, showImage, preview: Record<Grade,string>` | front/back faces (§5.1); disables buttons while a grade is in flight; shows the 建议 badge when `mastery_suggested`; renders the deferred-content copy when `item.content_deferred_until` is set (§5.1.5) |
+| `study/StudyCard` | `item: StudyItem, revealed, onReveal, onGrade(grade), onMaster, onSkip, zhMode, showImage, preview: Record<Grade,string>, onlyStages?` | front/back faces (§5.1); disables buttons while a grade is in flight; shows the 建议 badge when `mastery_suggested`; renders the deferred-content copy when `item.content_deferred_until` is set (§5.1.5) |
 | `study/ScreenCard` | `word: WordBrief, onVerdict(v), onPeek` | headword + phonetic + 🔊, buttons 认识 / 不熟悉 / 跳过, swipe left/right on touch, 显示释义 peek link |
-| `word/WordHeader` | `word: WordBrief, size` | display form (long words shrink with `clamp()`), phonetic, `SpeakButton`, `StageChips`, `KindBadge` |
+| `word/WordHeader` | `word: WordBrief, size, onlyStages?` | display form (long words shrink with `clamp()`), phonetic, `SpeakButton`, `StageChips` (`only={onlyStages}`), `KindBadge` |
 | `study/ExampleList` | `examples, lemma, forms, zhMode` | highlights the headword/forms with `<mark>` (`utils/highlight.ts`: `\b(form1|form2…)\b` case-insensitive, longest first); per-sentence 🔊; 译 toggle per sentence or always |
 | `study/WordImage` | `image: ImageMeta, showImages, onRefresh?, onFlag?` | fixed 16:10 box, `<img loading="lazy">`, skeleton while loading, attribution caption `图片：{title} · {creator} · {license} ↗` (card: 「系统生成卡片」, claude_svg: 「AI 生成示意图」), overflow menu 换一张 / 不合适 |
 | `word/SpeakButton` | `text, lang` | `useSpeech()` wrapper; disabled with tooltip 当前浏览器不支持语音 when `speechSynthesis` is absent |
-| `word/StageChips` | `stages: Stage[], stageMin` | 初中 / 高中 / 四级 / 六级 chips; `cet6_star` adds ★ |
+| `word/StageChips` | `stages: Stage[], stageMin, only?` | 小学 / 初中 / 高中 / 四级 / 六级 chips in canonical order (`STAGE_ORDER` / `STAGE_INDEX` mirror `schemas.py`, index 1–5); `only` (the learner's target stages) hides the other chips except the word's lowest stage — lists and study cards pass `settings.stages` as `onlyStages`, the detail page and onboarding show all; `stages = []` (outside every official list) renders one dashed 课标外 chip; `cet6_star` adds ★ |
 | `word/StateBadge` | `state: UserState \| null, srs?` | 待学 / 学习中 · 3 天后 (· 今天 / · 已到期 when the review is due) / 已掌握 / 已认识 / 已移除 / 未标记 |
 | `bank/AttentionBadge` | `mine: UserWord, word: WordBrief, onKeep(), onRetry(), onEdit(), onRemove(), onReplace()` | state machine (API.md §9.1 / SCHEMA `needs_attention`): `needs_attention && attention_msg` → ⚠ msg + buttons 修改 (`onEdit`: `mark remove` then `/bank/add?prefill=`) · 重试 (`onRetry`, only when `word.is_valid_english === null`; `PATCH {attention:'retry'}`) · 保留 (`onKeep`: `PATCH {attention:'keep'}`; label 仅收藏 when `is_valid_english === false`) · 删除 (`onRemove`) · 替换为 “X” (`onReplace`, when `suggested_word`); `needs_attention && !attention_msg` → 重新校验中 (spinner, polls `GET /api/words/{id}`); `!needs_attention && is_valid_english === null` → 待校验; `!needs_attention && is_valid_english === false` → 仅收藏 chip (muted, no buttons); after `onKeep`/`onRetry` the page calls `refreshCounters()` |
-| `list/WordRow` | `word: WordBrief, mine?, onMark(action), selectable?, selected?` | list row: display · phonetic · translation_short · chips · state badge · quick buttons 不熟悉 / 认识 (或 已在生词库 → sheet 已掌握 / 移除) · checkbox in bulk mode |
+| `list/WordRow` | `word: WordBrief, mine?, onMark(action), selectable?, selected?, onlyStages?` | list row: display · phonetic · translation_short · chips · state badge · quick buttons 不熟悉 / 认识 (或 已在生词库 → sheet 已掌握 / 移除) · checkbox in bulk mode |
 | `list/LetterIndex` | `letters: {letter,count}[], active, onPick` | desktop sticky right rail; phone horizontal chips |
 | `list/SearchBox` | `value, onChange (debounced 250 ms), placeholder` | — |
 | `list/Pager` | `page, pageSize, total, onChange` | numeric pager on desktop, 加载更多 on phone |
@@ -144,7 +144,7 @@ Headword + phonetic + 🔊 only. 认识 (key 1 / swipe right) · 不熟悉 (key 
 
 ### 5.5 Vocabulary browser (`/vocab`)
 
-`GET /api/vocab?stage=&new_only=&q=&status=&sort=&letter=&page=&page_size=50`. Tabs reset the page; `仅本阶段新增` toggle appears for a specific stage (label for 六级: 仅六级新增（不含四级）). Search: English prefix (also matches inflected forms) or Chinese substring, debounced 250 ms. Row buttons call `POST /api/words/{id}/mark {action, context:'browse'}` and patch `my_state` in place with a 5-s 撤销 toast whose action is the server undo `mark {action:'restore', context:'browse'}` (API.md 26 — valid for 15 minutes, so the toast never lies). Desktop bulk mode: checkboxes + 「标记所选为不熟悉 / 认识」 → `POST /api/words/batch-mark`. `aria-live` count 「共 4 722 个词」. Row tap → detail.
+`GET /api/vocab?stage=&new_only=&q=&status=&sort=&letter=&page=&page_size=50`. Tabs reset the page; `仅本阶段新增` toggle appears for a specific stage above the lowest one (on 小学 it would be an identity filter — `stage_min = 1` ⇔ the xs flag — so it is hidden and ignored; label for 初中: 仅初中新增（不含小学）, for 六级: 仅六级新增（不含四级）). A word outside every official list (`stages = []`) shows the dashed 课标外 chip and is listed only under 全部 or by search. Search: English prefix (also matches inflected forms) or Chinese substring, debounced 250 ms. Row buttons call `POST /api/words/{id}/mark {action, context:'browse'}` and patch `my_state` in place with a 5-s 撤销 toast whose action is the server undo `mark {action:'restore', context:'browse'}` (API.md 26 — valid for 15 minutes, so the toast never lies). Desktop bulk mode: checkboxes + 「标记所选为不熟悉 / 认识」 → `POST /api/words/batch-mark`. `aria-live` count 「共 4 722 个词」. Row tap → detail.
 
 ### 5.6 Add words (`/bank/add`)
 
@@ -204,7 +204,7 @@ Voices load asynchronously (`voiceschanged`); the first user gesture unlocks aud
 
 ## 7. Quality gates
 
-`npm run typecheck` (strict), `npm run build` (initial JS ≤ 200 KB gzip, per-route code splitting via `React.lazy`), `npm test` (vitest, jsdom): `normalizeInput` (mirrors the backend table), `srsPreview` (pins `tests/fixtures/srs_trajectory.json`: 1 → 3 → 8 → 20 → 51 → 133 → 180 **and** the `next_due_zh` strings — `10 分钟后` / `明天` / `N 天后` for 2–59 / `约 M 个月后` for ≥ 60 with `M = round-half-up(N/30)` — exactly as DESIGN §7 `humanize`), `highlight` (forms, punctuation, case, no partial-word matches), `queue` reducer (requeue placement; **an intermediate grade (`result:null` + `requeue_at`) keeps the item in `order` and out of `graded`, a later final grade on it moves it to `graded`**; skip ordering; pending flush; `restore` re-insert; `study_item` append; `load` puts items with `requeue_at` into `requeue`), `api/client` (envelope → `ApiError`, 401 event, header injection), one render test for `StudyCard` (reveal → grade bar; screen kind → 认识/不熟悉; `content_state:'failed'` → 生成例句 button; `content_deferred_until` set → `study.contentDeferred` copy, no skeleton, no 生成例句 button).
+`npm run typecheck` (strict), `npm run build` (initial JS ≤ 200 KB gzip, per-route code splitting via `React.lazy`), `npm test` (vitest, jsdom): `normalizeInput` (mirrors the backend table), `srsPreview` (pins `tests/fixtures/srs_trajectory.json`: 1 → 3 → 8 → 20 → 51 → 133 → 180 **and** the `next_due_zh` strings — `10 分钟后` / `明天` / `N 天后` for 2–59 / `约 M 个月后` for ≥ 60 with `M = round-half-up(N/30)` — exactly as DESIGN §7 `humanize`), `highlight` (forms, punctuation, case, no partial-word matches), `queue` reducer (requeue placement; **an intermediate grade (`result:null` + `requeue_at`) keeps the item in `order` and out of `graded`, a later final grade on it moves it to `graded`**; skip ordering; pending flush; `restore` re-insert; `study_item` append; `load` puts items with `requeue_at` into `requeue`), `api/client` (envelope → `ApiError`, 401 event, header injection), one render test for `StudyCard` (reveal → grade bar; screen kind → 认识/不熟悉; `content_state:'failed'` → 生成例句 button; `content_deferred_until` set → `study.contentDeferred` copy, no skeleton, no 生成例句 button), stage chips (`StageChips`: five-stage order, `only` keeps the learner's stages plus the word's lowest, `stages: []` → the dashed 课标外 chip; `WordHeader` keeps its meta row for such a word even without phonetic / kind; `WordRow`, `StudyCard` and the `/vocab`, `/bank`, `/study` pages pass `onlyStages={settings.stages}` through to it).
 
 ## 8. i18n strings (`src/i18n/zh.ts`) — binding
 
@@ -228,11 +228,11 @@ export const zh = {
           displayName: '昵称（可选）', email: '邮箱（可选）', invite: '邀请码', noAccount: '还没有账号？', hasAccount: '已有账号？',
           usernameHint: '2–32 个字符，字母、数字、下划线或中文', passwordHint: '至少 8 个字符', mismatch: '两次输入的密码不一致',
           needsSetup: '尚无账号，首个注册的账号将成为管理员', firstUser: '首个注册的账号将成为管理员', goRegister: '去注册' },
-  welcome: { title: '欢迎使用 word-Dance', step1: '先告诉我们你的目标', whoAreYou: '我是…', roles: { zk: '初中生', gk: '高中生', uni: '大学生', pro: '职场人士' },
+  welcome: { title: '欢迎使用 word-Dance', step1: '先告诉我们你的目标', whoAreYou: '我是…', roles: { xs: '小学生', zk: '初中生', gk: '高中生', uni: '大学生', pro: '职场人士' },
              stages: '目标阶段', currentStage: '主攻阶段', pushTime: '每日推送时间', timezone: '时区', detectTz: '自动检测',
              step2: '花两分钟筛一筛', step2Hint: '认识的点「认识」，不熟悉的会进入生词库', skip: '跳过引导', finish: '开始使用', next: '下一步' },
-  stages: { zk: '初中', gk: '高中', cet4: '四级', cet6: '六级', zkFull: '初中（中考）', gkFull: '高中（高考）', cet4Full: '大学英语四级', cet6Full: '大学英语六级',
-            newOnly: '仅本阶段新增', newOnlyCet6: '仅六级新增（不含四级）', star: '六级星标词' },
+  stages: { xs: '小学', zk: '初中', gk: '高中', cet4: '四级', cet6: '六级', xsFull: '小学（课标二级词汇）', zkFull: '初中（中考）', gkFull: '高中（高考）', cet4Full: '大学英语四级', cet6Full: '大学英语六级',
+            newOnly: '仅本阶段新增', newOnlyZk: '仅初中新增（不含小学）', newOnlyCet6: '仅六级新增（不含四级）', outside: '课标外', star: '六级星标词' },
   today: { title: '今日词汇', streak: (n: number) => `连续学习 ${n} 天`, counts: { review: '复习', new: '新词', screen: '推荐词', extra: '加练' },
            deferred: (n: number) => `另有 ${n} 个复习顺延到明天`, pending: (n: number) => `${n} 个词的例句生成中`,
            start: '开始学习', resume: '继续学习', notYet: (t: string) => `今日词汇将于 ${t} 推送`, buildNow: '立即生成',
@@ -289,7 +289,7 @@ export const zh = {
               displayName: '昵称', changePassword: '修改密码', currentPassword: '当前密码', newPassword: '新密码', export: '导出数据', exportCsv: 'CSV', exportJson: 'JSON',
               import: '导入数据', importHint: '选择之前导出的 CSV 或 JSON 文件', importDone: (n: number, m: number) => `已导入 ${n} 个，跳过 ${m} 个`,
               deleteAccount: '删除账号', deleteConfirm: '删除后所有学习记录将无法恢复。请输入密码确认。', version: (v: string) => `版本 ${v}`,
-              sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：中考、高考、大学英语四级与六级大纲', images: '图片来源：Wikimedia Commons、Openverse（CC 许可）、AI 生成示意图或系统生成卡片', ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考' } },
+              sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：小学（课标二级）、初中（课标三级与上海市初中英语词汇表）、高中（高中课标词表）、大学英语四级与六级大纲', images: '图片来源：Wikimedia Commons、Openverse（CC 许可）、AI 生成示意图或系统生成卡片', ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考' } },
   admin: { title: '管理', tabs: { overview: '概览', users: '用户与邀请', jobs: '任务', ai: 'AI', reports: '内容反馈', events: '事件', config: '配置' },
            spendToday: '今日花费', spendMonth: '本月花费', cap: '上限', queue: '队列', paused: '已暂停', pause: '暂停 AI', resume: '恢复 AI', probe: '探测 claude', probeOk: (t: number) => `探测成功（flag tier ${t}）`,
            activeProvider: '当前提供方', providerClaude: 'Claude', providerFallback: '备用模型', probeFallback: '探测备用', fallbackPaused: '备用模型已暂停', probeFallbackOk: (m: string) => `备用模型探测成功（${m}）`,

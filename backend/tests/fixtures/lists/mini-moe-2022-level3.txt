@@ -1,0 +1,25 @@
+# mini-moe-2022-level3.txt — 24 verbatim lines of data/lists/moe-2022-level3.txt (format `heads`, policy main → zk); the 17 level-2 lines plus 7 (xs ⊆ zk by construction)
+a/an
+be (am, is, are)
+book
+China
+colour (AmE color)
+do
+excited
+I
+ice cream
+maths (=mathematics, AmE math)
+Miss
+mother (mum AmE mom)
+Mr (AmE Mr.)
+o'clock
+OK
+PE (=physical education)
+TV (=television)
+according (to)
+kung fu
+manner
+miss
+policeman/policewoman (pl. policemen/policewomen)
+tofu
+T-shirt

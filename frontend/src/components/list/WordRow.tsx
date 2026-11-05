@@ -4,7 +4,7 @@
 // the word detail page; `meta` adds bank-specific chips and `actions` replaces the default buttons.
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import type { MarkAction, UserWord, WordBrief } from '@/api/types';
+import type { MarkAction, Stage, UserWord, WordBrief } from '@/api/types';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { Sheet } from '@/components/ui/Sheet';
@@ -34,10 +34,12 @@ export interface WordRowProps {
   footer?: ReactNode;
   /** Hide the state badge (e.g. when the parent shows a richer one). */
   hideState?: boolean;
+  /** Narrows the stage chips to the learner's target stages plus the word's lowest stage (`StageChips.only`). */
+  onlyStages?: readonly Stage[];
   className?: string;
 }
 
-export function WordRow({ word, mine, onMark, selectable = false, selected = false, onSelect, busy = false, meta, actions, footer, hideState = false, className }: WordRowProps) {
+export function WordRow({ word, mine, onMark, selectable = false, selected = false, onSelect, busy = false, meta, actions, footer, hideState = false, onlyStages, className }: WordRowProps) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const state = mine?.state ?? word.my_state;
 
@@ -94,7 +96,7 @@ export function WordRow({ word, mine, onMark, selectable = false, selected = fal
         </span>
         {word.translation_short && <span className="word-row__trans">{word.translation_short}</span>}
         <span className="word-row__chips">
-          <StageChips stages={word.stages} stageMin={word.stage_min} cet6Star={word.cet6_star} size="sm" />
+          <StageChips stages={word.stages} stageMin={word.stage_min} cet6Star={word.cet6_star} only={onlyStages} size="sm" />
           {!hideState && <StateBadge state={state ?? null} srs={mine?.srs ?? null} />}
           {meta}
         </span>

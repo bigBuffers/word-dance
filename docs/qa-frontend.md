@@ -11,7 +11,7 @@ Status legend: **AUTO** = covered by `npm test` in this package (vitest, jsdom);
 | Check | Command | Status |
 |---|---|---|
 | Types | `cd frontend && npm run typecheck` | AUTO — green |
-| Unit / render tests | `npm test` | AUTO — green (utils `normalizeInput` ≥ 60 table rows, `format`, `date`; `usePolling`; `AttentionBadge` state machine + polling; `SuggestionRow` copy; `AddWordPreviewRow`; `WordRow`; `Pager` + `usePagedList`; `LetterIndex`; `AppLayout` badges; `LoginPage` / `RegisterPage` health-flag branches; settings import reduction; vocab/bank helpers) |
+| Unit / render tests | `npm test` | AUTO — green (utils `normalizeInput` ≥ 60 table rows, `format`, `date`; `usePolling`; `AttentionBadge` state machine + polling; `SuggestionRow` copy; `AddWordPreviewRow`; `WordRow` (incl. `onlyStages` chip narrowing and the 课标外 chip); `StageChips`; `Pager` + `usePagedList`; `LetterIndex`; `AppLayout` badges; `LoginPage` / `RegisterPage` health-flag branches; settings import reduction; vocab/bank helpers) |
 | Build | `npm run build` | AUTO — `dist/index.html` + lazy page chunks |
 | Copy rules | `npm run lint` (= `scripts/check-copy.mjs`), also `grep -rn '[一-龥]' frontend/src --include=*.tsx \| grep -v i18n` → empty; forbidden glossary term absent | AUTO — green |
 
@@ -33,13 +33,13 @@ Status legend: **AUTO** = covered by `npm test` in this package (vitest, jsdom);
 
 ## 3. Onboarding (`/welcome`)
 
-- [ ] PENDING-MANUAL — step 1: quick picks 初中生 → 初中 · 高中生 → 初中+高中 · 大学生 → 高中+四级+六级 · 职场人士 → 四级+六级 pre-select the 目标阶段 chips and the 主攻阶段 (segmented shows only selected stages); toggling the last stage off is refused; 时区 is auto-detected (`Intl`) with 自动检测 to re-apply; 推送时间 defaults to 08:00; 下一步 → `POST /api/onboarding` (body has `current_stage` as a Stage string) → step 2.
+- [ ] PENDING-MANUAL — step 1: quick picks 小学生 → 小学 · 初中生 → 小学+初中 · 高中生 → 初中+高中 · 大学生 → 高中+四级+六级 · 职场人士 → 四级+六级 pre-select the 目标阶段 chips and the 主攻阶段 (segmented shows only selected stages; before any pick 小学+初中 with 主攻 小学 — the server default); the five 目标阶段 chips read 小学（课标二级词汇） / 初中（中考） / 高中（高考） / 大学英语四级 / 大学英语六级; toggling the last stage off is refused; 时区 is auto-detected (`Intl`) with 自动检测 to re-apply; 推送时间 defaults to 08:00; 下一步 → `POST /api/onboarding` (body has `current_stage` as a Stage string) → step 2.
 - [ ] PENDING-MANUAL — step 2: up to 30 cards from `GET /api/screen/next?stage=auto&count=30`; 认识 (key 1) / 不熟悉 (key 2) / 跳过 (S) / 显示释义 (Space); each verdict posts `POST /api/screen/verdict {client_event_id, context:'onboarding'}`; the 5-s 撤销 toast calls `mark {action:'restore', context:'screen_page'}` and the card returns to the front; 「本阶段还剩 N 个未筛」 decreases; 再筛 30 个 loads another batch; 跳过引导 / 开始使用 → `POST /api/onboarding/complete` → `/today`.
 - [ ] PENDING-MANUAL — gate: before completing, 词库 / 生词库 / 设置 (and 筛词, 单词详情) are reachable while `/today`, `/history` redirect to `/welcome`; reloading `/welcome` with state `screen` starts at step 2.
 
 ## 4. 词库 (`/vocab`)
 
-- [ ] PENDING-MANUAL — tabs 全部 / 初中 / 高中 / 四级 / 六级 (last tab remembered in `localStorage['wd.vocabTab']`); 「共 N 个词」 updates (`aria-live`); on the full seed 六级 + 仅六级新增（不含四级） shows 3,694; the toggle is hidden on 全部.
+- [ ] PENDING-MANUAL — tabs 全部 / 小学 / 初中 / 高中 / 四级 / 六级 (last tab remembered in `localStorage['wd.vocabTab']`; at 375 px and 360 px all six fit without horizontal scrolling); 「共 N 个词」 updates (`aria-live`); on the full seed 六级 + 仅六级新增（不含四级） shows `data/seed/stats.json` `first_stage.cet6`, 初中 shows the toggle as 仅初中新增（不含小学）; the toggle is hidden on 全部 and on 小学; a word outside every official list (search for one from `DIFF.md`) shows a dashed 课标外 chip and appears only under 全部; rows show only the stages in my 目标阶段 plus the word's lowest stage (the detail page shows all of them).
 - [ ] PENDING-MANUAL — search (250 ms debounce): `aband` finds abandon, `abandoned` finds abandon through forms, `放弃` finds abandon; status filter 未标记 / 不熟悉 / 已认识 / 已掌握; sort 词频 / 字母 / 难度; A–Z rail (sticky on ≥ 1024 px, chips below) filters by letter, letters without words disabled, keyboard arrows move between letters.
 - [ ] PENDING-MANUAL — inline 不熟悉 / 认识: the row's badge changes at once (未标记 → 待学 / 已认识), the 5-s 撤销 toast calls `POST /api/words/{id}/mark {action:'restore', context:'browse'}` and the row returns to 未标记; wait 16 minutes and press 撤销 → 「撤销时间已过，可在「已掌握」中重新加入」; a word already in the bank shows 已在生词库 → sheet 已掌握 / 移除; a mastered word offers 不熟悉 (re-add).
 - [ ] PENDING-MANUAL — 1280 px bulk mode: 批量选择 → checkboxes, 「已选 N 个」, 标记所选为不熟悉 / 认识 → one `POST /api/words/batch-mark`; the bulk controls are hidden at 360 px.

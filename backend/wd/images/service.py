@@ -6,6 +6,13 @@
 * :func:`request_refresh` — 换一张 (API.md 29): ``fetch_image`` with ``exclude`` = the current image's ref/sha.
 * :func:`admin_refetch` — API.md 69 (``provider`` / ``query`` overrides).
 * :func:`word_is_studied` — DESIGN §9: in a bank (``new``/``learning``) or in an open batch.
+* :func:`retry_if_failed` / :func:`retry_failed_studied` — the failed-image retry rules of DESIGN §9 (PLAN §5.1 C7,
+  D-images-13): a word whose chain failed is fetched again only while somebody studies it, at most every
+  :data:`RETRY_MIN_AGE_H` hours and :data:`RETRY_MAX_AUTO_30D` times per 30 days (the ``retry: true`` payload flag is
+  the counter), never for a function word (``style.skip_image``) and never over a live ``fetch_image`` job. The nightly
+  03:30 maintenance (``scheduler.maintenance``) and ``wd images-retry`` call :func:`retry_failed_studied` with the
+  :data:`RETRY_NIGHTLY_LIMIT` cap; the live counter-example that motivated it: 17 of the 18 failed words were being
+  studied and would never have been fetched again, most of them never having reached a provider (cooldown).
 """
 
 from __future__ import annotations
@@ -13,17 +20,24 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import timedelta
-from typing import Any
+from typing import Any, Mapping
 
 from ..clock import now_iso, parse_iso, to_iso
 from ..db import maybe_tx
 from ..jobs import queue
+from . import style
 from .store import attribution_line
 
 CARD_WIDTH, CARD_HEIGHT = 800, 500
 FETCH_DEDUPE = "image:{word_id}"
 FETCH_FOLLOWUP_DEDUPE = "image:{word_id}:r{n}"  # a request that arrives while the live job is already running
 OPEN_BATCH_DAYS = 2
+
+# PLAN §5.1 C7 retry rules (D-images-13)
+RETRY_MIN_AGE_H = 6  # provider cooldowns last 10–15 min; six hours is ample and keeps a word from hammering a dead chain
+RETRY_MAX_AUTO_30D = 3  # automatic (payload retry:true) attempts per word per 30 days — a manual 换一张 / admin refetch is not counted
+RETRY_NIGHTLY_LIMIT = 50  # like PREFETCH_LIMIT: one night's worth of IoWorker work
+RETRY_NIGHTLY_PRIORITY = 30  # same lane as the prefetch content jobs (below bank p20, above prewarm p90)
 
 
 def card_meta(word_id: int) -> dict[str, Any]:
@@ -161,12 +175,14 @@ def enqueue_fetch(
     query: str | None = None,
     priority: int = 10,
     now: str | None = None,
+    retry: bool = False,
 ) -> int:
-    """``fetch_image {word_id, exclude?, provider?, query?}`` on the live key ``image:<word_id>`` + ``image_state='queued'``.
+    """``fetch_image {word_id, exclude?, provider?, query?, retry?}`` on the live key ``image:<word_id>`` + ``image_state='queued'``.
 
     A request that meets a live job for the word is merged into it (``exclude`` union, latest ``provider`` / ``query``)
     while that job is still ``queued``; when it is already ``running`` with an older payload, a follow-up job runs after
-    it — so a 换一张 ``exclude`` or an API.md 69 override is never silently dropped by the dedupe UPSERT."""
+    it — so a 换一张 ``exclude`` or an API.md 69 override is never silently dropped by the dedupe UPSERT. ``retry=True``
+    marks an automatic retry (``payload.retry = true``, counted by :func:`auto_retries_30d`); the handler ignores the key."""
     now = now or now_iso()
     payload: dict[str, Any] = {"word_id": int(word_id)}
     if exclude:
@@ -175,6 +191,8 @@ def enqueue_fetch(
         payload["provider"] = provider
     if query:
         payload["query"] = query
+    if retry:
+        payload["retry"] = True
     with maybe_tx(conn):  # BEGIN IMMEDIATE: the read-merge-write below cannot interleave with a claim
         job_id = queue.enqueue(conn, "fetch_image", payload, dedupe_key=FETCH_DEDUPE.format(word_id=int(word_id)), priority=int(priority), now=now)
         if not _fold_into_live(conn, job_id, payload, now):
@@ -232,6 +250,99 @@ def word_is_studied(conn: sqlite3.Connection, word_id: int, now: str | None = No
         {"wid": int(word_id), "min_date": min_date},
     ).fetchone()
     return bool(row[0])
+
+
+# ------------------------------------------------------------------------------ failed-image retries (PLAN §5.1 C7)
+def _fetch_keys(word_id: int) -> tuple[str, str]:
+    """The live key and the follow-up LIKE pattern of a word's ``fetch_image`` jobs."""
+    return FETCH_DEDUPE.format(word_id=int(word_id)), FETCH_FOLLOWUP_DEDUPE.format(word_id=int(word_id), n="%")
+
+
+def _live_fetch_exists(conn: sqlite3.Connection, word_id: int) -> bool:
+    key, pattern = _fetch_keys(word_id)
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE type = 'fetch_image' AND status IN ('queued','running') AND (dedupe_key = ? OR dedupe_key LIKE ?) LIMIT 1",
+        (key, pattern),
+    ).fetchone()
+    return row is not None
+
+
+def last_fetch_finished_at(conn: sqlite3.Connection, word_id: int) -> str | None:
+    """When the word's most recent ``fetch_image`` job ended (``finished_at``, else ``updated_at``), or None when it never had one."""
+    key, pattern = _fetch_keys(word_id)
+    row = conn.execute(
+        "SELECT MAX(COALESCE(finished_at, updated_at)) FROM jobs WHERE type = 'fetch_image' AND status IN ('done','dead','cancelled') "
+        "AND (dedupe_key = ? OR dedupe_key LIKE ?)",
+        (key, pattern),
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def auto_retries_30d(conn: sqlite3.Connection, word_id: int, now: str) -> int:
+    """How many automatic retries (``payload.retry = true``, any status) the word got in the last 30 days."""
+    since = to_iso(parse_iso(now) - timedelta(days=30))
+    row = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image' AND json_extract(payload_json, '$.word_id') = ? "
+        "AND json_extract(payload_json, '$.retry') = 1 AND created_at >= ?",
+        (int(word_id), since),
+    ).fetchone()
+    return int(row[0])
+
+
+def retry_due(conn: sqlite3.Connection, word: Mapping[str, Any], now: str) -> bool:
+    """Is ``word`` (a row with ``id``, ``pos``, ``image_state``) due for an automatic fetch retry?
+
+    ``image_state == 'failed'`` ∧ not a function word (the gate put it there on purpose) ∧ no live ``fetch_image`` job ∧ the
+    last fetch ended ≥ :data:`RETRY_MIN_AGE_H` hours ago (or none is recorded) ∧ fewer than :data:`RETRY_MAX_AUTO_30D`
+    automatic retries in 30 days."""
+    if word.get("image_state") != "failed" or style.skip_image(word):
+        return False
+    word_id = int(word["id"])
+    if _live_fetch_exists(conn, word_id):
+        return False
+    last = last_fetch_finished_at(conn, word_id)
+    if last is not None and last > to_iso(parse_iso(now) - timedelta(hours=RETRY_MIN_AGE_H)):
+        return False
+    return auto_retries_30d(conn, word_id, now) < RETRY_MAX_AUTO_30D
+
+
+def retry_if_failed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str) -> int | None:
+    """Enqueue an automatic ``fetch_image`` retry for ``word`` when :func:`retry_due`; returns the job id or None.
+
+    The hook for the moments a learner meets the word again (bank actions, batch building — R-16: wired after the
+    integration); the nightly sweep is :func:`retry_failed_studied`."""
+    if not retry_due(conn, word, now):
+        return None
+    return enqueue_fetch(conn, int(word["id"]), priority=int(priority), now=now, retry=True)
+
+
+def retry_failed_studied(
+    conn: sqlite3.Connection,
+    now: str,
+    *,
+    limit: int = RETRY_NIGHTLY_LIMIT,
+    priority: int = RETRY_NIGHTLY_PRIORITY,
+    dry_run: bool = False,
+) -> list[int]:
+    """The nightly sweep: every ``failed`` word that is being studied (:func:`word_is_studied`) and :func:`retry_due`,
+    oldest first (``words.updated_at``), at most ``limit`` of them; enqueued with ``priority`` unless ``dry_run``.
+    Returns the word ids chosen (the dry run returns the same list without enqueueing)."""
+    rows = conn.execute(
+        "SELECT id, lemma, pos, image_state FROM words WHERE image_state = 'failed' AND merged_into_word_id IS NULL ORDER BY updated_at, id"
+    ).fetchall()
+    chosen: list[int] = []
+    for row in rows:
+        if len(chosen) >= max(0, int(limit)):
+            break
+        word = {k: row[k] for k in row.keys()}
+        if style.skip_image(word):  # the gate's words stay on the card; cheap, so before the queries
+            continue
+        if not word_is_studied(conn, int(word["id"]), now) or not retry_due(conn, word, now):
+            continue
+        if not dry_run:
+            enqueue_fetch(conn, int(word["id"]), priority=int(priority), now=now, retry=True)
+        chosen.append(int(word["id"]))
+    return chosen
 
 
 def photo_mix(conn: sqlite3.Connection) -> dict[str, int]:

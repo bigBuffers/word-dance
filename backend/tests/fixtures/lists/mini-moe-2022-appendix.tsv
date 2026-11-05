@@ -1,0 +1,21 @@
+# mini-moe-2022-appendix.tsv — 19 verbatim lines of data/lists/moe-2022-appendix.tsv (format `tsv`, policy appendix; columns group/word/extra1/extra2; every manifest group once, 不规则动词 is member: false)
+# 类别	词	附加1	附加2
+数词-基数词	one		
+数词-序数词	first		
+月份	May		
+星期	Monday		
+地理名称	China		
+地理名称	The United Kingdom (UK)		
+地理名称	The United States of America (USA)		
+地理名称-派生	Chinese	China	
+缩写	UN (United Nations)		
+缩写	UNESCO (United Nations Educational, Scientific and Cultural Organization)		
+节日	Children's Day		
+节日	PLA Day		
+地名景点	The Great Wall		
+地名景点	Mount Huangshan		
+其他专有名词	Beijing opera (Peking opera)		
+其他专有名词	hot pot		
+不规则动词	be (am, is, are)	was, were	been
+不规则动词	go	went	gone
+不规则动词	hang (悬挂)	hung	hung

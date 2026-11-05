@@ -269,7 +269,7 @@ def select_words(conn: sqlite3.Connection, user_id: int, settings_row: Mapping[s
         "SELECT w.id AS word_id, w.lemma FROM words w WHERE w.is_public = 1 AND w.merged_into_word_id IS NULL AND w.is_valid_english = 1 "
         f"AND {_stage_flags(stages)} AND NOT EXISTS (SELECT 1 FROM user_words uw WHERE uw.user_id = :me AND uw.word_id = w.id) "
         f"ORDER BY {_SCREEN_ORDER} LIMIT :limit",
-        {"me": uid, "cur": int(settings_row.get("current_stage") or bank.DEFAULT_CURRENT_STAGE), "limit": daily_screen},
+        {"me": uid, "cur": bank.current_stage_index(settings_row), "limit": daily_screen},
     )
     return Selection(reviews=reviews, deferred=max(0, due_total - len(reviews)), news=news, screens=screens)
 
@@ -695,7 +695,7 @@ def add_more(conn: sqlite3.Connection, user_id: int, batch_id: int, source: str,
                 "AND NOT EXISTS (SELECT 1 FROM user_words uw WHERE uw.user_id = :me AND uw.word_id = w.id) "
                 "AND NOT EXISTS (SELECT 1 FROM push_items pi WHERE pi.batch_id = :bid AND pi.word_id = w.id) "
                 f"ORDER BY {_SCREEN_ORDER} LIMIT :limit",
-                {"me": uid, "bid": bid, "cur": int(s.get("current_stage") or bank.DEFAULT_CURRENT_STAGE), "limit": n},
+                {"me": uid, "bid": bid, "cur": bank.current_stage_index(s), "limit": n},
             )
             kind = "screen"
         added = 0

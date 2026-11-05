@@ -79,7 +79,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     user, st = r.json()["user"], r.json()["settings"]
     assert user["role"] == "admin" and user["onboarding_state"] == "pending" and user["display_name"] == "小张"
     assert user["email"] == "Alice@Example.com" and user["email_verified"] is False and user["created_at"] == NOW_ISO
-    assert st["timezone"] == "Asia/Shanghai" and st["push_time"] == "08:00" and st["stages"] == ["cet4", "cet6"] and st["current_stage"] == "cet4"
+    assert st["timezone"] == "Asia/Shanghai" and st["push_time"] == "08:00" and st["stages"] == ["xs", "zk"] and st["current_stage"] == "xs"  # K-12 DDL defaults
     assert st["next_push_at"] == "2026-10-15T00:00:00Z" == to_iso(compute_next_push(NOW, "Asia/Shanghai", "08:00"))
     assert st["email_verified"] is False and st["push_enabled"] is True and st["daily_new_count"] == 10 and st["webhook_url"] is None
     cookie = r.headers["set-cookie"].lower()

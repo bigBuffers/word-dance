@@ -17,7 +17,7 @@ import './ScreenPage.css';
 
 export const SCREEN_STAGE_KEY = 'wd.screenStage';
 
-const FULL_NAME: Record<Stage, string> = { zk: zh.stages.zkFull, gk: zh.stages.gkFull, cet4: zh.stages.cet4Full, cet6: zh.stages.cet6Full };
+const FULL_NAME: Record<Stage, string> = { xs: zh.stages.xsFull, zk: zh.stages.zkFull, gk: zh.stages.gkFull, cet4: zh.stages.cet4Full, cet6: zh.stages.cet6Full };
 
 export function screenedFraction(info: StageInfo): number {
   if (info.total <= 0) return 0;

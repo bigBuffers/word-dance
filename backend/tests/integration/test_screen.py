@@ -113,7 +113,7 @@ def install_fake_batches(monkeypatch) -> list:
 
 @pytest.fixture
 def alice(client: TestClient, settings) -> int:
-    uid, token = make_user(settings, "alice", stages_json='["cet4","cet6"]', current_stage=4, daily_new_count=10)
+    uid, token = make_user(settings, "alice", stages_json='["cet4","cet6"]', current_stage=5, daily_new_count=10)  # 主攻 cet6 (index 5 since 0011)
     as_user(client, token)
     return uid
 
@@ -126,15 +126,36 @@ def test_next_order_and_remaining(client: TestClient, settings, alice):
     total = q1(settings, "SELECT COUNT(*) FROM words WHERE (stage_cet4 = 1 OR stage_cet6 = 1) AND is_public = 1 AND is_valid_english = 1")
     assert b["remaining"] == total and len(b["items"]) == 5
     lemmas = [i["word"]["lemma"] for i in b["items"]]
-    # 主攻阶段 cet6 first (stage_min 4 = absorption / axe / ought to by frequency), then stage 3, then stage 2 …
+    # 主攻阶段 cet6 first (stage_min 5 = absorption / axe / ought to by frequency), then stage 4, then stage 3 …
     assert lemmas[:3] == ["absorption", "axe", "ought to"]
     assert all(i["word"]["my_state"] is None for i in b["items"]) and b["items"][0]["phonetic"] == b["items"][0]["word"]["phonetic"]
     r = client.get("/api/screen/next?stage=zk&count=3").json()
-    assert [i["word"]["lemma"] for i in r["items"]] == ["be", "a", "go"]  # stage zk (stage_min 1): by frequency 2, 5, 35
+    # the 初中 pool is every stage_zk word, ordered by distance from 初中 (DESIGN §6.3 step 4): the words first listed at 初中
+    # (stage_min 2 — go / person / better by frequency 35 / 345 / 452) come before the 小学 words (be, a: distance 2)
+    assert [i["word"]["lemma"] for i in r["items"]] == ["go", "person", "better"]
     assert r["remaining"] == q1(settings, "SELECT COUNT(*) FROM words WHERE stage_zk = 1")
     assert client.get("/api/screen/next?count=0").status_code == 400
     assert client.get("/api/screen/next?stage=xx").status_code == 400
     assert q1(settings, "SELECT COUNT(*) FROM jobs") == 0  # no side effects
+
+
+def test_next_auto_for_a_primary_school_learner_orders_by_stage_distance(client: TestClient, settings):
+    """主攻 xs (current_stage 1) with 目标 xs+zk+gk: DESIGN §6.3 step 4 distances are 0 for 小学 words, 1 for words first listed at
+    初中 and 3 for 高中-first ones (PLAN R-1 / SM D-16: the index is read with `is None`, never `int(x or default)`)."""
+    _, token = make_user(settings, "pupil", stages_json='["xs","zk","gk"]', current_stage=1)
+    as_user(client, token)
+    r = client.get("/api/screen/next?stage=auto&count=50")
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    expected_xs = [row["lemma"] for row in qrows(settings, "SELECT lemma FROM words WHERE stage_xs = 1 AND is_public = 1 AND is_valid_english = 1 ORDER BY (frq IS NULL OR frq = 0), frq, lemma")]
+    assert expected_xs and [i["word"]["lemma"] for i in items[: len(expected_xs)]] == expected_xs  # distance 0 first, by frequency
+    assert all(i["word"]["stage_min"] == 1 and "xs" in i["word"]["stages"] for i in items[: len(expected_xs)])
+    distance = lambda m: 0 if m == 1 else 2 * (m - 1) - 1  # _STAGE_DISTANCE for a 主攻 of 1 (higher stages only)
+    distances = [distance(i["word"]["stage_min"]) for i in items]
+    assert distances == sorted(distances) and set(distances) == {0, 1, 3}
+    assert r.json()["remaining"] == q1(settings, "SELECT COUNT(*) FROM words WHERE (stage_xs = 1 OR stage_zk = 1 OR stage_gk = 1) AND is_public = 1 AND is_valid_english = 1")
+    r2 = client.get("/api/screen/next?stage=xs&count=3").json()  # the explicit 小学 filter
+    assert [i["word"]["lemma"] for i in r2["items"]] == expected_xs[:3] and r2["remaining"] == len(expected_xs)
 
 
 def test_next_default_count_and_default_settings(client: TestClient, settings):
@@ -142,7 +163,8 @@ def test_next_default_count_and_default_settings(client: TestClient, settings):
     run(settings, "DELETE FROM user_settings WHERE user_id = ?", (uid,))
     as_user(client, token)
     r = client.get("/api/screen/next")
-    assert r.status_code == 200 and len(r.json()["items"]) == 1  # defaults: count 1, stages cet4+cet6, current cet4
+    assert r.status_code == 200 and len(r.json()["items"]) == 1  # defaults: count 1, stages xs+zk, current xs (bank.DEFAULT_*, PLAN §0)
+    assert r.json()["items"][0]["word"]["stage_min"] == 1  # the 主攻 小学 words come first
 
 
 def test_next_excludes_bank_known_mastered_removed_and_private_words(client: TestClient, settings, alice):
@@ -156,7 +178,7 @@ def test_next_excludes_bank_known_mastered_removed_and_private_words(client: Tes
     bob, bob_token = make_user(settings, "bob")
     as_user(client, bob_token)
     client.post("/api/bank/add", json={"text": "zzqx"})
-    run(settings, "UPDATE words SET stage_cet6 = 1, stage_min = 4 WHERE lemma = 'zzqx'")  # even with a stage flag a private word never screens
+    run(settings, "UPDATE words SET stage_cet6 = 1, stage_min = 5 WHERE lemma = 'zzqx'")  # even with a stage flag a private word never screens
     _, carol_token = make_user(settings, "carol")
     as_user(client, carol_token)
     assert "zzqx" not in [i["word"]["lemma"] for i in client.get("/api/screen/next?stage=auto&count=50").json()["items"]]
@@ -164,7 +186,8 @@ def test_next_excludes_bank_known_mastered_removed_and_private_words(client: Tes
     lemmas = [i["word"]["lemma"] for i in client.get("/api/screen/next?stage=auto&count=50").json()["items"]]
     assert not {"absorption", "axe", "ought to", "abandon", "zzqx"} & set(lemmas)
     total = q1(settings, "SELECT COUNT(*) FROM words WHERE (stage_cet4 = 1 OR stage_cet6 = 1) AND is_public = 1 AND is_valid_english = 1")
-    assert client.get("/api/screen/next?stage=auto&count=1").json()["remaining"] == total - 4 == len(lemmas) + 3
+    assert client.get("/api/screen/next?stage=auto&count=1").json()["remaining"] == total - 4  # the four verdict/bank words are out
+    assert len(lemmas) == min(50, total - 4)  # count=50 caps the page, remaining counts the whole pool
 
 
 # ---------------------------------------------------------------------------------------------- verdicts

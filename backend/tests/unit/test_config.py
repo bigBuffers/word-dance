@@ -31,6 +31,7 @@ def test_defaults_without_environment():
     assert (cfg.host, cfg.port, cfg.tz, cfg.registration_mode) == ("0.0.0.0", 8000, "Asia/Shanghai", "invite")
     assert cfg.ai_batch_size == 10 and cfg.ai_concurrency == 1
     assert cfg.image_providers == ("wikimedia", "openverse")
+    assert cfg.image_kid_stages == ()  # the child picture style is off until the pilot (PLAN §5.1 C3)
     assert cfg.ai_daily_budget_usd == 3.0 and cfg.ai_monthly_budget_usd == 40.0 and cfg.ai_svg_daily_budget_usd == 0.5
     assert cfg.max_body_bytes == 1_048_576 and cfg.session_days == 30 and cfg.prebuild_hours == 3
     assert cfg.secret_key.startswith("ephemeral-")  # random per process when unset
@@ -71,6 +72,8 @@ def test_batch_size_and_concurrency_are_clamped_not_rejected():
         {"WD_COOKIE_SECURE": "yes"},
         {"WD_WORKER_ENABLED": "maybe"},
         {"WD_IMAGE_PROVIDERS": "wikimedia,unsplash"},
+        {"WD_IMAGE_KID_STAGES": "xx"},
+        {"WD_IMAGE_KID_STAGES": "xs,cet9"},
         {"WD_PUBLIC_URL": "words.example.com"},
         {"WD_AI_DAILY_BUDGET_USD": "-1"},
         {"WD_LOG_LEVEL": "LOUD"},
@@ -105,6 +108,46 @@ def test_keyed_providers_are_appended_and_flags_parse():
     assert Settings.from_env({"WD_AI_ENABLED": "off"}).ai_enabled is False
     assert Settings.from_env({"WD_COOKIE_SECURE": "1"}).cookie_secure_effective is True
     assert Settings.from_env({"WD_COOKIE_SECURE": "0", "WD_PUBLIC_URL": "https://x.example"}).cookie_secure_effective is False
+
+
+def test_image_kid_stages_parse_as_stage_codes():
+    """DEPLOY §4 `WD_IMAGE_KID_STAGES`: a comma list of stage codes (images/style.style_for), empty or blank = off, case and
+    duplicates folded, an unknown code is a ConfigError naming the variable and the allowed codes (schemas.STAGE_ORDER)."""
+    from wd.schemas import STAGE_ORDER
+
+    assert Settings.from_env({}).image_kid_stages == ()
+    for blank in ("", " ", ",", " , "):
+        assert Settings.from_env({"WD_IMAGE_KID_STAGES": blank}).image_kid_stages == (), repr(blank)
+    assert Settings.from_env({"WD_IMAGE_KID_STAGES": "zk, gk"}).image_kid_stages == ("zk", "gk")
+    assert Settings.from_env({"WD_IMAGE_KID_STAGES": "xs"}).image_kid_stages == ("xs",)
+    assert Settings.from_env({"WD_IMAGE_KID_STAGES": " XS ,zk,xs,, "}).image_kid_stages == ("xs", "zk")
+    assert Settings.from_env({"WD_IMAGE_KID_STAGES": ",".join(STAGE_ORDER)}).image_kid_stages == STAGE_ORDER
+    with pytest.raises(ConfigError, match="WD_IMAGE_KID_STAGES") as e:
+        Settings.from_env({"WD_IMAGE_KID_STAGES": "xx"})
+    assert "xs, zk, gk, cet4, cet6" in str(e.value)
+    with pytest.raises(ConfigError, match="WD_IMAGE_KID_STAGES"):
+        Settings.from_env({"WD_IMAGE_KID_STAGES": "xs;zk"})
+    entries = {e["key"]: e for e in Settings.from_env({"WD_IMAGE_KID_STAGES": "zk, gk"}).entries()}
+    assert entries["WD_IMAGE_KID_STAGES"] == {"key": "WD_IMAGE_KID_STAGES", "value": "zk,gk", "source": "env"}
+    assert {e["key"]: e for e in Settings.from_env({}).entries()}["WD_IMAGE_KID_STAGES"] == {"key": "WD_IMAGE_KID_STAGES", "value": "", "source": "default"}
+
+
+def test_claude_bin_relative_path_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """DEPLOY §4 `WD_CLAUDE_BIN`: the CLI is spawned in `claude_cwd`, not where the service started, so a relative path
+    (`backend/tests/fake_claude.py` from the repository root — the PLAN §6 S5 rehearsal and the `make dev` forms) is made
+    absolute against the start-up working directory like every other path setting; an absolute path is kept verbatim (no
+    symlink resolution — the CLI may locate its install through argv[0]) and a bare command name stays a PATH lookup."""
+    monkeypatch.chdir(tmp_path)
+    cwd = Path(os.getcwd())
+    assert Settings.from_env({"WD_CLAUDE_BIN": "backend/tests/fake_claude.py"}).claude_bin == str(cwd / "backend" / "tests" / "fake_claude.py")
+    assert Settings.from_env({"WD_CLAUDE_BIN": "./bin/claude-wrapper"}).claude_bin == str(cwd / "bin" / "claude-wrapper")
+    assert Settings.from_env({"WD_CLAUDE_BIN": " ../x/claude "}).claude_bin == str(cwd.parent / "x" / "claude")
+    assert Settings.from_env({"WD_CLAUDE_BIN": "/opt/claude/bin/claude"}).claude_bin == "/opt/claude/bin/claude"
+    assert Settings.from_env({"WD_CLAUDE_BIN": "~/bin/claude"}).claude_bin == os.path.expanduser("~/bin/claude")
+    assert Settings.from_env({"WD_CLAUDE_BIN": "claude"}).claude_bin == "claude"
+    assert Settings.from_env({}).claude_bin == "/home/sqin/.local/bin/claude"
+    entries = {e["key"]: e for e in Settings.from_env({"WD_CLAUDE_BIN": "bin/claude"}).entries()}
+    assert entries["WD_CLAUDE_BIN"] == {"key": "WD_CLAUDE_BIN", "value": str(cwd / "bin" / "claude"), "source": "env"}
 
 
 def test_test_environment_fixture(settings, data_dir):

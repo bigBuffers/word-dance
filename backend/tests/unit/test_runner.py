@@ -263,7 +263,7 @@ def test_tier1_usage_error_falls_back_to_tier0_once_and_records_the_event(conn, 
     assert result.ok and result.status == "success"
     rows = conn.execute("SELECT status, flag_tier, error FROM ai_calls ORDER BY id").fetchall()
     assert [(r[0], r[1]) for r in rows] == [("error", 1), ("success", 0)] and "unknown option" in rows[0][2]
-    events = conn.execute("SELECT kind FROM system_events").fetchall()
+    events = conn.execute("SELECT kind FROM system_events WHERE kind != 'migration'").fetchall()  # 0011 leaves a migration trace (PLAN §2.2)
     assert [e[0] for e in events] == ["claude_flag_error"]
     # the probe handles tiers itself: with the fallback disabled the usage error is simply classified `error`
     conn.execute("DELETE FROM system_events")

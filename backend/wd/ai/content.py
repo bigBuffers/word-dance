@@ -15,7 +15,8 @@ the group and applies each returned item with the §6.4 post-validation:
   CLI answered; from the fallback the same verdict on a non-seed word is a post-validation failure instead (only the
   CLI may invalidate a word, §10.4): the job follows §6.3 and the word stays valid / public;
 * lengths, CJK/ASCII checks, examples containing the headword or a known form (≥ 3 kept, ≥ 2 on the last attempt),
-  image keywords filtered through the DESIGN §9 blocklist;
+  image keywords filtered through the DESIGN §9 blocklist (the lemma's own tokens exempt from its non-photo list, so a
+  card for ``map`` may ask for a map);
 * stored as a new ``word_contents`` version (``model = model_used or model_requested``), the word's ``difficulty``
   filled, ``prewarm:<plan_id>:spent`` credited, ``fetch_image`` enqueued with the job's priority;
 * the answering provider's quality streak (§10.4): ``common.record_applied`` only when at least one item was stored; a
@@ -32,8 +33,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .. import db
-from ..images.select import is_blocked
+from .. import db, schemas
+from ..images import select
 from ..interfaces import Job
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
@@ -43,15 +44,15 @@ from .providers import CLAUDE, FALLBACK
 
 log = logging.getLogger("wd.ai.content")
 
-PROMPT_VERSION = "content-v1"
+PROMPT_VERSION = "content-v2"  # v2 (PLAN §5.1 C4): 小学 audience and example rules, scene-of-example-1 image keywords
 KIND = "content"
-AUDIENCE = "Chinese learners, junior high school to CET-6, plus working professionals"
-STAGE_ZH: dict[str, str] = {"zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
+AUDIENCE = "Chinese learners from primary school (小学) to CET-6, plus working professionals"
+STAGE_ZH: dict[str, str] = schemas.STAGE_NAMES_ZH  # the one stage table (DESIGN §0.3); the prompt's `stages` labels
 HINT_MAX = 60
 
 MEANING_ZH_MAX = 120
 MEANING_EN_MAX = 200
-EXAMPLE_EN_MIN, EXAMPLE_EN_MAX = 15, 240
+EXAMPLE_EN_MIN, EXAMPLE_EN_MAX = 10, 240  # 10: a 小学 sentence such as "I like cats." (12 chars) must survive (§6.4)
 EXAMPLE_ZH_MIN, EXAMPLE_ZH_MAX = 2, 200
 EXAMPLE_ASCII_MIN = 0.7
 EXAMPLES_MIN, EXAMPLES_MIN_LAST_ATTEMPT, EXAMPLES_MAX = 3, 2, 4
@@ -64,9 +65,10 @@ PREFIX_MIN = 4
 ATTENTION_FALLBACK_ZH = "未识别为英文单词"
 
 
-def _is_blocked(keyword: str) -> bool:
-    """DESIGN §9 image blocklist — the one list in ``images.select`` (also applied to Claude's ``image_keywords``)."""
-    return is_blocked(keyword)
+def _is_blocked(keyword: str, lemma: str) -> bool:
+    """DESIGN §9 image blocklist — the lists of ``images.select`` applied to Claude's ``image_keywords``; the lemma's own
+    tokens are allowed through the non-photo list (``map`` may keep "world map"), the unsafe list always rejects."""
+    return select.is_blocked(keyword, allow=select.keyword_tokens(lemma))
 
 
 # ---------------------------------------------------------------------------------------- prompt
@@ -85,6 +87,8 @@ def prompt_entry(word: Mapping[str, Any]) -> dict[str, Any]:
         "word": str(word["display"]),
         "dictionary_hint": dictionary_hint(word.get("translation")),
         "pos_hint": " ".join(str(word.get("pos") or "").split())[:HINT_MAX],
+        # the stage_* flags are read through the one reader services.words.stages_of (STAGES = schemas.STAGE_ORDER; PLAN R-1
+        # keeps no second copy of the flag → code mapping), labelled from schemas.STAGE_NAMES_ZH: a stage_xs=1 row says 小学
         "stages": [STAGE_ZH[s] for s in words.stages_of(word)],
     }
     if word.get("kind") and word["kind"] != "word":
@@ -173,7 +177,7 @@ def validate_item(item: Mapping[str, Any], word: Mapping[str, Any], forms: list[
     keywords: list[str] = []
     for kw in item.get("image_keywords") if isinstance(item.get("image_keywords"), list) else []:
         s = common.clean_text(kw)
-        if not s or not KEYWORD_RE.match(s) or _is_blocked(s):
+        if not s or not KEYWORD_RE.match(s) or _is_blocked(s, lemma):
             continue
         s = s.lower()
         if s not in keywords:

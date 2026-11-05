@@ -108,6 +108,11 @@
   background: var(--brand-soft);
 }
 
+/* outside every official list (stage_min NULL): same palette as .chip, dashed edge only */
+.chip--outside {
+  border-style: dashed;
+}
+
 .chip__star {
   color: var(--hard-ink);
 }

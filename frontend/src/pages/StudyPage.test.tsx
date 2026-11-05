@@ -3,7 +3,9 @@
 //    (it is not parked forever);
 //  * undo of a mastered grade keeps the server's restored `mine`, so the re-opened card previews as before;
 //  * undo while the master grade is still unacknowledged cancels the event locally (no server restore, no retry);
-//  * a double tap on a screen card's verdict button grades one card; keys stay unlocked.
+//  * a double tap on a screen card's verdict button grades one card; keys stay unlocked;
+//  * both StudyCard sites (live card, read-only replay) get `onlyStages={settings.stages}` (PLAN §6 S4): header chips =
+//    my target stages plus the word's lowest stage.
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,7 +28,7 @@ vi.mock('@/api/endpoints', () => ({
 }));
 vi.mock('@/auth/AuthContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/auth/AuthContext')>();
-  const fake = { user: { id: 1 }, settings: { timezone: 'UTC', auto_pronounce: false, accent: 'en-US', zh_examples: 'tap', show_images: false } };
+  const fake = { user: { id: 1 }, settings: { timezone: 'UTC', auto_pronounce: false, accent: 'en-US', zh_examples: 'tap', show_images: false, stages: ['xs', 'cet6'] } };
   return { ...actual, useAuth: () => fake, useOptionalAuth: () => fake };
 });
 vi.mock('@/components/layout/AppLayout', () => ({ setTodayUngraded: () => undefined }));
@@ -76,7 +78,7 @@ function item(id: number, over: Partial<StudyItem> = {}): StudyItem {
       phonetic: null,
       translation_short: 'x',
       stages: ['cet4'],
-      stage_min: 3,
+      stage_min: 4,
       cet6_star: false,
       frq: null,
       collins: null,
@@ -279,5 +281,25 @@ describe('StudyPage', () => {
     fireEvent.keyDown(window, { key: '1' }); // keyboard right after a tap: intended rapid flow
     await flush();
     expect(vi.mocked(gradeItem).mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
+  });
+
+  it('passes my target stages to both StudyCard sites: the live card and the read-only replay narrow the header chips alike', async () => {
+    const wide = item(1, { word: { ...item(1).word, stages: ['zk', 'gk', 'cet4', 'cet6'], stage_min: 2 } });
+    const chipTexts = () => within(screen.getByRole('list', { name: zh.word.examTags })).getAllByRole('listitem').map((li) => li.textContent);
+    const expected = [zh.stages.zk, zh.stages.cet6]; // settings.stages = ['xs', 'cet6'] + the lowest stage zk; gk / cet4 hidden
+
+    // the live card of today's gradable batch
+    const live = today([wide]);
+    vi.mocked(getToday).mockResolvedValue(live);
+    const session = renderStudy();
+    await vi.waitFor(() => screen.getByRole('group', { name: 'w1' }));
+    expect(chipTexts()).toEqual(expected);
+    session.unmount();
+
+    // the read-only replay of an older batch (`batch.gradable: false` → the other StudyCard site, back face)
+    vi.mocked(getToday).mockResolvedValue({ ...live, batch: { ...live.batch!, gradable: false } });
+    renderStudy();
+    await vi.waitFor(() => screen.getByRole('group', { name: 'w1' }));
+    expect(chipTexts()).toEqual(expected);
   });
 });

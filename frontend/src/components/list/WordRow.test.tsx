@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 import type { WordBrief } from '@/api/types';
@@ -13,7 +13,7 @@ const word = (over: Partial<WordBrief> = {}): WordBrief => ({
   phonetic: 'əˈbændən',
   translation_short: 'v. give up',
   stages: ['gk', 'cet4', 'cet6'],
-  stage_min: 2,
+  stage_min: 3,
   cet6_star: false,
   frq: 1200,
   collins: 4,
@@ -87,5 +87,25 @@ describe('WordRow', () => {
     renderRow({ onMark: vi.fn(), busy: true, footer: <span>footer-slot</span> });
     expect((screen.getByRole('button', { name: zh.vocab.markUnfamiliar }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('footer-slot')).toBeTruthy();
+  });
+
+  // PLAN §6 S4: the row passes `onlyStages` (the learner's `settings.stages`) through to StageChips.
+  it('`onlyStages` narrows the stage chips to my target stages plus the lowest stage; a stageless word shows the dashed chip', () => {
+    const chipTexts = () => within(screen.getByRole('list', { name: zh.word.examTags })).getAllByRole('listitem').map((li) => li.textContent);
+    // a primary-school word that is also in zk / gk / cet4, for a learner targeting xs only → just the xs chip
+    const primary = renderRow({ word: word({ stages: ['xs', 'zk', 'gk', 'cet4'], stage_min: 1 }), onlyStages: ['xs'] });
+    expect(chipTexts()).toEqual([zh.stages.xs]);
+    primary.unmount();
+    // the gk / cet4 / cet6 fixture word for the same learner: nothing of it is targeted, so its lowest stage is kept
+    const senior = renderRow({ onlyStages: ['xs'] });
+    expect(chipTexts()).toEqual([zh.stages.gk]);
+    senior.unmount();
+    // without `onlyStages` (detail page, onboarding) every stage shows
+    const all = renderRow();
+    expect(chipTexts()).toEqual([zh.stages.gk, zh.stages.cet4, zh.stages.cet6]);
+    all.unmount();
+    // outside every official list
+    renderRow({ word: word({ stages: [], stage_min: null }), onlyStages: ['xs'] });
+    expect(chipTexts()).toEqual([zh.stages.outside]);
   });
 });

@@ -41,8 +41,7 @@ def _stage_scope(conn: sqlite3.Connection, user_id: int, stage: str) -> tuple[li
     s = bank.user_settings_row(conn, user_id)
     if stage == "auto":
         stages = list(s["stages"])
-        cur = int(s["current_stage"] or bank.DEFAULT_CURRENT_STAGE)
-        return stages, cur
+        return stages, bank.current_stage_index(s)
     if stage not in words.STAGES:
         raise ApiError("validation_error", details={"fields": {"stage": "unknown stage"}})
     return [stage], stage_to_index(stage)

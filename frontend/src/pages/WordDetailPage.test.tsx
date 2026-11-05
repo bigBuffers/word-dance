@@ -59,7 +59,7 @@ function detailOf(mine: UserWord | null): WordDetail {
       phonetic: null,
       translation_short: 'v. give up',
       stages: ['cet4'],
-      stage_min: 3,
+      stage_min: 4,
       cet6_star: false,
       frq: 1000,
       collins: 3,

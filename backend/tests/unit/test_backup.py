@@ -86,7 +86,7 @@ def test_integrity_failure_records_event_and_leaves_nothing(settings, conn, monk
         backup.run_backup(settings, keep_daily=14, keep_weekly=8, now=NOW)
     assert list(settings.backups_dir.iterdir()) == []
     assert list(settings.tmp_dir.glob("word-dance-*.db")) == []
-    rows = conn.execute("SELECT kind, detail_json FROM system_events").fetchall()
+    rows = conn.execute("SELECT kind, detail_json FROM system_events WHERE kind != 'migration'").fetchall()  # 0011 leaves a migration trace (PLAN §2.2)
     assert len(rows) == 1 and rows[0][0] == "backup_failed"
     detail = json.loads(rows[0][1])
     assert "boom" in detail["error"] and detail["file"] == "word-dance-20261015-0330.db.gz"

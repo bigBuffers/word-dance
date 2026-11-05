@@ -1,7 +1,8 @@
 // FRONTEND §7: one render test for StudyCard — reveal → grade bar; screen kind → known / unfamiliar;
 // content_state 'failed' → the generate-examples button; content_deferred_until set → the deferred copy,
-// no skeleton, no generate button.
-import { fireEvent, render, screen } from '@testing-library/react';
+// no skeleton, no generate button. PLAN §6 S4: `onlyStages` reaches the WordHeader of all three faces, and a word
+// outside every list keeps its dashed outside-the-lists chip even without a phonetic.
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 import type { Grade, ImageMeta, StudyItem } from '@/api/types';
@@ -26,7 +27,7 @@ function item(over: Partial<StudyItem> = {}): StudyItem {
       phonetic: 'əˈbændən',
       translation_short: 'v. give up',
       stages: ['gk', 'cet4', 'cet6'],
-      stage_min: 2,
+      stage_min: 3,
       cet6_star: false,
       frq: 1200,
       collins: 3,
@@ -106,6 +107,8 @@ const button = (name: string) => {
   return found[0];
 };
 const queryButton = (name: string) => screen.queryAllByRole('button', { name: new RegExp(`^${name}`) })[0] ?? null;
+/** The header's stage chips (the only named list on the card; collocation / confusable lists carry no name). */
+const stageChips = () => within(screen.getByRole('list', { name: zh.word.examTags })).getAllByRole('listitem');
 
 describe('StudyCard', () => {
   it('shows the front with the reveal button and no grade bar; reveal → grade bar with the preview', () => {
@@ -199,6 +202,25 @@ describe('StudyCard', () => {
     expect(screen.getByText(zh.study.good)).toBeTruthy();
     expect(queryButton(zh.study.again)).toBeNull();
     expect(queryButton(zh.study.skip)).toBeNull();
+  });
+
+  it('`onlyStages` narrows the header chips on the screen card, the front and the back to my targets plus the lowest stage', () => {
+    // the fixture word is gk / cet4 / cet6 (stage_min 3)
+    const screenCard = renderCard({ onlyStages: ['xs'], item: item({ kind: 'screen', mine: null, content: null, content_state: 'none' }) });
+    expect(stageChips().map((li) => li.textContent)).toEqual([zh.stages.gk]); // nothing of it is targeted → lowest stage kept
+    screenCard.unmount();
+    const front = renderCard({ onlyStages: ['cet6'] });
+    expect(stageChips().map((li) => li.textContent)).toEqual([zh.stages.gk, zh.stages.cet6]);
+    front.unmount();
+    renderCard({ onlyStages: ['cet6'], revealed: true });
+    expect(stageChips().map((li) => li.textContent)).toEqual([zh.stages.gk, zh.stages.cet6]);
+  });
+
+  it('a word outside every list with no phonetic still shows the dashed chip on the card', () => {
+    renderCard({ item: item({ word: { ...item().word, phonetic: null, stages: [], stage_min: null } }) });
+    const chips = stageChips();
+    expect(chips.map((li) => li.textContent)).toEqual([zh.stages.outside]);
+    expect(chips[0]?.classList.contains('chip--outside')).toBe(true);
   });
 
   it('exposes contentMode / resultLabel helpers', () => {

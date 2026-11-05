@@ -104,7 +104,7 @@ SCHEMA_OF = {"content": "content_v1", "lookup": "lookup_v1", "consolidate": "con
 SYSTEM_PROMPT_OF = {"content": "content_system", "lookup": "lookup_system", "consolidate": "consolidate_system", "svg": "svg_system"}
 OUTPUT_MIRROR = {"content": models.ContentOutput, "lookup": models.LookupOutput, "consolidate": models.ConsolidateOutput, "svg": models.SvgOutput, "probe": models.ProbeOutput}
 ITEM_MIRROR = {"content": models.ContentItem, "lookup": models.LookupItem, "consolidate": models.ConsolidateItem}
-STAGES: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")
+STAGES: tuple[str, ...] = ("xs", "zk", "gk", "cet4", "cet6")  # mirrors schemas.STAGE_ORDER (the script does not import the backend package)
 EXTRA_KINDS = {"phrase": "phrase", "phrases": "phrase", "abbreviation": "abbreviation", "abbreviations": "abbreviation", "proper_noun": "proper_noun", "proper_nouns": "proper_noun"}
 SOFT_CAPS = {"meaning_zh": 80, "meaning_en": 160, "mnemonic_zh": 60, "image_alt_zh": 30}  # the prompt's limits
 HARD_CAPS = {"meaning_zh": content.MEANING_ZH_MAX, "meaning_en": content.MEANING_EN_MAX, "mnemonic_zh": content.MNEMONIC_MAX, "image_alt_zh": content.ALT_MAX}
@@ -324,7 +324,7 @@ CANDIDATE_WHERE = "is_public = 1 AND is_valid_english = 1 AND merged_into_word_i
 
 
 def sample_words(conn: sqlite3.Connection, per_stage: int, extra: dict[str, int], seed: int, explicit: Sequence[str] = ()) -> list[dict[str, Any]]:
-    """Seeded random sample: ``per_stage`` plain words per stage (zk/gk/cet4/cet6, no word twice) plus ``extra`` by kind."""
+    """Seeded random sample: ``per_stage`` plain words per stage (xs/zk/gk/cet4/cet6, no word twice) plus ``extra`` by kind."""
     rng = random.Random(seed)
     picked: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -1880,7 +1880,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--model", default=None, help="vendor model id (e.g. glm-4.7-flash, qwen3.7-flash, deepseek-flash)")
     ap.add_argument("--strategy", choices=("json_schema", "json_object", "tool", "cli"), default=None, help="structured-output strategy (default json_object; cli is implied by --format claude_cli)")
     ap.add_argument("--kinds", default=DEFAULT_KINDS, help=f"comma list of {','.join(KINDS)} (default {DEFAULT_KINDS})")
-    ap.add_argument("--per-stage", type=int, default=10, help="words per stage zk/gk/cet4/cet6 without content (seeded random)")
+    ap.add_argument("--per-stage", type=int, default=10, help="words per stage xs/zk/gk/cet4/cet6 without content (seeded random)")
     ap.add_argument("--extra", default="phrases=3,abbreviation=3,proper_noun=2", help="extra words by kind, e.g. phrases=3,abbreviation=3,proper_noun=2")
     ap.add_argument("--words", default=None, help="comma list of explicit lemmas to include (in addition to the sample)")
     ap.add_argument("--paired", action="store_true", help="also run the words that already have Claude content and write the paired item for side-by-side review")

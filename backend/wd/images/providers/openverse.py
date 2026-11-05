@@ -1,10 +1,13 @@
 """Openverse search (DESIGN §9, secondary provider).
 
-``GET https://api.openverse.org/v1/images/?q=<kw>&page_size=20&license_type=commercial&mature=false``.
-Anonymous limits are 20/min and 200/day; ``quota.py`` enforces ``WD_OPENVERSE_MINUTE_LIMIT=15`` /
-``WD_OPENVERSE_DAILY_LIMIT=160``. Only ``url`` (the full image on the source host) is downloaded — **never** the
-``thumbnail`` on ``api.openverse.org``, which would spend API quota. An optional registered app
-(``WD_OPENVERSE_CLIENT_ID/SECRET``) sends a client-credentials bearer token; failures fall back to anonymous.
+``GET https://api.openverse.org/v1/images/?q=<kw>&page_size=<limit ≤ 20>&license_type=commercial&mature=false`` — the
+handler asks for 10 and only ever looks at 10, so the page is 10 (PLAN §5.1 C8; it used to fetch 20). The ``kid`` style
+(illustration-first round) adds ``category=illustration``; the ``neutral`` round adds **no** ``category=photograph``,
+which would drop every uncategorised result and narrow the default chain. Anonymous limits are 20/min and 200/day;
+``quota.py`` enforces ``WD_OPENVERSE_MINUTE_LIMIT=15`` / ``WD_OPENVERSE_DAILY_LIMIT=160``. Only ``url`` (the full image
+on the source host) is downloaded — **never** the ``thumbnail`` on ``api.openverse.org``, which would spend API quota.
+An optional registered app (``WD_OPENVERSE_CLIENT_ID/SECRET``) sends a client-credentials bearer token; failures fall
+back to anonymous.
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ log = logging.getLogger("wd.images.openverse")
 API_URL = "https://api.openverse.org/v1/images/"
 TOKEN_URL = "https://api.openverse.org/v1/auth_tokens/token/"
 API_HOST = "api.openverse.org"
-PAGE_SIZE = 20
+MAX_PAGE_SIZE = 20  # the anonymous API maximum
+KID_CATEGORY = "illustration"
 
 _token_lock = threading.Lock()
 _token_cache: dict[str, object] = {"token": None, "expires_at": 0.0, "client_id": None}
@@ -38,8 +42,11 @@ class OpenverseProvider:
         self.cfg = cfg
         self._client_factory = client_factory or (lambda: base.make_client(cfg))
 
-    def params(self, query: str) -> dict[str, object]:
-        return {"q": query, "page_size": PAGE_SIZE, "license_type": "commercial", "mature": "false"}
+    def params(self, query: str, limit: int, *, style: str = "neutral") -> dict[str, object]:
+        params: dict[str, object] = {"q": query, "page_size": max(1, min(int(limit), MAX_PAGE_SIZE)), "license_type": "commercial", "mature": "false"}
+        if style == "kid":
+            params["category"] = KID_CATEGORY
+        return params
 
     def _bearer(self, client: httpx.Client) -> str | None:
         """Client-credentials token when a registered app is configured (cached until it expires); None → anonymous."""
@@ -62,13 +69,13 @@ class OpenverseProvider:
             _token_cache.update({"token": token, "expires_at": time.monotonic() + expires_in, "client_id": cid})
             return token
 
-    def search(self, query: str, limit: int) -> list[Candidate]:
+    def search(self, query: str, limit: int, *, style: str = "neutral") -> list[Candidate]:
         with self._client_factory() as client:
             headers = base.request_headers(self.cfg)
             token = self._bearer(client)
             if token:
                 headers["Authorization"] = f"Bearer {token}"
-            data = base.get_json(client, self.name, API_URL, params=self.params(query), headers=headers)
+            data = base.get_json(client, self.name, API_URL, params=self.params(query, limit, style=style), headers=headers)
         return parse_search(data)[: max(1, int(limit))]
 
 
@@ -116,6 +123,7 @@ def parse_search(data: dict) -> list[Candidate]:
                     "sensitivity": list(r.get("unstable__sensitivity") or []),
                     "source": r.get("source"),
                     "license_code": r.get("license"),
+                    "category": (str(r["category"]).strip().lower() or None) if isinstance(r.get("category"), str) else None,  # photograph / illustration / digitized_artwork (select.score)
                 },
             )
         )

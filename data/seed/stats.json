@@ -1,41 +1,309 @@
 {
- "total_words": 9162,
+ "seed_v": 2,
+ "content_sha256": "24f3b9496c148e7ca520ee55138ec03a50467b8ad8c1e523504461288c4e6692",
+ "total_words": 9618,
+ "previous_sha256": "3b3ed209d37f15cabdc00aa1a17df6170b3166f936b8cc70da9841d8ced22243",
+ "ecdict_release": "1.0.28",
+ "external_lists": "absent",
  "per_stage": {
-  "zk": 2099,
-  "gk": 3829,
+  "xs": 600,
+  "zk": 2549,
+  "gk": 3260,
   "cet4": 4722,
   "cet6": 7671
  },
- "only_stage": {
-  "zk": 33,
-  "gk": 193,
-  "cet4": 65,
-  "cet6": 3694
- },
  "first_stage": {
-  "zk": 2099,
-  "gk": 1792,
-  "cet4": 1577,
-  "cet6": 3694
+  "xs": 600,
+  "zk": 1949,
+  "gk": 1255,
+  "cet4": 1726,
+  "cet6": 3850,
+  "none": 238
  },
- "with_phonetic": 8997,
- "with_translation": 9162,
- "with_definition": 9102,
- "with_exchange": 7799,
- "multiword": 13,
- "uppercase": 141,
- "syllabus_sizes": {
-  "zk": 1887,
-  "gk": 3446,
+ "only_stage": {
+  "xs": 0,
+  "zk": 430,
+  "gk": 31,
+  "cet4": 90,
+  "cet6": 3850
+ },
+ "per_kind": {
+  "word": 9067,
+  "phrase": 395,
+  "abbreviation": 35,
+  "proper_noun": 121
+ },
+ "lists": {
+  "moe22:l2": {
+   "rows": 505,
+   "heads": 506,
+   "variants": 14,
+   "members": 520,
+   "missing": [],
+   "skipped": []
+  },
+  "moe22:l3": {
+   "rows": 1600,
+   "heads": 1609,
+   "variants": 38,
+   "members": 1646,
+   "missing": [],
+   "skipped": []
+  },
+  "moe22:app": {
+   "rows": 267,
+   "heads": 161,
+   "variants": 10,
+   "members": 168,
+   "missing": [],
+   "skipped": [
+    "Mount Huangshan (missing)",
+    "Mount Taishan (missing)",
+    "PLA Day (missing)",
+    "The United States of America (strict: 最多 4 个单词组成的短语)",
+    "United Nations Educational, Scientific and Cultural Organization (strict: 只能包含英文字母、空格、连字符、撇号和缩写点)"
+   ]
+  },
+  "shmeea20": {
+   "rows": 1724,
+   "heads": 1734,
+   "variants": 5,
+   "members": 1737,
+   "missing": [],
+   "skipped": []
+  },
+  "shmeea20:app": {
+   "rows": 158,
+   "heads": 147,
+   "variants": 0,
+   "members": 142,
+   "missing": [],
+   "skipped": [
+    "one billion (compositional)",
+    "one hundred (and) one (compositional)",
+    "one hundred (and) two (compositional)",
+    "one hundred (compositional)",
+    "one hundred and first (compositional)",
+    "one hundred and second (compositional)",
+    "one hundredth (compositional)",
+    "one million (compositional)",
+    "one thousand (compositional)",
+    "ten thousand (compositional)",
+    "three hundred (compositional)",
+    "three thousand (compositional)"
+   ]
+  },
+  "shmeea20:phr": {
+   "rows": 342,
+   "heads": 335,
+   "variants": 0,
+   "members": 334,
+   "missing": [],
+   "skipped": [
+    "a lot of/lots of (other)",
+    "add ... to (strict: 请输入有效的单词)",
+    "add...to (patterns)",
+    "agree with sb. (patterns)",
+    "apologize to sb. for sth. (patterns)",
+    "arrive at/in a place (other)",
+    "as...as (patterns)",
+    "be angry with sb. (patterns)",
+    "be busy with/doing sth. (patterns)",
+    "be strict with sb. (patterns)",
+    "be thankful to sb. (patterns)",
+    "both...and (patterns)",
+    "do sb. a favour (patterns)",
+    "encourage sb. to do sth. (patterns)",
+    "get into the habit of (other)",
+    "get into the habit of (strict: 最多 4 个单词组成的短语)",
+    "go on with/doing sth. (patterns)",
+    "happen to sb. (patterns)",
+    "have pity on sb. (patterns)",
+    "help sb. with sth. (patterns)",
+    "in one's fifties (patterns)",
+    "keep ... from (strict: 请输入有效的单词)",
+    "keep doing sth. (patterns)",
+    "keep sb. busy (patterns)",
+    "keep...from (patterns)",
+    "no longer/not...any longer (patterns)",
+    "not...at all (patterns)",
+    "on one's side (patterns)",
+    "praise sb. for sth. (patterns)",
+    "prefer ... to (strict: 请输入有效的单词)",
+    "prefer...to (patterns)",
+    "prevent...from (patterns)",
+    "protect...from (patterns)",
+    "provide ... with (strict: 请输入有效的单词)",
+    "provide...with (patterns)",
+    "see ... off (strict: 请输入有效的单词)",
+    "see...off (patterns)",
+    "share ... with (strict: 请输入有效的单词)",
+    "share...with (patterns)",
+    "show sb. around (patterns)",
+    "stop...from (patterns)",
+    "take a message for sb. (patterns)",
+    "take an underground (other)",
+    "take one's advice (patterns)",
+    "tell...from (patterns)",
+    "the same...as (patterns)",
+    "too...to (patterns)"
+   ]
+  },
+  "shmeea20:forms": {
+   "rows": 146,
+   "heads": 0,
+   "variants": 0,
+   "members": 0,
+   "missing": [],
+   "skipped": []
+  },
+  "hs25": {
+   "rows": 3099,
+   "heads": 3111,
+   "variants": 54,
+   "members": 3162,
+   "missing": [],
+   "skipped": []
+  },
+  "hs20": {
+   "rows": 3000,
+   "heads": 3005,
+   "variants": 47,
+   "members": 3046,
+   "missing": [],
+   "skipped": []
+  },
+  "hs25:app": {
+   "rows": 56,
+   "heads": 0,
+   "variants": 0,
+   "members": 0,
+   "missing": [],
+   "skipped": []
+  },
+  "hs20:app": {
+   "rows": 55,
+   "heads": 0,
+   "variants": 0,
+   "members": 0,
+   "missing": [],
+   "skipped": []
+  }
+ },
+ "tokens": {
   "cet4": 4539,
+  "cet46": 8007,
   "cet6": 2220,
-  "cet46": 8008,
-  "cet6star": 1721
+  "ecdict": 8285,
+  "hs20:0": 1526,
+  "hs20:1": 505,
+  "hs20:2": 1017,
+  "hs25:0": 1648,
+  "hs25:1": 504,
+  "hs25:2": 1012,
+  "inherit:be": 3,
+  "inherit:do": 1,
+  "legacy:gk": 3829,
+  "legacy:zk": 2099,
+  "moe22:app": 168,
+  "moe22:l2": 520,
+  "moe22:l3": 1646,
+  "shmeea20": 1737,
+  "shmeea20:app": 142,
+  "shmeea20:phr": 334
  },
- "missing_from_ecdict": {
-  "cet46": [
-   "instalation"
+ "variants": 44,
+ "aliases": 6,
+ "inherited": [
+  "am",
+  "are",
+  "does",
+  "is"
+ ],
+ "overrides_applied": 28,
+ "network_translations": 10,
+ "new_words": 456,
+ "stageless": 238,
+ "rows_changed_vs_previous": {
+  "stage_set": 2601,
+  "sources_only": 1756
+ },
+ "with_phonetic": 9112,
+ "with_translation": 9618,
+ "with_definition": 9172,
+ "with_exchange": 7880,
+ "multiword": 395,
+ "uppercase": 173,
+ "file_bytes": 5602203,
+ "empty_translation": 0,
+ "unparsed_notes": [
+  "hs25: BCE (Before the Common Era) → Before the Common Era"
+ ],
+ "merged_heads": {
+  "a.m.": [
+   "A.M.",
+   "a.m."
+  ],
+  "ad": [
+   "AD",
+   "ad"
+  ],
+  "biology": [
+   "Biology",
+   "biology"
+  ],
+  "chemistry": [
+   "Chemistry",
+   "chemistry"
+  ],
+  "china": [
+   "China",
+   "china"
+  ],
+  "humorous": [
+   "humorous",
+   "humourous"
+  ],
+  "internet": [
+   "Internet",
+   "internet"
+  ],
+  "march": [
+   "March",
+   "march"
+  ],
+  "maths": [
+   "Maths",
+   "maths"
+  ],
+  "may": [
+   "May",
+   "may"
+  ],
+  "miss": [
+   "Miss",
+   "miss"
+  ],
+  "p.e.": [
+   "P.E.",
+   "PE"
+  ],
+  "p.m.": [
+   "P.M.",
+   "p.m."
+  ],
+  "physics": [
+   "Physics",
+   "physics"
+  ],
+  "us": [
+   "US",
+   "us"
+  ],
+  "who": [
+   "WHO",
+   "who"
   ]
  },
- "file_bytes": 4978924
+ "overrides_unused": []
 }

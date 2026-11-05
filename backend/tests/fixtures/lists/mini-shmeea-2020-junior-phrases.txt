@@ -1,0 +1,10 @@
+# mini-shmeea-2020-junior-phrases.txt — 9 verbatim lines of data/lists/shmeea-2020-junior-phrases.txt (format `phrases`, policy phrases → zk); optional brackets, token-level `/`, templates, `...`, [网络] translations
+a bit (of)
+a lot of/lots of
+add...to
+agree with sb.
+at first/last
+by bus/train/plane
+catch (a) cold
+in hospital
+save one's life

@@ -109,7 +109,7 @@ def test_history_days_streak_heatmap_batches_and_stats(client: TestClient, setti
     assert len(s["heatmap"]) == 84 and s["heatmap"][-1]["date"] == "2026-10-14"
     heat = {h["date"]: h for h in s["heatmap"]}
     assert heat["2026-10-10"] == {"date": "2026-10-10", "graded": 2, "goal_met": True} and heat["2026-10-11"]["goal_met"] is False and heat["2026-10-11"]["graded"] == 1
-    assert {st["stage"] for st in s["stages"]} == {"zk", "gk", "cet4", "cet6"} and all(st["total"] > 0 for st in s["stages"])
+    assert {st["stage"] for st in s["stages"]} == {"xs", "zk", "gk", "cet4", "cet6"} and all(st["total"] > 0 for st in s["stages"])
     # today's grade makes the streak 1 (ends today)
     grade_all_new(client, d4, "good")
     assert client.get("/api/stats").json()["streak_days"] == 1

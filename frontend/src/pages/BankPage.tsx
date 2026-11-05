@@ -106,7 +106,7 @@ export default function BankPage() {
   usePageTitle(zh.bank.title);
   const toast = useToast();
   const navigate = useNavigate();
-  const { counters, refreshCounters } = useAuth();
+  const { counters, refreshCounters, settings } = useAuth();
   const [tabPref, setTabPref] = useLocalPref<string>('wd.bankTab', 'new');
   const tab: BankTab = isTab(tabPref) ? tabPref : 'new';
   const [q, setQ] = useState('');
@@ -356,6 +356,7 @@ export default function BankPage() {
               word={item}
               mine={item.mine}
               busy={busyIds.has(item.id)}
+              onlyStages={settings?.stages}
               meta={item.mine.times_added > 1 ? <span className="chip">{zh.study.addedTimes(item.mine.times_added)}</span> : null}
               actions={
                 <RowMenu

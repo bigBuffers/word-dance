@@ -1,0 +1,29 @@
+# lemma<TAB>field<TAB>value<TAB>note   — field ∈ translation | word | phonetic | definition | drop（PLAN §4.1；上限 30 条）。translation 用给定的一行替换整个 translation[]（definition[]、音标、词频照旧来自 ECDICT）；word 改 display（从而改 derive_kind）；drop 让该 lemma 不成为成员也不建行。这些释义是本仓库自己写的 MIT 文本（ATTRIBUTION.md）
+bund	translation	n. 外滩（the Bund，上海黄浦江西岸）	ECDICT「(政治上的)同盟, 联盟」
+the bund	drop		bund 已是词头；避免两行
+mum	translation	n. 妈妈（英式口语，= mom）	ECDICT「n. 菊花, 沉默」；现库该行今天就是这个错义项
+p.e.	translation	n. 体育（课）（= physical education）	ECDICT 首行「排字错误」
+physical education	translation	n. 体育（课）	ECDICT「[医] 体育」
+ai	translation	abbr. 人工智能（artificial intelligence）	ECDICT「[计] 附加信息, 人工智能」
+bce	translation	abbr. 公元前（Before the Common Era）	ECDICT「化学工程学士」
+ce	translation	abbr. 公元（Common Era）	ECDICT「[计] 组件选通」
+cpc	translation	abbr. 中国共产党（Communist Party of China）	ECDICT 首行「卡片编程计算器」
+un	translation	abbr. 联合国（United Nations）	ECDICT「pron. 家伙, 东西」
+wto	translation	abbr. 世界贸易组织（World Trade Organization）	ECDICT「[计] 给操作员送信息」
+tcm	translation	abbr. 中医（Traditional Chinese Medicine）	ECDICT「[计] 网络编码调制」
+qipao	translation	n. 旗袍	ECDICT「[网络] 女士旗袍；娆洪獥；旗袍裤」
+beijing opera	translation	n. 京剧（= Peking opera）	ECDICT「[网络] 京剧；国戏；京戏」
+tian'anmen square	translation	天安门广场	ECDICT「[网络] 天安门广场；周年联欢晚会；…」
+communist party of china	translation	中国共产党	ECDICT「[网络] …」
+world trade organization	translation	世界贸易组织	ECDICT「[网络] …」
+children's day	translation	n. 儿童节（6 月 1 日）	ECDICT 释义为基督教节日
+women's day	translation	n. 妇女节（3 月 8 日）	ECDICT「女人节」
+the changjiang river	translation	长江	ECDICT「江」
+stuck	translation	a. 被卡住的，动不了的（stick 的过去式和过去分词）	上海表以形容词义列为词头；ECDICT 只有「stick 的过去式」
+wi-fi	translation	n. 无线网络（Wi-Fi）	ECDICT 为技术说明
+e-mail	word	e-mail	ECDICT display「E-MAIL」使 derive_kind 判为 proper_noun（现库如此）
+am	word	am	ECDICT 只有缩写行「AM」（display 大写、pos r:100）：经 inherit:be 进小学后页签显示带「缩写」徽章的 AM；小写 display 让 derive_kind 判为 word（评审 final F3）
+am	translation	v. 是（be 的第一人称单数现在式）	ECDICT 首行「be的单数第一人称」，第二行是「[计] 存取管理程序, 寻址方式…」
+mrs.	word	Mrs.	与 Mr. / Ms. 一致地大写；ECDICT 该 lemma 的行 display 是小写「mrs.」
+is	translation	v. 是（be 的第三人称单数现在式）	ECDICT 第二行「[计] 加下标次序, 信息系统, 国际标准, 中间系统」是计算机术语；经 inherit:be 进小学，学习卡会整段显示
+download	translation	v. 下载；n. 下载的文件	ECDICT 唯一一行「[计] 卸载, 下栽」：「卸载」义反（= uninstall）、「下栽」错字；课标三级 / 上海表初中词

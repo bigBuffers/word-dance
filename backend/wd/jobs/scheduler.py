@@ -14,8 +14,9 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
 * ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, stale ``running`` jobs, timed-out open
   ``bank_suggestions`` → ``expired`` for every user — ``consolidate.expire_stale_suggestions``);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
-* 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, one requeue of dead
-  content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
+* 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, the failed-image retry sweep
+  (``images.retry_failed_studied``: ≤ 50 studied ``failed`` words, 6 h apart, ≤ 3 per 30 days — PLAN §5.1 C7), one
+  requeue of dead content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
 * ``kv.last_tick_at``; a ``downtime`` event with ``{"from","to"}`` when the gap since the last tick exceeds 10 min.
 
 ``prefetch`` reads ``wd.ai.budget.spent_today(conn, cfg, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` (WP5).
@@ -71,6 +72,7 @@ class TickResult:
     finalized: int = 0
     consolidations: int = 0
     prefetched: int = 0
+    image_retries: int = 0  # failed-image words requeued by the nightly sweep (PLAN §5.1 C7)
     maintenance: bool = False
     gc: bool = False
     downtime: dict[str, str] | None = None
@@ -361,8 +363,23 @@ def prune_claude_logs(cfg: Any, now: datetime) -> int:
     return removed
 
 
+def retry_failed_images(conn: sqlite3.Connection, now: datetime, *, cfg: Any) -> int:
+    """The nightly failed-image retry sweep (PLAN §5.1 C7 / DESIGN §9): ``images.retry_failed_studied`` with the nightly
+    cap and priority; returns how many words were requeued. Nothing is queued while ``WD_IMAGES_ENABLED=0`` — the fetch
+    handler would skip the job and leave the word stuck at ``image_state='queued'``."""
+    if not getattr(cfg, "images_enabled", True):
+        return 0
+    from .. import images  # function-level: the images package is a sibling of jobs, not a dependency of the scheduler
+
+    word_ids = images.retry_failed_studied(conn, to_iso(now), limit=images.RETRY_NIGHTLY_LIMIT, priority=images.RETRY_NIGHTLY_PRIORITY)
+    if word_ids:
+        log.info("maintenance: requeued %d failed-image word(s) being studied", len(word_ids), extra={"event": "image_retry", "word_ids": word_ids})
+    return len(word_ids)
+
+
 def maintenance(conn: sqlite3.Connection, now: datetime, *, cfg: Any, result: TickResult) -> bool:
-    """03:30 ``WD_TZ`` once per day (``kv maintenance.last_date``)."""
+    """03:30 ``WD_TZ`` once per day (``kv maintenance.last_date``): prefetch → failed-image retries → dead requeue → log
+    pruning → PRAGMAs."""
     local = now.astimezone(zone(cfg.tz))
     if local.time() < MAINTENANCE_AT:
         return False
@@ -374,6 +391,10 @@ def maintenance(conn: sqlite3.Connection, now: datetime, *, cfg: Any, result: Ti
         result.prefetched = prefetch(conn, now, cfg=cfg)
     except Exception:
         log.exception("maintenance: prefetch failed")
+    try:
+        result.image_retries = retry_failed_images(conn, now, cfg=cfg)
+    except Exception:
+        log.exception("maintenance: failed-image retry sweep failed")
     try:
         requeued = requeue_dead_once(conn, now)
         if requeued:
@@ -520,7 +541,10 @@ def cmd_tick(args: argparse.Namespace) -> int:
     if args.once:
         sched.tick(SYSTEM_CLOCK.now_utc())
         r = sched.last_result or TickResult()
-        print(f"tick: built {len(r.built)}, published {len(r.published)}, finalized {r.finalized}, consolidations {r.consolidations}, prefetched {r.prefetched}, maintenance {r.maintenance}")
+        print(
+            f"tick: built {len(r.built)}, published {len(r.published)}, finalized {r.finalized}, consolidations {r.consolidations}, "
+            f"prefetched {r.prefetched}, image_retries {r.image_retries}, maintenance {r.maintenance}"
+        )
         return 0
     print(f"ticking every {cfg.tick_seconds} s (Ctrl-C to stop)")
     try:
@@ -558,6 +582,7 @@ __all__ = [
     "process_user",
     "prune_claude_logs",
     "push_instant",
+    "retry_failed_images",
     "register_cli",
     "requeue_dead_once",
     "run_tick",

@@ -5,6 +5,11 @@
 binary and the recorded probe state — ``wd claude-check`` is the paid probe). ``logs`` prints the in-process ring
 buffer (empty in a fresh CLI process) or, when ``WD_LOG_FILE`` is set, the tail of that file; the running service's
 lines live in ``journalctl -u word-dance``.
+
+From schema 0011 on, ``check db`` also verifies the stage-model data invariants (:data:`STAGE_INVARIANTS` plus the
+seed-version check; DESIGN §3.1, PLAN §2.1 / §6 S6): one ``invariant <name>: ok | N violation(s)`` line each, any
+violation flips the check to FAIL. They are the operator's post-migration / post-import gate (release notes
+``docs/releases/2026-11-k12-stages.md``) and the same SQL ``scripts/rehearse_migration.py`` runs on a rehearsal copy.
 """
 
 from __future__ import annotations
@@ -24,9 +29,33 @@ from . import db
 from .clock import now_iso
 from .config import ConfigError, Settings
 from .logging_setup import RING
+from .schemas import STAGE_ORDER, stage_to_index
 
 CHECK_TARGETS: tuple[str, ...] = ("db", "claude", "smtp", "providers", "all")
 SMTP_CONNECT_TIMEOUT_S = 3.0
+
+# Stage-model data invariants (PLAN §2.1 / §6 S6; stage-model SYNTHESIS §3.9, D-13 / D-22). Each query counts the rows that
+# violate one rule, so 0 means ok. They only make sense from migration 0011 on (five flags, indexes 1..5), hence
+# STAGE_INVARIANTS_FROM_VERSION. The SQL is rendered from schemas.STAGE_ORDER — the single home of the stage enum — and
+# test_diag.py pins the rendered text to the literal of PLAN §6 S6, so a change to the enum shows up there first.
+#
+# * stage_min_consistent — stage_min is the index of the lowest set flag and NULL (课标外) when no flag is set; the seed
+#   import and services/words / ecdict write both sides, this catches a hand edit or a future writer that forgets one.
+# * xs_subset_zk — the national chain is cumulative by construction (xs ⊆ zk; zk ⊄ gk is deliberate and NOT checked).
+# * stages_json_known — every code a user holds is a known stage; bank.user_settings_row falls back to the default with
+#   a `stage_fallback` warning at request time, this makes the stale row visible before a user hits it. json_each is a
+#   built-in only from SQLite 3.38 (older builds may lack the JSON functions): the query then fails and the line says
+#   `query failed` — reported, never raised, and it does not flip the check (unverifiable ≠ violated).
+_STAGE_MIN_CASE = " ".join(f"WHEN stage_{code}=1 THEN {stage_to_index(code)}" for code in STAGE_ORDER)
+STAGE_INVARIANTS: tuple[tuple[str, str], ...] = (
+    ("stage_min_consistent", f"SELECT COUNT(*) FROM words WHERE stage_min IS NOT (CASE {_STAGE_MIN_CASE} END)"),
+    ("xs_subset_zk", "SELECT COUNT(*) FROM words WHERE stage_xs = 1 AND stage_zk = 0"),
+    (
+        "stages_json_known",
+        "SELECT COUNT(*) FROM user_settings us, json_each(us.stages_json) j WHERE j.value NOT IN (" + ",".join(f"'{code}'" for code in STAGE_ORDER) + ")",
+    ),
+)
+STAGE_INVARIANTS_FROM_VERSION = 11  # 0011_primary_stage.sql: stage_xs exists, stage_min / current_stage are 1..5
 
 
 @dataclass
@@ -68,11 +97,63 @@ def check_db(cfg: Settings, db_path: Path | None = None) -> CheckResult:
         for key in ("seed_version", "last_tick_at", "worker_lease", "backup.last"):
             value = db.kv_get(conn, key)
             lines.append(f"kv.{key}: {value if value is not None else '-'}")
+        if version >= STAGE_INVARIANTS_FROM_VERSION:
+            for name, sql in STAGE_INVARIANTS:
+                line, violated = _invariant_line(conn, name, sql)
+                lines.append(line)
+                ok = ok and not violated
+            line, violated = _seed_version_line(conn, cfg)
+            lines.append(line)
+            ok = ok and not violated
         return CheckResult("db", ok, lines)
     except sqlite3.Error as e:
         return CheckResult("db", False, [*lines, f"query failed: {e}"])
     finally:
         conn.close()
+
+
+def _invariant_line(conn: sqlite3.Connection, name: str, sql: str) -> tuple[str, bool]:
+    """``invariant <name>: ok | N violation(s) | query failed (…)`` and whether it counts as a violation.
+
+    A failing query (an SQLite build without ``json_each``, a schema this build does not know) is reported in place and
+    leaves the other invariants and the check's verdict alone: ``wd check`` is a diagnostic, not a gate on the SQLite
+    version (PLAN §2.5 item 5).
+    """
+    try:
+        n = int(conn.execute(sql).fetchone()[0])
+    except sqlite3.OperationalError as e:
+        return f"invariant {name}: query failed ({e})", False
+    return (f"invariant {name}: ok", False) if n == 0 else (f"invariant {name}: {n} violation(s)", True)
+
+
+def _seed_version_line(conn: sqlite3.Connection, cfg: Settings) -> tuple[str, bool]:
+    """``invariant seed_version_matches_file`` — ``kv.seed_version`` equals the content digest of ``WD_SEED_PATH``.
+
+    The digest is :func:`wd.seed.seed_digest` (the decompressed content, what ``main.seed_check`` compares, PLAN R-9), so
+    a Mac/Linux gzip difference is not a violation while a cleared key (migration 0011) or a changed seed is: both mean
+    the next ``wd serve`` start (or ``wd import-seed``) will rewrite the vocabulary, and the release runbook wants that
+    done — and verified — while the service is stopped. A missing file is skipped, like ``seed_check`` skips it; an
+    unreadable one is a violation because ``seed_check`` would fail on it at every start — and, like ``seed_check``, this
+    catches *everything* the digest can raise, not only ``OSError``: a truncated archive is ``EOFError``, a bad header
+    ``gzip.BadGzipFile`` (an ``OSError``), but a valid header over a corrupt deflate body is ``zlib.error``, which derives
+    from ``Exception`` directly. A diagnostic that aborts ``wd check all`` with a traceback on the very file it is meant
+    to judge would be worse than useless (impl review S6-M2).
+    """
+    from .seed import seed_digest  # late import: diag is on the `wd logs` / `wd check` path, seed pulls services.words
+
+    name = "seed_version_matches_file"
+    path = Path(cfg.seed_path)
+    if not path.is_file():
+        return f"invariant {name}: skipped (seed file missing: {path})", False
+    stored = db.kv_get(conn, "seed_version")
+    try:
+        digest = seed_digest(path)
+    except Exception as e:  # noqa: BLE001 - OSError / EOFError / zlib.error …: the same net main.seed_check casts (docstring)
+        return f"invariant {name}: 1 violation(s) (cannot read {path.name}: {e})", True
+    if stored == digest:
+        return f"invariant {name}: ok", False
+    shown = f"{stored[:12]}…" if stored else "-"
+    return f"invariant {name}: 1 violation(s) (kv.seed_version {shown} ≠ file {digest[:12]}…; run `wd import-seed`)", True
 
 
 def check_claude(cfg: Settings, conn: sqlite3.Connection | None) -> CheckResult:
@@ -277,4 +358,4 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=cmd_logs)
 
 
-__all__ = ["CheckResult", "check_claude", "check_db", "check_providers", "check_smtp", "collect_stats", "register_cli", "run_checks", "tail_lines"]
+__all__ = ["STAGE_INVARIANTS", "STAGE_INVARIANTS_FROM_VERSION", "CheckResult", "check_claude", "check_db", "check_providers", "check_smtp", "collect_stats", "register_cli", "run_checks", "tail_lines"]

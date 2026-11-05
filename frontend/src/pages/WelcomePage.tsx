@@ -1,5 +1,5 @@
 // WelcomePage — `/welcome` (FRONTEND §2, DESIGN §6.2). Step 1: who am I… quick picks pre-select target stages
-// (junior-high student → zk · high-school student → zk+gk · university student → gk+cet4+cet6 · professional → cet4+cet6), main stage segmented, push time,
+// (primary pupil → xs · junior-high student → xs+zk · high-school student → zk+gk · university student → gk+cet4+cet6 · professional → cet4+cet6), main stage segmented, push time,
 // timezone (auto-detected) → POST /api/onboarding (state `screen`). Step 2: screening of up to 30 cards from
 // GET /api/screen/next?stage=auto&count=30 with known / unfamiliar / skip / peek, 5-s undo (server `restore`),
 // skip onboarding / finish → POST /api/onboarding/complete → /today. Keys 1 / 2 / S / Space go through the
@@ -27,19 +27,22 @@ import { clientEventId } from '@/utils/format';
 import '@/components/bank/bank.css';
 import './WelcomePage.css';
 
-export type Role = 'zk' | 'gk' | 'uni' | 'pro';
+export type Role = 'xs' | 'zk' | 'gk' | 'uni' | 'pro';
 
-/** Self-description → pre-selected stages and the main stage (DESIGN §6.2). */
+/** Self-description → pre-selected stages and the main stage (DESIGN §6.2): the junior-high preset includes xs, the high-school one does not (zk ⊄ gk — PLAN P8). */
 export const ROLE_PRESETS: Record<Role, { stages: Stage[]; current: Stage }> = {
-  zk: { stages: ['zk'], current: 'zk' },
+  xs: { stages: ['xs'], current: 'xs' },
+  zk: { stages: ['xs', 'zk'], current: 'zk' },
   gk: { stages: ['zk', 'gk'], current: 'gk' },
   uni: { stages: ['gk', 'cet4', 'cet6'], current: 'cet4' },
   pro: { stages: ['cet4', 'cet6'], current: 'cet4' },
 };
 
-const ROLES: readonly Role[] = ['zk', 'gk', 'uni', 'pro'];
+export const ROLES: readonly Role[] = ['xs', 'zk', 'gk', 'uni', 'pro'];
+/** Pre-selection before any role is picked — mirrors the user_settings DDL default / bank.DEFAULT_STAGES (PLAN §0, A6). */
+export const DEFAULT_PRESET: { stages: Stage[]; current: Stage } = { stages: ['xs', 'zk'], current: 'xs' };
 const SCREEN_BATCH = 30;
-const STAGE_FULL: Record<Stage, string> = { zk: zh.stages.zkFull, gk: zh.stages.gkFull, cet4: zh.stages.cet4Full, cet6: zh.stages.cet6Full };
+const STAGE_FULL: Record<Stage, string> = { xs: zh.stages.xsFull, zk: zh.stages.zkFull, gk: zh.stages.gkFull, cet4: zh.stages.cet4Full, cet6: zh.stages.cet6Full };
 
 /** Toggles a stage keeping the list non-empty and `current` inside it (canonical order). */
 export function toggleStage(stages: readonly Stage[], current: Stage, stage: Stage): { stages: Stage[]; current: Stage } {
@@ -69,8 +72,8 @@ export default function WelcomePage() {
   // ---- step 1 ----
   const detected = useMemo(() => detectTimeZone(), []);
   const [role, setRole] = useState<Role | null>(null);
-  const [stages, setStages] = useState<Stage[]>(settings?.stages.length ? settings.stages : ROLE_PRESETS.pro.stages);
-  const [current, setCurrent] = useState<Stage>(settings?.current_stage ?? ROLE_PRESETS.pro.current);
+  const [stages, setStages] = useState<Stage[]>(settings?.stages.length ? settings.stages : DEFAULT_PRESET.stages);
+  const [current, setCurrent] = useState<Stage>(settings?.current_stage ?? DEFAULT_PRESET.current);
   const [pushTime, setPushTime] = useState(settings?.push_time ?? '08:00');
   const [timezone, setTimezone] = useState(user?.onboarding_state === 'screen' && settings?.timezone ? settings.timezone : detected);
   const [zones, setZones] = useState<string[]>([]);

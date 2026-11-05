@@ -1,6 +1,8 @@
-"""images/providers/*: request shapes, legacy Wikimedia parsing (fixtures as captured), utm stripping, dedupe,
-Openverse rules (page_size 20, never the API thumbnail), licence normalisation, Retry-After, the rate gate,
-Pixabay/Pexels parsing and the chain builder."""
+"""images/providers/*: request shapes (the default chain only gained ``thumbmime`` / ``maxlag=5`` / ``page_size=10`` — PLAN
+§5.1 C8), legacy Wikimedia parsing (fixtures as captured), utm stripping, dedupe, the Commons ``maxlag`` 200-body → 503
+mapping, the kid style (``filetype:drawing`` + ``thumbmime`` as the candidate MIME, Openverse ``category=illustration``,
+Pixabay ``image_type=illustration``), Openverse rules (page_size 10, never the API thumbnail), licence normalisation,
+Retry-After, the rate gate, Pixabay/Pexels parsing and the chain builder."""
 
 from __future__ import annotations
 
@@ -58,9 +60,10 @@ def test_wikimedia_request_shape_and_user_agent(settings, wm_fixture):
         "gsrnamespace": "6",
         "gsrlimit": "10",
         "prop": "imageinfo",
-        "iiprop": "url|extmetadata|size|mime",
+        "iiprop": "url|extmetadata|size|mime|thumbmime",
         "iiurlwidth": "800",
         "format": "json",
+        "maxlag": "5",
     }
     assert "formatversion" not in params
     assert req.headers["user-agent"] == f"word-Dance/{__version__} (self-hosted vocabulary trainer; tests@example.com)"
@@ -125,6 +128,72 @@ def test_wikimedia_http_errors_become_provider_errors(settings):
     assert e.value.status is None
 
 
+def test_wikimedia_maxlag_body_becomes_a_503_provider_error(settings):
+    """MediaWiki answers maxlag with HTTP 200 and an error body (+ Retry-After): the provider maps it onto the 503 cooldown
+    path with the header's seconds, or 30 s when the header is missing (PLAN §5.1 C8)."""
+    body = {"error": {"code": "maxlag", "info": "Waiting for a database server: 6 seconds lagged.", "host": "db1", "lag": 6}, "servedby": "mw1"}
+    factory, calls = recording_client(body, status=200, headers={"Retry-After": "5"})
+    with pytest.raises(ProviderError) as e:
+        WikimediaProvider(settings, client_factory=factory, gate=base.RateGate(0)).search("apple", 10)
+    assert e.value.status == 503 and e.value.retry_after_s == 5 and "maxlag" in str(e.value) and "6 seconds lagged" in str(e.value)
+    assert calls[0].url.params["maxlag"] == "5"
+    factory, _ = recording_client(body, status=200)
+    with pytest.raises(ProviderError) as e:
+        WikimediaProvider(settings, client_factory=factory, gate=base.RateGate(0)).search("apple", 10)
+    assert e.value.status == 503 and e.value.retry_after_s == wikimedia.MAXLAG_DEFAULT_RETRY_S == 30
+    # any other error body is not a maxlag: no exception, simply no candidates (as before)
+    factory, _ = recording_client({"error": {"code": "badvalue", "info": "x"}}, status=200)
+    assert WikimediaProvider(settings, client_factory=factory, gate=base.RateGate(0)).search("apple", 10) == []
+    # get_json_with_headers hands back the headers get_json drops
+    factory, _ = recording_client({"ok": 1}, status=200, headers={"Retry-After": "9"})
+    with factory() as client:
+        data, headers = base.get_json_with_headers(client, "x", "https://example.org/")
+        assert data == {"ok": 1} and headers.get("Retry-After") == "9"
+        assert base.get_json(client, "x", "https://example.org/") == {"ok": 1}
+
+
+def test_wikimedia_kid_style_uses_drawing_and_thumbmime_as_candidate_mime(settings):
+    """The illustration round searches ``filetype:drawing``; Commons rasterises SVGs into a PNG thumb, so the candidate's
+    MIME is the ``thumbmime`` (what is downloaded), not the original's ``image/svg+xml`` — which select would hard-reject."""
+    from wd.images import select
+
+    page = {
+        "pageid": 4242,
+        "ns": 6,
+        "title": "File:Cat cartoon.svg",
+        "index": 1,
+        "imageinfo": [
+            {
+                "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ab/Cat_cartoon.svg/800px-Cat_cartoon.svg.png",
+                "thumbwidth": 800,
+                "thumbheight": 600,
+                "thumbmime": "image/png",
+                "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Cat_cartoon.svg",
+                "descriptionurl": "https://commons.wikimedia.org/wiki/File:Cat_cartoon.svg",
+                "width": 1200,
+                "height": 900,
+                "mime": "image/svg+xml",
+                "extmetadata": {"LicenseShortName": {"value": "CC0"}, "Artist": {"value": "Someone"}, "Categories": {"value": "Cats in art|SVG cats"}},
+            }
+        ],
+    }
+    factory, calls = recording_client({"query": {"pages": {"4242": page}}})
+    provider = WikimediaProvider(settings, client_factory=factory, gate=base.RateGate(0))
+    cands = provider.search("cat", 10, style="kid")
+    assert calls[0].url.params["gsrsearch"] == "cat filetype:drawing" and calls[0].url.params["iiprop"] == "url|extmetadata|size|mime|thumbmime"
+    assert len(cands) == 1 and cands[0].mime == "image/png" and cands[0].image_url.endswith("800px-Cat_cartoon.svg.png")
+    assert select.reject_reason(cands[0], style="kid") is None  # the png thumb passes the MIME gate
+    # the neutral round keeps the bitmap filter; a candidate without thumbmime falls back to mime, then to the extension
+    provider.search("cat", 10, style="neutral")
+    assert calls[1].url.params["gsrsearch"] == "cat filetype:bitmap"
+    provider.search("cat", 10)
+    assert calls[2].url.params["gsrsearch"] == "cat filetype:bitmap"
+    del page["imageinfo"][0]["thumbmime"]
+    assert wikimedia.parse_search({"query": {"pages": {"4242": page}}})[0].mime == "image/svg+xml"
+    del page["imageinfo"][0]["mime"]
+    assert wikimedia.parse_search({"query": {"pages": {"4242": page}}})[0].mime == "image/svg+xml"  # from the original's .svg extension
+
+
 def test_rate_gate_enforces_one_request_per_second():
     clock = {"t": 100.0}
     slept: list[float] = []
@@ -175,10 +244,11 @@ def test_openverse_request_shape_and_parse(settings, ov_fixture):
     cands = provider.search("apple", 10)
     req = calls[0]
     assert req.url.host == "api.openverse.org" and req.url.path == "/v1/images/"
-    assert dict(req.url.params) == {"q": "apple", "page_size": "20", "license_type": "commercial", "mature": "false"}
+    assert dict(req.url.params) == {"q": "apple", "page_size": "10", "license_type": "commercial", "mature": "false"}  # no category / orientation on the default chain
     assert "authorization" not in req.headers
     assert len(cands) == 2
     first = cands[0]
+    assert first.extra["category"] is None  # the capture has no category; select.score treats None as 0
     assert first.provider == "openverse" and first.ref == "abe939b0-9741-4d30-b63e-19b08b3baf71"
     assert first.image_url == "https://live.staticflickr.com/8035/8074168006_dd24e474ac_b.jpg"
     assert first.license == "CC BY 2.0" and first.license_url == "https://creativecommons.org/licenses/by/2.0/"
@@ -242,6 +312,27 @@ def test_openverse_falls_back_to_anonymous_when_the_token_request_fails(settings
     openverse._token_cache.update({"token": None, "expires_at": 0.0, "client_id": None})
     provider = OpenverseProvider(cfg, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)))
     assert len(provider.search("apple", 10)) == 2
+
+
+def test_openverse_page_size_follows_limit_and_category_for_kid(settings, ov_fixture):
+    """``page_size = max(1, min(limit, 20))`` (the handler asks for 10 and looks at 10); the kid round adds
+    ``category=illustration`` and the parser keeps the result category for the scoring signal (PLAN §5.1 C6/C8)."""
+    factory, calls = recording_client(ov_fixture)
+    provider = OpenverseProvider(settings, client_factory=factory)
+    provider.search("apple", 10)
+    provider.search("apple", 50)
+    provider.search("apple", 0)
+    provider.search("apple", 10, style="kid")
+    provider.search("apple", 10, style="neutral")
+    sizes = [c.url.params["page_size"] for c in calls]
+    assert sizes == ["10", "20", "1", "10", "10"]
+    assert [c.url.params.get("category") for c in calls] == [None, None, None, "illustration", None]
+    assert not hasattr(openverse, "PAGE_SIZE")
+    data = copy.deepcopy(ov_fixture)
+    data["results"][0]["category"] = "Illustration"
+    data["results"][1]["category"] = ""
+    parsed = openverse.parse_search(data)
+    assert parsed[0].extra["category"] == "illustration" and parsed[1].extra["category"] is None
 
 
 @pytest.mark.parametrize(
@@ -357,6 +448,18 @@ def test_pixabay_request_and_parse(settings):
         PixabayProvider(settings, client_factory=factory).search("apple", 10)  # no key
 
 
+def test_pixabay_image_type_follows_style(settings):
+    cfg = replace(settings, pixabay_key="k123")
+    factory, calls = recording_client(PIXABAY)
+    provider = PixabayProvider(cfg, client_factory=factory)
+    cands = provider.search("apple", 10, style="kid")
+    provider.search("apple", 10, style="neutral")
+    provider.search("apple", 10)
+    assert [c.url.params["image_type"] for c in calls] == ["illustration", "photo", "photo"]
+    assert all(c.url.params["safesearch"] == "true" for c in calls)
+    assert cands[0].extra["type"] == "photo"  # hit.type stays on the candidate for select.score's category signal
+
+
 def test_pexels_request_and_parse(settings):
     cfg = replace(settings, pexels_key="pk")
     factory, calls = recording_client(PEXELS)
@@ -369,6 +472,20 @@ def test_pexels_request_and_parse(settings):
     assert c.license == "Pexels License" and c.creator == "Mali Maeder" and c.title == "Red apple fruit" and c.width == 5184
     with pytest.raises(ProviderError):
         PexelsProvider(settings, client_factory=factory).search("apple", 5)
+    # the style keyword of interfaces.ImageProvider is accepted and ignored (no illustration filter; never in the kid round)
+    PexelsProvider(cfg, client_factory=factory).search("apple", 5, style="kid")
+    assert dict(calls[-1].url.params) == {"query": "apple", "per_page": "5", "orientation": "landscape"}
+
+
+def test_every_provider_implements_the_style_keyword(settings):
+    import inspect
+
+    from wd.images.providers import PROVIDER_CLASSES
+
+    for cls in PROVIDER_CLASSES.values():
+        param = inspect.signature(cls.search).parameters["style"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "neutral", cls
+    assert inspect.signature(ImageProvider.search).parameters["style"].default == "neutral"
 
 
 def test_build_chain_respects_order_keys_and_unknown_names(settings):

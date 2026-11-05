@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import typing
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -30,13 +31,49 @@ def test_endpoint_catalogue_covers_api_md_section_2():
 
 
 def test_stage_mapping_roundtrip():
-    assert [stage_to_index(s) for s in ("zk", "gk", "cet4", "cet6")] == [1, 2, 3, 4]
-    assert [index_to_stage(i) for i in (1, 2, 3, 4)] == ["zk", "gk", "cet4", "cet6"]
-    with pytest.raises(ValueError):
-        stage_to_index("cet8")
-    with pytest.raises(ValueError):
-        index_to_stage(5)
-    assert schemas.STAGE_NAMES_ZH == {"zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
+    assert schemas.STAGE_ORDER == ("xs", "zk", "gk", "cet4", "cet6")
+    assert [stage_to_index(s) for s in ("xs", "zk", "gk", "cet4", "cet6")] == [1, 2, 3, 4, 5]
+    assert [index_to_stage(i) for i in (1, 2, 3, 4, 5)] == ["xs", "zk", "gk", "cet4", "cet6"]
+    for bad in ("cet8", "xx", "XS", ""):
+        with pytest.raises(ValueError):
+            stage_to_index(bad)
+    for out_of_range in (0, 6, -1):
+        with pytest.raises(ValueError):
+            index_to_stage(out_of_range)
+    assert schemas.STAGE_NAMES_ZH == {"xs": "小学", "zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
+
+
+def test_stage_index_is_position_plus_one():
+    """The explicit dictionary and the tuple are two spellings of one fact (DESIGN §0.3): the position-derived code elsewhere
+    (``f"stage_{s}"`` column templates, ``_STAGE_DISTANCE``, ``StageChips``) stays right only while ``index == position + 1``.
+    ``Stage`` / ``StageIndex`` must list the same values in the same order because scripts/check_contract.py diffs them
+    against frontend/src/api/types.ts in order."""
+    assert set(schemas.STAGE_INDEX) == set(schemas.STAGE_ORDER) == set(schemas.STAGE_NAMES_ZH)
+    assert all(schemas.STAGE_INDEX[s] == schemas.STAGE_ORDER.index(s) + 1 for s in schemas.STAGE_ORDER)
+    assert list(typing.get_args(schemas.Stage)) == list(schemas.STAGE_ORDER)
+    assert list(typing.get_args(schemas.StageIndex)) == [schemas.STAGE_INDEX[s] for s in schemas.STAGE_ORDER] == [1, 2, 3, 4, 5]
+    assert all(index_to_stage(stage_to_index(s)) == s for s in schemas.STAGE_ORDER)
+
+
+def test_stage_literals_accept_xs_and_reject_unknown_codes():
+    """Every request literal that names stages (API.md §9: vocab 20, screen 31, admin prewarm) accepts the 小学 code."""
+    assert schemas.VocabQuery(stage="xs", new_only=1).stage == "xs"
+    assert schemas.ScreenNextQuery(stage="xs").stage == "xs"
+    assert schemas.PrewarmRequest(stage="xs", limit=10, max_budget_usd=1).stage == "xs"
+    assert schemas.StageInfo(stage="xs", index=1, name_zh="小学", total=0, new_only_total=0, unfamiliar=0, known=0, mastered=0, unseen=0).index == 1
+    assert schemas.OnboardingRequest(stages=["xs", "zk"], current_stage="xs", timezone="Asia/Shanghai", push_time="08:00").current_stage == "xs"
+    assert schemas.SettingsUpdateRequest(stages=["xs"], current_stage="xs").stages == ["xs"]
+    for bad in ("xx", "cet8", "XS", 1):
+        with pytest.raises(ValidationError):
+            schemas.VocabQuery(stage=bad)
+        with pytest.raises(ValidationError):
+            schemas.ScreenNextQuery(stage=bad)
+        with pytest.raises(ValidationError):
+            schemas.PrewarmRequest(stage=bad, limit=10, max_budget_usd=1)
+        with pytest.raises(ValidationError):
+            schemas.OnboardingRequest(stages=[bad], current_stage=bad, timezone="Asia/Shanghai", push_time="08:00")
+    with pytest.raises(ValidationError):
+        schemas.StageInfo(stage="xs", index=6, name_zh="小学", total=0, new_only_total=0, unfamiliar=0, known=0, mastered=0, unseen=0)
 
 
 def test_register_request_validation():
@@ -100,6 +137,20 @@ def test_suggestion_payload_serialises_from_alias():
     p = schemas.SuggestionPayload.model_validate({"from": "abandonned", "to": "abandon", "note_zh": "看起来是拼写错误", "confidence": 0.93})
     dumped = p.model_dump(exclude_none=True)
     assert dumped == {"from": "abandonned", "to": "abandon", "note_zh": "看起来是拼写错误", "confidence": 0.93}
+
+
+def test_word_brief_stage_min_spans_the_five_indexes():
+    """``WordBrief.stage_min`` is ``StageIndex | None`` (API.md §9): 5 (cet6 after the 0011 renumbering) and None (课标外) are
+    valid, the old upper bound 4 is no longer the last value and 6 is rejected."""
+    base = dict(id=1, lemma="bungalow", display="bungalow", kind="word", phonetic=None, translation_short="", stages=[], cet6_star=False, frq=None, collins=None,
+                oxford=None, difficulty=None, is_public=True, is_valid_english=None, my_state=None, content_state="none", image_state="none")
+    assert schemas.WordBrief(**base, stage_min=None).stage_min is None
+    for index in (1, 5):
+        assert schemas.WordBrief(**base, stage_min=index).stage_min == index
+    with pytest.raises(ValidationError):
+        schemas.WordBrief(**base, stage_min=6)
+    with pytest.raises(ValidationError):
+        schemas.WordBrief(**{**base, "stages": ["xx"]}, stage_min=1)
 
 
 def test_dto_shapes_match_api_md_section_9():

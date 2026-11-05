@@ -1,13 +1,25 @@
-"""``fetch_image`` job handler (DESIGN §9 pseudo-code) and the ``wd fetch-image`` / ``wd images-prune`` commands.
+"""``fetch_image`` job handler (DESIGN §9 pseudo-code) and the ``wd fetch-image`` / ``wd images-prune`` / ``wd images-retry`` commands.
 
-    fetch_image {word_id, exclude?: [str], provider?: str, query?: str}      (IoWorker, one job at a time)
-      keywords = query or content.image_keywords[:3] or [lemma]
-      for kw in keywords: for provider in chain (skip Openverse at priority ≥ 90; skip when quota.allow is False):
-          cands = provider.search(kw, 10); quota.record(provider)      (any provider failure is counted and skipped)
-          for best in select.rank(cands, kw, exclude)[:3]: img = fetch.download_and_store(best) → activate → done
+    fetch_image {word_id, exclude?: [str], provider?: str, query?: str, retry?: true}      (IoWorker, one job at a time)
+      function word (style.skip_image: dominant pos ∈ {prep, conj, det, pron, art, int, inf}) and no admin provider/query
+          → no provider request, no SVG (PLAN §5.1 C5): image_state = 'failed', result skipped "function word: card only";
+            an image that is already active (an earlier photo, an admin-requested SVG) is kept and image_state stays 'ready',
+            result skipped "function word: current image kept" — the gate never contradicts a live active_image_id
+      style = style.style_for(word, cfg)                      (kid iff the word's stage code ∈ WD_IMAGE_KID_STAGES; default: never)
+      keywords = clean_keywords(query) or clean_keywords(content.image_keywords[:3]) — the lemma's own tokens pass the
+          non-photo blocklist; an admin query dropped by the shape rule / blocklist is logged (query_ignored) and the
+          content keywords are used; [lemma] only when style.allows_bare_lemma (never for an adverb or a function word)
+      rounds = (kid, chain minus pexels), (neutral, chain)  when style is kid and no admin provider; else one round
+      for round in rounds: for kw in keywords: for provider in chain
+          (skip Openverse / Pixabay / Pexels at priority ≥ 90 — PREWARM_SKIP_PROVIDERS; skip when quota.allow is False):
+          cands = provider.search(kw, 10, style=round); quota.record(provider)   (any provider failure is counted and skipped)
+          for best in select.rank(cands, kw, exclude, allow=tokens(kw), style=round)[:3]:
+              img = fetch.download_and_store(best) → activate → done
       all failed, image still active (换一张 found nothing new) → kept, image_state = 'ready' — never an SVG over a photo
       all failed, no image → generate_svg enqueued when WD_SVG_VIA_CLAUDE=1, priority < 90 and the word is studied;
                              words.image_state = 'failed' (the template card is served; the SVG replaces it when it lands)
+      a failed word is fetched again by the retry rules (service.retry_failed_studied: nightly, ≥ 6 h apart, ≤ 3 per
+          30 days, only while studied — the job then carries retry: true, which this handler ignores)
 """
 
 from __future__ import annotations
@@ -25,10 +37,10 @@ from typing import Any, Iterable
 from .. import db
 from ..clock import SYSTEM_CLOCK, now_iso, parse_iso, to_iso
 from ..config import ConfigError, Settings, ensure_dirs
-from ..interfaces import Job, ProviderError
+from ..interfaces import ImageProvider, Job, ProviderError
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
-from . import fetch, providers, quota, select, service, store
+from . import fetch, providers, quota, select, service, store, style
 
 log = logging.getLogger("wd.images")
 
@@ -37,6 +49,12 @@ CANDIDATES_PER_SEARCH = 3
 MAX_KEYWORDS = 3
 KEYWORD_RE = re.compile(r"^[A-Za-z][A-Za-z ,'-]{1,40}$")
 COOLDOWN_STATUSES = (429, 500, 502, 503, 504)
+# Never spent at prewarm priority (≥ 90): Openverse's anonymous daily quota and the keyed providers' terms (Pixabay forbids
+# systematic mass downloads) are for words somebody is about to study, not for a speculative warm-up (PLAN §5.1 C8).
+PREWARM_SKIP_PROVIDERS: tuple[str, ...] = ("openverse", "pixabay", "pexels")
+PREWARM_PRIORITY = 90
+KID_ROUND_EXCLUDED_PROVIDERS: tuple[str, ...] = ("pexels",)  # no illustration filter
+QUERY_IGNORED_PREFIX = "query ignored (shape/blocklist)"
 
 STATUS_READY = "ready"
 STATUS_FAILED = "failed"
@@ -61,21 +79,28 @@ class FetchOutcome:
         return {k: v for k, v in asdict(self).items() if v not in (None, "")}
 
 
-def clean_keywords(values: Iterable[Any], lemma: str) -> list[str]:
-    """``image_keywords`` filtered through the shape rule and the blocklist, lower-cased, de-duplicated; ``[lemma]`` when none survive."""
-    out: list[str] = []
+def clean_keywords(values: Iterable[Any], lemma: str, *, allow_lemma: bool = True) -> tuple[list[str], list[str]]:
+    """``(kept, dropped)``: the keywords that pass the shape rule and the blocklist (lower-cased, de-duplicated, at most
+    :data:`MAX_KEYWORDS`) and the ones that did not. The lemma's own tokens are allowed through the non-photo list, so the
+    card for ``map`` may search "world map" while "bar chart" for ``apple`` is dropped (PLAN §5.1 C5). When nothing is
+    kept, ``kept`` is ``[lemma]`` if ``allow_lemma`` (``style.allows_bare_lemma``: not for adverbs and function words) else
+    ``[]`` — the caller then skips the provider rounds."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    allow = select.keyword_tokens(lemma)
     for v in values:
         if not isinstance(v, str):
             continue
         kw = " ".join(v.strip().split())
-        if not KEYWORD_RE.match(kw) or select.is_blocked(kw):
+        if not KEYWORD_RE.match(kw) or select.is_blocked(kw, allow=allow):
+            dropped.append(kw)
             continue
         kw = kw.lower()
-        if kw not in out:
-            out.append(kw)
-        if len(out) >= MAX_KEYWORDS:
-            break
-    return out or [lemma]
+        if kw not in kept and len(kept) < MAX_KEYWORDS:
+            kept.append(kw)
+    if not kept and allow_lemma:
+        kept = [lemma]
+    return kept, dropped
 
 
 def _load_content(conn: sqlite3.Connection, content_id: int | None) -> dict[str, Any] | None:
@@ -100,7 +125,88 @@ def _used_refs(conn: sqlite3.Connection, word_id: int) -> set[str]:
 
 
 def _svg_allowed(cfg: Settings, priority: int, allow_svg: bool) -> bool:
-    return bool(allow_svg and cfg.svg_via_claude and priority < 90 and cfg.ai_enabled and cfg.ai_svg_daily_budget_usd > 0)
+    return bool(allow_svg and cfg.svg_via_claude and priority < PREWARM_PRIORITY and cfg.ai_enabled and cfg.ai_svg_daily_budget_usd > 0)
+
+
+def _with_prefix(prefix: str, detail: str) -> str:
+    """``detail`` behind the ``query ignored`` prefix when there is one (``"query ignored (…); no acceptable photo …"``)."""
+    if not prefix:
+        return detail
+    return f"{prefix}; {detail}" if detail else prefix
+
+
+def search_rounds(cfg: Settings, style_: str, provider: str | None) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """The ``(style, provider names)`` rounds of one fetch (PLAN §5.1 C8): an explicit admin provider is one round in the
+    word's style; a ``kid`` word tries the illustration round over the chain without Pexels (no illustration filter) and
+    then the ordinary photo round; everything else is the single neutral round of the default chain."""
+    names: tuple[str, ...] = (provider,) if provider else tuple(cfg.image_providers)
+    if style_ == style.STYLE_KID and not provider:
+        kid_names = tuple(p for p in cfg.image_providers if p not in KID_ROUND_EXCLUDED_PROVIDERS)
+        return ((style.STYLE_KID, kid_names), (style.STYLE_NEUTRAL, names))
+    return ((style_, names),)
+
+
+def _search_round(
+    ctx: JobContext,
+    conn: sqlite3.Connection,
+    word_id: int,
+    chain: list[ImageProvider],
+    keywords: list[str],
+    *,
+    round_style: str,
+    priority: int,
+    excluded: set[str],
+    used_refs: set[str],
+    alt_zh: str | None,
+    now: str,
+) -> FetchOutcome | None:
+    """One round of the DESIGN §9 loop (every keyword × every provider in ``chain``, in that order); the ``ready`` outcome
+    of the first acceptable, downloadable candidate, or None when the round found nothing. Provider trouble is counted on
+    the provider (quota / cooldown / error) and never raises."""
+    cfg = ctx.cfg
+    for kw in keywords:
+        allow = select.keyword_tokens(kw)
+        for p in chain:
+            if int(priority) >= PREWARM_PRIORITY and p.name in PREWARM_SKIP_PROVIDERS:
+                continue  # prewarm never spends the quota-bound / keyed providers
+            blocked = quota.check(conn, p.name, cfg, now)
+            if blocked:
+                log.info("provider %s skipped (%s)", p.name, blocked, extra={"provider": p.name, "event": "provider_skipped"})
+                continue
+            try:
+                cands = p.search(kw, SEARCH_LIMIT, style=round_style)
+            except ProviderError as e:
+                quota.record(conn, p.name, now)
+                if e.status is None or e.status in COOLDOWN_STATUSES:
+                    until = quota.cooldown(conn, p.name, now, quota.cooldown_seconds(p.name, e), str(e))
+                    log.warning("provider %s failed (%s); cooldown until %s", p.name, e, until, extra={"provider": p.name, "event": "provider_cooldown"})
+                else:
+                    quota.mark_error(conn, p.name, now, str(e))
+                    log.warning("provider %s failed: %s", p.name, e, extra={"provider": p.name, "event": "provider_error"})
+                continue
+            except Exception as e:  # noqa: BLE001 — a response the parser chokes on is provider trouble, not a job crash
+                quota.record(conn, p.name, now)  # the request was made: it must count against the quota
+                quota.mark_error(conn, p.name, now, f"{e.__class__.__name__}: {e}"[:500])
+                log.exception("provider %s crashed on %r; trying the next one", p.name, kw, extra={"provider": p.name, "event": "provider_error"})
+                continue
+            quota.record(conn, p.name, now)
+            quota.mark_ok(conn, p.name, now)
+            for best in select.rank(cands, kw, excluded, used_refs=used_refs, allow=allow, style=round_style)[:CANDIDATES_PER_SEARCH]:
+                stored = fetch.download_and_store(best, cfg)
+                if stored is None or stored.sha256 in excluded:
+                    continue
+                image_id = store.activate_candidate(conn, word_id, best, stored, query=kw, alt_zh=alt_zh, score=best.extra.get("score"), now=now)
+                return FetchOutcome(
+                    STATUS_READY,
+                    image_id=image_id,
+                    provider=best.provider,
+                    ref=best.ref,
+                    query=kw,
+                    attribution=store.attribution_line(best.title, best.creator, best.license, sentence=best.extra.get("attribution") if best.provider == "openverse" else None),
+                    landing_url=best.landing_url or None,
+                    file_path=stored.file_path,
+                )
+    return None
 
 
 def fetch_for_word(
@@ -118,82 +224,70 @@ def fetch_for_word(
     """Run the DESIGN §9 chain for one word and activate the first acceptable photo. Never raises for provider trouble."""
     cfg = ctx.cfg
     now = now or ctx.now()
-    word = conn.execute(
-        "SELECT id, lemma, display, image_state, active_image_id, active_content_id FROM words WHERE id = ?",
+    row = conn.execute(
+        "SELECT id, lemma, display, kind, pos, stage_min, image_state, active_image_id, active_content_id FROM words WHERE id = ?",
         (int(word_id),),
     ).fetchone()
-    if word is None:
+    if row is None:
         return FetchOutcome(STATUS_SKIPPED, detail="word not found")
+    word: dict[str, Any] = {k: row[k] for k in row.keys()}  # a Mapping for images.style (sqlite3.Row has no .get)
     if not cfg.images_enabled:
         return FetchOutcome(STATUS_SKIPPED, detail="images disabled")
     lemma = str(word["lemma"])
+    style_ = style.style_for(word, cfg)
+    explicit = bool(provider) or bool(query and query.strip())
+    if not explicit and style.skip_image(word):
+        # PLAN §5.1 C5 / D-images-9: a preposition, conjunction, determiner … has no picture worth a request or an SVG
+        # call; the template card is the design. An admin override (provider / query) is an explicit decision and wins.
+        # An image that is already active (an admin-requested SVG, a photo fetched before the gate existed — `despite`
+        # on the live DB) is kept and the state goes back to `ready` (enqueue_fetch set `queued`), exactly like the chain
+        # tail below: `failed` beside a live active_image_id would under-count in diag and never heal, because the
+        # nightly retry skips function words (impl-review S5b F-1).
+        has_active = service.active_image_row(conn, word_id) is not None
+        store.set_image_state(conn, word_id, STATUS_READY if has_active else STATUS_FAILED, now=now)
+        return FetchOutcome(STATUS_SKIPPED, detail="function word: current image kept" if has_active else "function word: card only")
     content = _load_content(conn, word["active_content_id"])
     alt_zh = None
     if content and isinstance(content.get("image_alt_zh"), str):
         alt_zh = content["image_alt_zh"].strip()[:200] or None
+    detail_prefix = ""
+    keywords: list[str] = []
     if query and query.strip():
-        keywords = clean_keywords([query], lemma)
-    else:
-        keywords = clean_keywords((content or {}).get("image_keywords") or [], lemma)
+        keywords, dropped = clean_keywords([query], lemma, allow_lemma=False)
+        if dropped:
+            # API.md 69 stays a 202: the override is reported, not refused — the content keywords are used instead
+            log.warning("admin query ignored for word %d: %r", int(word_id), dropped[0], extra={"event": "query_ignored", "word_id": int(word_id)})
+            detail_prefix = QUERY_IGNORED_PREFIX
+    if not keywords:
+        keywords, _ = clean_keywords((content or {}).get("image_keywords") or [], lemma, allow_lemma=style.allows_bare_lemma(word))
 
     if provider == "claude_svg":
         if not cfg.ai_enabled:
-            return FetchOutcome(STATUS_SKIPPED, detail="AI disabled; no SVG job")
+            return FetchOutcome(STATUS_SKIPPED, detail=_with_prefix(detail_prefix, "AI disabled; no SVG job"))
         # An explicit request (API.md 69, `wd fetch-image --provider claude_svg`) draws even over an active photo, so it
         # carries `requested` on its own live key: folded into a fallback `svg:<id>` job it would keep that job's payload
         # (the dedupe UPSERT never rewrites payload_json) and the handler would skip it as soon as a photo is active.
         svg_job = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id), "requested": True}, dedupe_key=f"svg:{int(word_id)}:req", priority=int(priority), now=now)
-        return FetchOutcome(STATUS_SVG_QUEUED, svg_job_id=svg_job, detail="generate_svg enqueued on request")
+        return FetchOutcome(STATUS_SVG_QUEUED, svg_job_id=svg_job, detail=_with_prefix(detail_prefix, "generate_svg enqueued on request"))
 
-    names: tuple[str, ...] = (provider,) if provider else tuple(cfg.image_providers)
-    try:
-        chain = providers.build_chain(cfg, names)
-    except ValueError as e:
-        return FetchOutcome(STATUS_SKIPPED, detail=str(e))
     excluded = {str(x) for x in exclude if x} | set(service.exclude_for(conn, word_id, statuses=("rejected",)))
     used_refs = _used_refs(conn, word_id)
-
-    for kw in keywords:
-        for p in chain:
-            if int(priority) >= 90 and p.name == "openverse":
-                continue  # prewarm never spends Openverse quota
-            blocked = quota.check(conn, p.name, cfg, now)
-            if blocked:
-                log.info("provider %s skipped (%s)", p.name, blocked, extra={"provider": p.name, "event": "provider_skipped"})
-                continue
+    if keywords:  # an adverb without a usable content keyword searches nothing (no bare lemma) and goes straight to the SVG / card rule
+        for round_style, names in search_rounds(cfg, style_, provider):
+            if not names:
+                continue  # a kid round over a Pexels-only chain: build_chain(cfg, ()) would fall back to the whole default chain
             try:
-                cands = p.search(kw, SEARCH_LIMIT)
-            except ProviderError as e:
-                quota.record(conn, p.name, now)
-                if e.status is None or e.status in COOLDOWN_STATUSES:
-                    until = quota.cooldown(conn, p.name, now, quota.cooldown_seconds(p.name, e), str(e))
-                    log.warning("provider %s failed (%s); cooldown until %s", p.name, e, until, extra={"provider": p.name, "event": "provider_cooldown"})
-                else:
-                    quota.mark_error(conn, p.name, now, str(e))
-                    log.warning("provider %s failed: %s", p.name, e, extra={"provider": p.name, "event": "provider_error"})
-                continue
-            except Exception as e:  # noqa: BLE001 — a response the parser chokes on is provider trouble, not a job crash
-                quota.record(conn, p.name, now)  # the request was made: it must count against the quota
-                quota.mark_error(conn, p.name, now, f"{e.__class__.__name__}: {e}"[:500])
-                log.exception("provider %s crashed on %r; trying the next one", p.name, kw, extra={"provider": p.name, "event": "provider_error"})
-                continue
-            quota.record(conn, p.name, now)
-            quota.mark_ok(conn, p.name, now)
-            for best in select.rank(cands, kw, excluded, used_refs=used_refs)[:CANDIDATES_PER_SEARCH]:
-                stored = fetch.download_and_store(best, cfg)
-                if stored is None or stored.sha256 in excluded:
-                    continue
-                image_id = store.activate_candidate(conn, word_id, best, stored, query=kw, alt_zh=alt_zh, score=best.extra.get("score"), now=now)
-                return FetchOutcome(
-                    STATUS_READY,
-                    image_id=image_id,
-                    provider=best.provider,
-                    ref=best.ref,
-                    query=kw,
-                    attribution=store.attribution_line(best.title, best.creator, best.license, sentence=best.extra.get("attribution") if best.provider == "openverse" else None),
-                    landing_url=best.landing_url or None,
-                    file_path=stored.file_path,
-                )
+                chain = providers.build_chain(cfg, names)
+            except ValueError as e:
+                return FetchOutcome(STATUS_SKIPPED, detail=_with_prefix(detail_prefix, str(e)))
+            outcome = _search_round(
+                ctx, conn, word_id, chain, keywords, round_style=round_style, priority=int(priority), excluded=excluded, used_refs=used_refs, alt_zh=alt_zh, now=now
+            )
+            if outcome is not None:
+                outcome.detail = _with_prefix(detail_prefix, outcome.detail)
+                return outcome
+    else:
+        log.info("word %d: no usable image keyword and no bare-lemma search (pos %s); no provider request", int(word_id), word["pos"], extra={"event": "image_no_keywords"})
 
     # DESIGN §9 / §0.1 row 7: the Claude SVG stands in only when NO acceptable photo exists. A 换一张 that finds nothing
     # new keeps the current image — it is never traded for a drawing, and the SVG sub-cap is not spent on a word that
@@ -203,7 +297,9 @@ def fetch_for_word(
     if not has_active and _svg_allowed(cfg, int(priority), allow_svg) and service.word_is_studied(conn, word_id, now):
         svg_job_id = ctx.enqueue(conn, "generate_svg", {"word_id": int(word_id)}, dedupe_key=f"svg:{int(word_id)}", priority=int(priority), now=now)
     store.set_image_state(conn, word_id, STATUS_READY if has_active else STATUS_FAILED, now=now)
-    return FetchOutcome(STATUS_FAILED, svg_job_id=svg_job_id, detail="no acceptable photo from any provider" + (" (current image kept)" if has_active else ""))
+    return FetchOutcome(
+        STATUS_FAILED, svg_job_id=svg_job_id, detail=_with_prefix(detail_prefix, "no acceptable photo from any provider" + (" (current image kept)" if has_active else ""))
+    )
 
 
 @register("fetch_image")
@@ -226,7 +322,13 @@ def handle_fetch_image(ctx: JobContext, jobs: list[Job]) -> None:
                 outcome = fetch_for_word(ctx, conn, word_id, exclude=exclude, provider=provider, query=query, priority=job.priority, now=ctx.now())
             except Exception as e:  # noqa: BLE001 — a provider/DB hiccup must not take the IoWorker down
                 log.exception("fetch_image job %d crashed", job.id, extra={"job_id": job.id, "job_type": job.type})
-                queue.fail(conn, job.id, f"{e.__class__.__name__}: {e}"[:1000], now=ctx.now())
+                if queue.fail(conn, job.id, f"{e.__class__.__name__}: {e}"[:1000], now=ctx.now()) == "dead":
+                    # enqueue_fetch set `queued`; a job that dies on its last attempt must not leave the word there for ever —
+                    # nothing else resets it (the nightly retry selects `failed`, requeue_dead_once revives only content/lookup
+                    # jobs). Like ai.svg.mark_failed: `failed` so the C7 retry rules pick the word up, or back to `ready` when
+                    # an image is active (PLAN §5.1 C7; impl-review final M-3)
+                    has_active = service.active_image_row(conn, word_id) is not None
+                    store.set_image_state(conn, word_id, STATUS_READY if has_active else STATUS_FAILED, now=ctx.now())
                 continue
             queue.finish(conn, job.id, outcome.as_result(), now=ctx.now())
             log.info(
@@ -290,7 +392,8 @@ def cmd_fetch_image(args: argparse.Namespace) -> int:
             print(f"detail: {outcome.detail}")
         if outcome.svg_job_id:
             print(f"generate_svg job: {outcome.svg_job_id}")
-        return 0 if outcome.status == STATUS_SVG_QUEUED else 1
+        # exit 1 only when the chain was run and found nothing; a skip (function word, images disabled) is the design's answer
+        return 0 if outcome.status in (STATUS_SVG_QUEUED, STATUS_SKIPPED) else 1
     finally:
         conn.close()
 
@@ -346,12 +449,38 @@ def cmd_images_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_images_retry(args: argparse.Namespace) -> int:
+    """``wd images-retry [--limit N] [--dry-run]``: the nightly failed-image sweep by hand (DEPLOY §9); prints the words."""
+    cfg = _settings()
+    if cfg is None:
+        return 2
+    ensure_dirs(cfg)
+    if not cfg.images_enabled:
+        print("images-retry: images are disabled (WD_IMAGES_ENABLED=0); nothing to requeue")
+        return 0
+    conn = db.connect(cfg.db_path)
+    try:
+        word_ids = service.retry_failed_studied(conn, now_iso(), limit=args.limit, priority=service.RETRY_NIGHTLY_PRIORITY, dry_run=args.dry_run)
+        lemma_of = {int(r[0]): str(r[1]) for r in conn.execute(f"SELECT id, lemma FROM words WHERE id IN ({','.join('?' * len(word_ids))})", word_ids)} if word_ids else {}
+        lemmas = [lemma_of.get(w, str(w)) for w in word_ids]  # in sweep order (oldest failure first), like the nightly run
+    finally:
+        conn.close()
+    verb = "would requeue" if args.dry_run else "requeued"
+    print(
+        f"images-retry: {verb} {len(word_ids)} failed-image word(s) being studied (limit {args.limit}; "
+        f">= {service.RETRY_MIN_AGE_H} h since the last attempt, <= {service.RETRY_MAX_AUTO_30D} automatic retries per 30 days, function words excluded)"
+    )
+    for lemma in lemmas:
+        print(f"  {lemma}")
+    return 0
+
+
 def register_cli(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("fetch-image", help="fetch a photo for one word now and print the attribution (manual check; DEPLOY §9)")
     p.add_argument("word", help="lemma or word id")
-    p.add_argument("--provider", choices=[*providers.PHOTO_PROVIDERS, "claude_svg"], default=None, help="use only this provider")
+    p.add_argument("--provider", choices=[*providers.PHOTO_PROVIDERS, "claude_svg"], default=None, help="use only this provider (also bypasses the function-word gate)")
     p.add_argument("--query", default=None, help="search keyword instead of the content image_keywords / lemma")
-    p.add_argument("--priority", type=int, default=10, help="job priority semantics (>= 90 skips Openverse); default 10")
+    p.add_argument("--priority", type=int, default=10, help=f"job priority semantics (>= {PREWARM_PRIORITY} skips {', '.join(PREWARM_SKIP_PROVIDERS)}); default 10")
     p.add_argument("--no-svg", action="store_true", help="never enqueue a generate_svg job when every provider fails")
     p.set_defaults(func=cmd_fetch_image)
 
@@ -359,3 +488,8 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--unused-days", type=int, required=True, help="age threshold in days")
     p.add_argument("--dry-run", action="store_true", help="report only")
     p.set_defaults(func=cmd_images_prune)
+
+    p = sub.add_parser("images-retry", help="requeue fetch_image for failed-image words somebody is studying (the nightly 03:30 sweep by hand)")
+    p.add_argument("--limit", type=int, default=service.RETRY_NIGHTLY_LIMIT, help=f"at most N words per run (default {service.RETRY_NIGHTLY_LIMIT})")
+    p.add_argument("--dry-run", action="store_true", help="list the words without queueing anything")
+    p.set_defaults(func=cmd_images_retry)

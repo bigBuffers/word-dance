@@ -75,7 +75,10 @@ def vocab_filters(me: dict[str, Any], q: schemas.VocabQuery, *, with_letter_and_
 _ORDER = {
     "freq": "(w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
     "alpha": "w.lemma",
-    "difficulty": "COALESCE(w.difficulty, w.stage_min, 5), (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
+    # `difficulty` is Claude's unchanged 1–5 scale (1 = 初中 basic … 5 beyond CET-6), i.e. one below the 1..5 stage index
+    # since 小学 became index 1 — `+ 1` puts it onto the stage_min axis; 6 sorts words beyond CET-6 / outside every list
+    # last (API.md 20, PLAN R-2: the scale is not widened, the sort key is shifted)
+    "difficulty": "COALESCE(w.difficulty + 1, w.stage_min, 6), (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
 }
 _FROM = "FROM words w LEFT JOIN user_words uw ON uw.word_id = w.id AND uw.user_id = :me"
 

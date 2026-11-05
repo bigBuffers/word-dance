@@ -12,7 +12,7 @@ const brief = (id: number, display: string, translation = ''): WordBrief => ({
   phonetic: null,
   translation_short: translation,
   stages: ['cet4'],
-  stage_min: 3,
+  stage_min: 4,
   cet6_star: false,
   frq: 100,
   collins: null,

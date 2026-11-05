@@ -92,7 +92,7 @@ def test_lookup_preview_shapes(client: TestClient, settings, alice):
     b = client.get("/api/lookup", params={"q": "lookup"}).json()
     assert b["valid"] is True and b["via"] == "none"
     assert client.get("/api/lookup").status_code == 400
-    assert q1(settings, "SELECT COUNT(*) FROM words") == 60 and q1(settings, "SELECT COUNT(*) FROM jobs") == 0  # nothing created
+    assert q1(settings, "SELECT COUNT(*) FROM words") == 62 and q1(settings, "SELECT COUNT(*) FROM jobs") == 0  # nothing created (62 = mini seed v2 records, PLAN §6 S2)
     client.post(f"/api/words/{word_id(settings, 'go')}/mark", json={"action": "unfamiliar"})
     assert client.get("/api/lookup", params={"q": "went"}).json()["mine"]["state"] == "new"
 

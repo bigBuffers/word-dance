@@ -5,7 +5,7 @@ SPA fallback, ``/assets`` immutable), one pure-ASGI middleware (``X-Request-Id``
 ``Cache-Control: no-store`` on ``/api``, body limit ``WD_MAX_BODY_BYTES``, the API.md §1 CSRF rule, one JSON
 log line per request) and the lifespan:
 
-    migrate (with the pre-migrate snapshot hook) → seed import when kv.seed_version ≠ sha256(WD_SEED_PATH)
+    migrate (with the pre-migrate snapshot hook) → seed import when kv.seed_version ≠ content sha256 of WD_SEED_PATH (never fatal)
     (warn-and-continue when the file is missing) → kv.public_url_guess → registry.load_handlers() → take
     kv.worker_lease and start the Claude worker(s), the I/O worker and the scheduler when WD_WORKER_ENABLED.
 
@@ -15,8 +15,8 @@ It refuses to run under more than one uvicorn worker (the single-process invaria
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import html
+import json
 import logging
 import os
 import socket
@@ -37,7 +37,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__, db, security
-from .clock import Clock, SystemClock
+from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
 from .delivery.mailer import mailer_from_settings
 from .deps import SESSION_COOKIE, csrf_violation
@@ -65,7 +65,7 @@ from .routers import (
     vocab,
     words,
 )
-from .seed import import_seed
+from .seed import import_seed, seed_digest
 
 log = logging.getLogger("wd.main")
 http_log = logging.getLogger("wd.http")
@@ -273,14 +273,6 @@ def _mount_spa(app: FastAPI, cfg: Settings) -> None:
 
 
 # -------------------------------------------------------------------------------------- startup
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def first_non_loopback_ipv4() -> str | None:
     """Python equivalent of ``hostname -I | awk '{print $1}'`` (DESIGN §6.5); None when the host has none."""
     try:
@@ -305,18 +297,33 @@ def first_non_loopback_ipv4() -> str | None:
 
 
 def seed_check(conn, cfg: Settings) -> None:
-    """Import the seed when ``kv.seed_version`` differs from the sha256 of ``WD_SEED_PATH`` (warn-and-continue otherwise)."""
+    """Import the seed when ``kv.seed_version`` differs from the content sha256 of ``WD_SEED_PATH``; never fails startup.
+
+    The comparison uses :func:`wd.seed.seed_digest` (the decompressed content, PLAN R-9), so a seed re-packed by another
+    gzip implementation does not trigger a re-import, while migration 0011's ``DELETE FROM kv WHERE key='seed_version'``
+    still forces one. A corrupt or incompatible seed must not take the service down (WORD_LIBRARY_CURATION §1.2: a
+    failing import used to put ``wd serve`` into a restart loop): every exception is logged with its traceback, recorded
+    as ``system_events('seed_import_failed')`` for the admin page, and startup continues with the vocabulary already in
+    the database. ``import_seed`` rolled its own transaction back, so ``kv.seed_version`` is unchanged and the next start
+    retries.
+    """
     path = cfg.seed_path
     if not path.is_file():
         log.warning("seed file %s does not exist; skipping the seed check (set WD_SEED_PATH or run `wd import-seed --file`)", path)
         return
-    digest = sha256_file(path)
-    if db.kv_get(conn, "seed_version") == digest:
-        return
-    log.info("seed version changed; importing %s", path, extra={"event": "seed_import"})
-    import_seed(conn, str(path))
-    if db.kv_get(conn, "seed_version") != digest:  # the importer records it (WP1); be defensive
-        db.kv_set(conn, "seed_version", digest)
+    try:
+        digest = seed_digest(path)
+        if db.kv_get(conn, "seed_version") == digest:
+            return
+        log.info("seed version changed; importing %s", path, extra={"event": "seed_import"})
+        import_seed(conn, str(path))
+    except Exception as e:  # noqa: BLE001 - a bad seed must not take the service down (WORD_LIBRARY_CURATION §1.2, PLAN R-9)
+        log.exception("seed import failed; continuing with the current vocabulary", extra={"event": "seed_import_failed"})
+        with db.maybe_tx(conn):
+            conn.execute(
+                "INSERT INTO system_events(kind, detail_json, created_at) VALUES ('seed_import_failed', ?, ?)",
+                (json.dumps({"file": path.name, "error": f"{type(e).__name__}: {e}"[:500]}), now_iso()),
+            )
 
 
 class LeaseWaiter(threading.Thread):

@@ -82,8 +82,11 @@ EXPORT_COLUMNS: tuple[str, ...] = (
 
 ATTENTION_INVALID_MSG = "未识别为英文单词"  # DESIGN §5.2 step 4: an exact hit on a word Claude already rejected
 DEFAULT_TIMEZONE = "Asia/Shanghai"
-DEFAULT_STAGES: tuple[str, ...] = ("cet4", "cet6")
-DEFAULT_CURRENT_STAGE = 3
+# The K-12 defaults of a settings row that does not exist yet — the same values as the user_settings DDL defaults
+# (0011_primary_stage.sql: stages_json '["xs","zk"]', current_stage 1 = stage_to_index("xs")); test_bank_defaults binds the
+# two so they cannot drift apart (PLAN §0 / SM D-4: what a child who taps "next" on the welcome page without choosing gets).
+DEFAULT_STAGES: tuple[str, ...] = ("xs", "zk")
+DEFAULT_CURRENT_STAGE = 1  # = schemas.stage_to_index("xs")
 
 # DESIGN §4 "Context → origin" table (a row records how it FIRST entered the bank)
 CONTEXT_ORIGIN: dict[str, str] = {
@@ -174,12 +177,46 @@ def user_settings_row(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
     }
     if row:
         base.update(row)
-    try:
-        stages = json.loads(base.get("stages_json") or "[]")
-    except ValueError:
-        stages = []
-    base["stages"] = [s for s in stages if s in words.STAGES] or list(DEFAULT_STAGES)
+    base["stages"] = known_stages(base.get("stages_json"), user_id=int(user_id))
     return base
+
+
+def known_stages(stages_json: Any, *, user_id: int) -> list[str]:
+    """The stage codes of a stored ``user_settings.stages_json`` this build knows (``words.STAGES`` = ``schemas.STAGE_ORDER``),
+    in stored order; :data:`DEFAULT_STAGES` when none is known.
+
+    A stored row that names no known stage code (a stage retired by a later schema, an older server reading a row a newer
+    one wrote, a hand-edited value) falls back to the defaults, but says so — silently dropping codes is how a mislabelled
+    stage goes unnoticed (PLAN R-1 / SM D-13 ③; PLAN §2.1). The one helper behind :func:`user_settings_row` (the study,
+    screening and recommendation paths) and ``security.settings_row_to_dto`` (``GET /api/auth/me`` / ``GET /api/settings``),
+    so the SPA boots on exactly the stages the server studies with instead of a 500 (impl-review final F2).
+    """
+    try:
+        stages = json.loads(stages_json or "[]")
+    except (TypeError, ValueError):
+        stages = []
+    known = [s for s in stages if s in words.STAGES] if isinstance(stages, list) else []
+    if not known:
+        log.warning(
+            "stage_fallback: user %s stages_json %r has no known stage code; using %r",
+            int(user_id),
+            stages_json,
+            list(DEFAULT_STAGES),
+            extra={"event": "stage_fallback", "user_id": int(user_id)},
+        )
+    return known or list(DEFAULT_STAGES)
+
+
+def current_stage_index(settings_row: Mapping[str, Any]) -> int:
+    """The 主攻阶段 of a settings row as its 1..5 column index (``user_settings.current_stage``, API.md §9.1).
+
+    ``None`` / a missing key → :data:`DEFAULT_CURRENT_STAGE`. Written as an explicit ``is None`` test rather than
+    ``int(x or DEFAULT)`` on purpose: no stage index is 0 today, but a falsy index must never be silently replaced by the
+    default should the numbering ever change again (PLAN R-1 / SM D-16). screen.py and batches.py call this for the
+    ``_STAGE_DISTANCE`` ordering.
+    """
+    cur = settings_row.get("current_stage")
+    return DEFAULT_CURRENT_STAGE if cur is None else int(cur)
 
 
 def user_timezone(conn: sqlite3.Connection, user_id: int) -> str:

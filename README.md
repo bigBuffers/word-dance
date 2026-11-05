@@ -1,12 +1,12 @@
 # word-Dance
 
-**word-Dance** 是一款面向中国学习者（学生与职场人士）的英语单词记忆 Web 应用。它内置初中、高中、大学英语四级、六级的全部词汇；把不认识的单词标为「不熟悉」即可进入个人**生词库**；后端借助 **Claude Code** 整理生词库、生成地道例句，并按每个人的设置**每日推送**一组生词，搭配配图与发音辅助记忆。
+**word-Dance** 是一款面向中国学习者（学生与职场人士）的英语单词记忆 Web 应用。它内置小学（义务教育课标二级词汇）、初中、高中、大学英语四级、六级的全部官方词表词汇；把不认识的单词标为「不熟悉」即可进入个人**生词库**；后端借助 **Claude Code** 整理生词库、生成地道例句，并按每个人的设置**每日推送**一组生词，搭配配图与发音辅助记忆。
 
-> **English summary.** word-Dance is a self-hosted English-vocabulary trainer for Chinese learners (UI in Simplified Chinese). It ships the complete junior-high, senior-high, CET-4 and CET-6 word lists (9,162 headwords derived from ECDICT), lets each user mark words as unfamiliar to build a personal word bank, uses Claude Code (the headless `claude` CLI) to consolidate that bank and to generate idiomatic example sentences, and pushes a daily spaced-repetition batch of words, each with an attributed picture, on the user's own schedule. One Python process (FastAPI + SQLite + scheduler + job worker) serves a React single-page app and runs as a systemd unit on Ubuntu.
+> **English summary.** word-Dance is a self-hosted English-vocabulary trainer for Chinese learners (UI in Simplified Chinese). It ships the complete primary-school (MOE 2022 Level 2), junior-high (MOE 2022 Level 3 + the Shanghai 2020 list), senior-high (MOE 2020/2025 revisions) and CET-4 / CET-6 word lists (head-word counts in `data/seed/stats.json`; dictionary fields from ECDICT), lets each user mark words as unfamiliar to build a personal word bank, uses Claude Code (the headless `claude` CLI) to consolidate that bank and to generate idiomatic example sentences, and pushes a daily spaced-repetition batch of words, each with an attributed picture, on the user's own schedule. One Python process (FastAPI + SQLite + scheduler + job worker) serves a React single-page app and runs as a systemd unit on Ubuntu.
 
 ## 功能概览
 
-- **词库**：初中 / 高中 / 四级 / 六级全部词汇（9,162 词），按阶段浏览，支持 A–Z 索引、按前缀或中文释义搜索、只看本阶段新增的词。
+- **词库**：小学 / 初中 / 高中 / 四级 / 六级全部官方词表词汇（词数见 `data/seed/stats.json`），按阶段浏览，支持 A–Z 索引、按前缀或中文释义搜索、只看本阶段新增的词；掉出所有官方词表的「课标外」词只在「全部」页签与搜索中出现。
 - **生词库**：在任何列表或卡片上把单词标为「不熟悉」即进入个人生词库；也可随时**自添生词**（工作、阅读中遇到的任何英文词，支持批量粘贴和导入）。
 - **筛词与推荐词**：快速判断「认识 / 不熟悉」，系统据此了解你的水平，并在每日推送中附上几张推荐词卡片。
 - **Claude Code 整理**：后端以无头方式调用 `claude` CLI，校验并规范化自添生词（词形还原、拼写提示、合并重复），夜间整理生词库并把结果放进「整理建议」收件箱，由你决定是否采纳。
@@ -75,8 +75,8 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 |---|---|
 | `backend/` | FastAPI 后端：`wd` 包（API 路由、服务层、SQLite 迁移、任务队列与调度、Claude 与图片管线、备份、`wd` 命令行）及 pytest 测试 |
 | `frontend/` | React + TypeScript 单页应用（Vite）；构建产物由后端直接提供——开发时为 `frontend/dist`，安装后由 `deploy/install.sh` 构建到数据目录的版本化快照 `frontend-releases/<sha>` 并以符号链接 `frontend` 原子发布，仓库内的构建不会影响线上页面 |
-| `data/` | 随仓库分发的压缩词汇种子 `seed/vocab.jsonl.gz`（9,162 词）、统计 `seed/stats.json`、数据来源说明与 ECDICT 许可证文本 |
-| `scripts/` | `build_seed.py`（从 ECDICT 与大纲词表重建种子）、`smoke.py`（端到端冒烟测试）、`dev.sh`（开发服务器） |
+| `data/` | 官方词表词头清单与构建器元数据 `lists/`（来源说明、`manifest.json`、别名表、人工释义表、校验和）；随仓库分发的压缩词汇种子 `seed/vocab.jsonl.gz`（记录数与各阶段词数见 `seed/stats.json`）、与上一版的差异 `seed/DIFF.md`、数据来源说明与 ECDICT 许可证文本 |
+| `scripts/` | `build_seed.py` / `seed_diff.py`（`backend/wd/seedbuild` 的入口：从 ECDICT 与 `data/lists/` 官方词表重建种子并生成差异报告，`make seed`）、`pack_seed.sh`、`rehearse_migration.py`（在数据库拷贝上排练待办迁移并核对结果）、`check_contract.py`、`smoke.py`（端到端冒烟测试）、`dev.sh`（开发服务器） |
 | `deploy/` | `install.sh`、`fetch_ecdict.sh`、systemd 单元（服务 + 每夜备份定时器）、`env.example`、Caddy / nginx 示例配置 |
 | `docs/` | 设计与契约文档（见下）、运维手册与手工验收清单 |
 | `Makefile` | 开发与运维入口（`make help`） |
@@ -97,10 +97,11 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 | [`docs/ops.md`](docs/ops.md) | 运维手册：日常检查、备份与恢复、升级与回滚、配置修改、故障处理表 |
 | [`docs/qa.md`](docs/qa.md) | 手工验收索引：部署验收、真实 Claude 验收、推送渠道检查；链接前端 / 学习流程清单 `qa-frontend.md`、`qa-study.md` |
 | [`docs/TASKS.md`](docs/TASKS.md) · [`docs/P0_STATUS.md`](docs/P0_STATUS.md) | 实现工作包（文件归属、依赖关系、验收标准）与 Phase 0 验证记录 |
+| [`docs/releases/`](docs/releases/) | 发布说明，每次需要停机迁移的发布一份：[`2026-11-k12-stages.md`](docs/releases/2026-11-k12-stages.md)——小学阶段与官方词表、阶段重编号、配图一期的变更、上线步骤、回滚与假设清单 |
 
 ## 数据来源与许可
 
-- **词汇种子** [`data/seed/vocab.jsonl.gz`](data/seed/vocab.jsonl.gz)（9,162 词；按阶段累计：初中 2,099 · 高中 3,829 · 四级 4,722 · 六级 7,671）由 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT 许可，全文见 [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE)）派生：音标、释义、词频与词形变化均来自 ECDICT；各阶段归属由 ECDICT 的考试标签与 [mahavivo/english-wordlists](https://github.com/mahavivo/english-wordlists) 整理的中考 / 高考 / 四六级大纲词表共同决定（仅使用「某词是否在某词表中」这一事实，不分发任何词表文件）。重建方法：`make seed`（`scripts/build_seed.py`）；字段说明见 [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md)。
+- **词汇种子** [`data/seed/vocab.jsonl.gz`](data/seed/vocab.jsonl.gz)（记录数与各阶段词数见 [`data/seed/stats.json`](data/seed/stats.json)）：音标、释义、词频与词形变化来自 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT 许可，全文见 [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE)）；小学 / 初中 / 高中的归属只取自官方文件的**词头**——教育部《义务教育英语课程标准（2022 年版）》附录 3 二级、三级词汇表与附表，上海市教育考试院 2020 年初中英语词汇表（含词组），《普通高中英语课程标准》2020 年修订与 2025 年修订附录 2 词汇表（词头清单、来源、校验值与解析规则见 [`data/lists/README.md`](data/lists/README.md)；原件未声明许可，本仓库不收录其释义、音标与版式）；四级 / 六级归属沿用 ECDICT 的考试标签与 [mahavivo/english-wordlists](https://github.com/mahavivo/english-wordlists) 的四六级词表（可选输入，仅使用「某词是否在某词表中」这一事实，不分发词表文件）。重建方法：`make seed`（`backend/wd/seedbuild/`，入口 `scripts/build_seed.py`）；字段与来源令牌说明见 [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md)。
 - **配图** 来自 Wikimedia Commons 与 Openverse（仅接受 CC0 / 公有领域 / CC BY / CC BY-SA），每张图片下方显示标题、作者、许可证并链接到来源页；AI 示意图与系统生成卡片不含第三方素材。
 - **例句、搭配与助记** 由 Claude（Claude Code CLI）生成，界面有「例句由 AI 生成」提示；Claude Code 需由运维者自行安装并登录，不随本仓库分发。
 

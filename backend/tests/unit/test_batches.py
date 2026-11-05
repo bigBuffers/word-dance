@@ -69,7 +69,9 @@ def count(conn, sql, params=()) -> int:
 
 @pytest.fixture
 def user(seeded):
-    return make_user(seeded)
+    # the K-12 DDL defaults (0011: xs+zk, 主攻 xs) would pick 小学 words as 推荐词; these ordering tests pin the CET-4 learner they
+    # were written for explicitly (stage index 4 = cet4 since the renumbering)
+    return make_user(seeded, stages_json='["cet4","cet6"]', current_stage=4)
 
 
 # ------------------------------------------------------------------------------------- pure ordering
@@ -124,7 +126,7 @@ def test_build_batch_caps_ordering_and_counts(seeded, user):
     screens = [r["lemma"] for r in rows if r["kind"] == "screen"]
     assert reviews == ["bank", "apple"]  # most overdue first, capped at 2
     assert news == ["water", "happy", "glass"]  # stubborn, then priority 100, then oldest added_at
-    assert screens == ["absolutely", "axis"]  # 主攻阶段 cet4 (stage_min 3) by frequency
+    assert screens == ["absolutely", "axis"]  # 主攻阶段 cet4 (stage_min 4) by frequency
     assert [r["kind"] for r in rows][:5] == ["review", "new", "review", "new", "new"]  # k = ceil(2/3) = 1 → R N R N, then the rest
     assert [r["position"] for r in rows] == list(range(len(rows)))
     assert all(r["user_word_id"] is not None for r in rows if r["kind"] != "screen") and all(r["user_word_id"] is None for r in rows if r["kind"] == "screen")

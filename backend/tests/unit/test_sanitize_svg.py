@@ -172,3 +172,100 @@ def test_comments_and_processing_instructions_vanish():
     svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!-- a comment --><?pi x?><rect width="1" height="1"/></svg>'
     out = s.clean(svg)
     assert "<!--" not in out and "<?" not in out and tags(out) == ["svg", "rect"]
+
+
+# ---------------------------------------------------------------------------- S5 (PLAN §5.1 C3): repair, no-text mode, label
+def test_bare_ampersand_is_repaired_before_parse():
+    """4 of 34 live Claude calls were rejected over a bare `&` (SYNTHESIS §3.1.4): the five XML entities and numeric
+    references pass untouched, every other `&` — in text, in attribute values, even an HTML name such as `&nbsp;` — is
+    rewritten to `&amp;` so the drawing survives the parse instead of leaving the learner with the template card."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><defs><linearGradient id="a&b"><stop offset="0"/></linearGradient></defs>'
+        '<title>A & B</title><desc>Tom &amp; Jerry &#38; co &lt;3 &nbsp; &#x26;</desc><rect width="1" height="1" fill="url(#a&b)" stroke="#000"/></svg>'
+    )
+    out = s.clean(svg)
+    assert "<title>A &amp; B</title>" in out
+    assert "<desc>Tom &amp; Jerry &amp; co &lt;3 &amp;nbsp; &amp;</desc>" in out  # no double escaping; &nbsp; is kept as literal text
+    assert '<linearGradient id="a&amp;b">' in out  # the attribute value survives, re-escaped
+    assert "url(" not in out and 'stroke="#000"' in out  # the document passes; `#a&b` is not a valid local id, so that paint reference alone is dropped
+    root = ET.fromstring(out)
+    assert root.find(f"{SVG_NS}title").text == "A & B" and root.find(f"{SVG_NS}desc").text == "Tom & Jerry & co <3 &nbsp; &"
+    assert s.BARE_AMP_RE.findall(svg) == ["&", "&", "&", "&"] and s.count_bare_ampersands(svg) == 4  # gradient id, title, &nbsp;, the paint reference — what the handler logs as svg_repaired
+    assert s.BARE_AMP_RE.findall(out) == [] and s.count_bare_ampersands(out) == 0  # a cleaned document never needs the repair again
+    assert s.clean(out) == out
+
+
+def test_cdata_sections_are_left_alone_by_the_repair():
+    """A bare `&` inside `<![CDATA[…]]>` is legal character data: the repair skips the section (CDATA_RE), the parser hands
+    the text over and the serialiser escapes it once, so a title written as CDATA reads `a & b`, not the literal `a &amp; b`;
+    a bare `&` outside the section is still repaired, and the repair itself is exposed for the handler's count."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><title><![CDATA[a & b <x>]]></title><desc>c & d</desc>'
+        '<rect width="1" height="1"/></svg>'
+    )
+    out = s.clean(svg)
+    assert "<title>a &amp; b &lt;x&gt;</title>" in out and "<desc>c &amp; d</desc>" in out and "CDATA" not in out
+    root = ET.fromstring(out)
+    assert root.find(f"{SVG_NS}title").text == "a & b <x>" and root.find(f"{SVG_NS}desc").text == "c & d"
+    assert s.clean(out) == out
+    assert s.repair_bare_ampersands("<![CDATA[a & b]]> & <![CDATA[c &amp; d]]> &amp; &#38;") == "<![CDATA[a & b]]> &amp; <![CDATA[c &amp; d]]> &amp; &#38;"
+    assert s.repair_bare_ampersands("<![CDATA[open & never closed") == "<![CDATA[open &amp; never closed"  # not a section: repaired, and the parser rejects it anyway
+    # the handler's svg_repaired count is the repair's own CDATA-aware count — a plain findall would also count the `&` in the
+    # CDATA title that nobody repairs (impl-review final M-2)
+    assert s.count_bare_ampersands(svg) == 1 and s.BARE_AMP_RE.findall(svg) == ["&", "&"]
+    assert s.count_bare_ampersands("<![CDATA[a & b]]> & <![CDATA[c &amp; d]]> &amp; &#38;") == 1
+    assert s.count_bare_ampersands("<![CDATA[open & never closed") == 1 and s.count_bare_ampersands("&amp; &#38; &#x26;") == 0
+    with pytest.raises(s.SvgRejected):
+        s.clean('<svg xmlns="http://www.w3.org/2000/svg"><title><![CDATA[open & never closed</title></svg>')
+
+
+def test_entities_still_rejected_after_repair():
+    """The `&` repair runs after the `<!ENTITY` check and never turns a declaration into something the parser accepts."""
+    xxe = '<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><desc>&xxe;</desc></svg>'
+    with pytest.raises(s.SvgRejected, match="entity"):
+        s.clean(xxe)
+    with pytest.raises(s.SvgRejected, match="entity"):
+        s.clean(xxe, allow_text=False)
+    # a bare `<` is still malformed XML — the repair is for `&` only
+    with pytest.raises(s.SvgRejected):
+        s.clean('<svg xmlns="http://www.w3.org/2000/svg"><title>a < b</title></svg>')
+
+
+def test_allow_text_false_drops_text_and_tspan_but_keeps_title_desc():
+    """`activate_svg` cleans with `allow_text=False`: the headword a model still prints (svg_system v1 asked for it, v2
+    forbids it) can never reach the learner's screen, which is what `word_images.text_free = 1` certifies; `<title>` and
+    `<desc>` are metadata, not rendered text, and stay."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><title>abandon</title><desc>a car in the snow</desc>'
+        '<g><rect width="10" height="10"/><text x="400" y="460" font-size="40">abandon <tspan fill="red">!</tspan></text><circle cx="1" cy="1" r="1"/></g>'
+        '<text>outer</text><tspan>stray</tspan></svg>'
+    )
+    out = s.clean(svg, allow_text=False)
+    assert "<text" not in out and "<tspan" not in out and "abandon <" not in out and "stray" not in out and "outer" not in out
+    assert "<title>abandon</title>" in out and "<desc>a car in the snow</desc>" in out
+    assert tags(out) == ["svg", "title", "desc", "g", "rect", "circle"]
+    assert "<text" in s.clean(svg)  # the default keeps the other callers' behaviour (PLAN §5.1 C3 changes only the store's call)
+    assert s.clean(out, allow_text=False) == out
+
+
+def test_with_label_inserts_one_desc_after_root():
+    """The implicit AIGC marker (CLAUDE_INTEGRATION §6.7): exactly one `<desc id="aigc-label">` right after the root tag,
+    escaped; a model that writes the same id does not pass as labelled (the attribute filter drops its id); an empty
+    root is expanded; a string that is not a clean() output is refused."""
+    cleaned = s.clean('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><desc id="aigc-label">fake</desc><rect width="1" height="1"/></svg>')
+    assert 'id="aigc-label"' not in cleaned and "<desc>fake</desc>" in cleaned  # the model's id is dropped, the desc text stays
+    label = "AI-generated illustration · word-Dance · claude-sonnet-4-5 · 2026-11-06 <&>"
+    out = s.with_label(cleaned, label)
+    assert out.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><desc id="aigc-label">AI-generated illustration · word-Dance · claude-sonnet-4-5 · 2026-11-06 &lt;&amp;&gt;</desc><desc>fake</desc>')
+    assert out.count('id="aigc-label"') == 1 and out.endswith('<rect width="1" height="1"/></svg>')
+    root = ET.fromstring(out)
+    assert root[0].tag == f"{SVG_NS}desc" and root[0].get("id") == "aigc-label" and root[0].text == label
+    assert s.viewbox_size(out) == (800, 500)  # the root viewBox is read from the root tag, not from the desc
+    assert tags(s.clean(out)) == tags(out)  # a second clean() keeps the desc (as a plain description: the id is ours alone)
+    assert 'id="aigc-label"' not in s.clean(out)
+    empty = s.clean('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>')
+    assert s.with_label(empty, "x") == '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><desc id="aigc-label">x</desc></svg>'
+    with pytest.raises(s.SvgRejected):
+        s.with_label("<html/>", "x")
+    with pytest.raises(s.SvgRejected):
+        s.with_label(" " + cleaned, "x")

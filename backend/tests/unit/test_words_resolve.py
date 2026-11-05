@@ -94,7 +94,7 @@ def test_went_resolves_to_go_as_past_tense(seeded, user):
     assert res.word_id == word_id(seeded, "go")
     assert res.lemma_note_zh == "已归为原形 go（过去式）"
     assert res.created is False and res.job_id is None
-    assert seeded.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 60  # nothing created
+    assert seeded.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 62  # nothing created
 
 
 def test_children_resolves_to_child_as_plural(seeded, user):
@@ -276,7 +276,8 @@ def test_ordinary_ecdict_row_is_public_valid_and_enqueues_nothing(seeded, user, 
     assert row["id"] == res.word_id
     assert (row["source"], row["is_public"], row["is_valid_english"], row["safe_for_sharing"], row["created_by_user_id"]) == ("ecdict", 1, 1, 1, None)
     assert (row["display"], row["kind"], row["phonetic"], row["translation"]) == ("ubiquitous", "word", "juː'bikwitəs", "a. 普遍存在的")
-    assert (row["stage_cet6"], row["stage_min"], row["exam_tags"], row["ecdict_id"], row["sources"]) == (1, 4, "gre", 777, "ecdict")
+    assert (row["stage_cet6"], row["stage_min"], row["exam_tags"], row["ecdict_id"], row["sources"]) == (1, schemas.stage_to_index("cet6"), "gre", 777, "ecdict")
+    assert (row["stage_xs"], row["stage_zk"], row["stage_gk"], row["stage_cet4"]) == (0, 0, 0, 0)
     assert json.loads(row["exchange_json"]) == {"s": "ubiquitouses"}
     assert jobs(seeded) == []
     assert calls == ["ubiquitous"]
@@ -322,7 +323,7 @@ def test_ecdict_inflection_of_an_existing_seed_word_adds_the_form_only(seeded, u
     res = resolve_text(seeded, "goed", user)
     assert res.via == "ecdict" and res.word_id == go and res.created is False
     assert seeded.execute("SELECT COUNT(*) FROM word_forms WHERE form='goed' AND word_id=?", (go,)).fetchone()[0] == 1
-    assert seeded.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 60
+    assert seeded.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 62
 
 
 def test_ecdict_inflection_row_with_a_stage_tag_is_inserted_as_itself(seeded, user, monkeypatch):
@@ -343,7 +344,8 @@ def test_ecdict_lookup_against_a_real_stardict_file(tmp_path):
     assert e is not None and e.word == "Ubiquitous" and e.phonetic == "juː'bikwitəs" and e.stages == ["cet6"] and e.exam_tags == ["gre", "toefl"]
     assert e.frq == 9000 and e.exchange == {"s": "x"} and e.has_stage_tag and not e.is_network_only
     cols = e.word_columns()
-    assert (cols["stage_cet6"], cols["stage_min"], cols["exam_tags"], cols["sources"], cols["ecdict_id"]) == (1, 4, "gre toefl", "ecdict", 1)
+    assert (cols["stage_cet6"], cols["stage_min"], cols["exam_tags"], cols["sources"], cols["ecdict_id"]) == (1, schemas.stage_to_index("cet6"), "gre toefl", "ecdict", 1)
+    assert cols["stage_xs"] == 0 and set(cols) >= {f"stage_{s}" for s in schemas.STAGE_ORDER}
     n = ecdict.lookup("ZZQNET", db_path=path)
     assert n is not None and n.is_network_only and n.frq is None and n.collins == 0
     assert ecdict.lookup("nope", db_path=path) is None
@@ -356,6 +358,45 @@ def test_ecdict_lookup_against_a_real_stardict_file(tmp_path):
     assert entry("x", exchange="0:go/1:s3").form_code == "s"
     assert entry("x", exchange="0:go/1:zz").form_code == "alt"
     assert entry("x", exchange="0:go").lemma_pointer == "go" and entry("x").lemma_pointer is None
+
+
+def test_ecdict_zk_gk_tags_no_longer_grant_a_stage_but_still_count_as_stage_tags():
+    """PLAN R-10 / SM D-14: 初中/高中 membership comes from the official lists in the seed, so an ECDICT row tagged zk/gk gets no
+    flag and no stage_min at runtime — yet has_stage_tag stays True, so the lemma-pointer heuristic of resolve is unchanged."""
+    e = entry("whatnot", tag="zk gk")
+    assert e.stages == [] and e.has_stage_tag is True
+    cols = e.word_columns()
+    assert all(cols[f"stage_{s}"] == 0 for s in schemas.STAGE_ORDER) and cols["stage_min"] is None
+    c4 = entry("ledger", tag="cet4 ky").word_columns()
+    assert (c4["stage_xs"], c4["stage_zk"], c4["stage_gk"], c4["stage_cet4"], c4["stage_cet6"]) == (0, 0, 0, 1, 0)
+    assert c4["stage_min"] == schemas.stage_to_index("cet4")
+    both = entry("ledger", tag="cet6 cet4 zk")
+    assert both.stages == ["cet4", "cet6"] and both.word_columns()["stage_min"] == schemas.stage_to_index("cet4")
+    assert entry("plain", tag="").has_stage_tag is False and entry("plain", tag="gre").has_stage_tag is False
+    assert ecdict.MEMBER_TAGS == ("cet4", "cet6") and ecdict.STAGE_TAGS == ("zk", "gk", "cet4", "cet6")
+
+
+def test_ecdict_zk_only_base_is_still_pointed_at_by_its_inflection(seeded, user, monkeypatch):
+    """The has_stage_tag heuristic (DESIGN §5.2 step 3): a base row carrying only ECDICT's zk tag and no frequency is still a lemma
+    worth redirecting to — it just gets no stage any more."""
+    stub_lookup(monkeypatch, {"grokked": entry("grokked", tag="", frq=None, exchange="0:grok/1:p"), "grok": entry("grok", tag="zk", frq=None, translation="vt. 领会")})
+    res = resolve_text(seeded, "grokked", user)
+    assert res.via == "ecdict" and res.created is True and res.lemma_note_zh == "已归为原形 grok（过去式）"
+    row = word(seeded, "grok")
+    assert row is not None and res.word_id == row["id"] and word(seeded, "grokked") is None
+    assert (row["stage_zk"], row["stage_min"], row["sources"]) == (0, None, "ecdict")  # pointed at, no stage granted
+
+
+def test_seed_alias_resolves_to_its_headword_as_another_spelling(seeded, user):
+    """A spelling from the official lists (TV ↔ t.v., data/lists/aliases.tsv) is a word_forms row of kind 'alias' (0013): the
+    exact step misses, the form step hits and the note says 另一种写法 (FORM_KIND_ZH['alias'])."""
+    res = resolve_text(seeded, "t.v.", user)
+    assert res.via == "form" and res.word_id == word_id(seeded, "tv") and res.created is False and res.job_id is None
+    assert res.lemma_note_zh == "已归为原形 TV（另一种写法）" and words.lemma_note_zh("Mr.", "alias") == "已归为原形 Mr.（另一种写法）"
+    assert seeded.execute("SELECT kind FROM word_forms WHERE form = 't.v.'").fetchone()[0] == "alias"
+    assert "alias" in words.FORM_KINDS and words.FORM_KIND_ZH["alias"] == "另一种写法"
+    assert words.forms_with_kind(seeded, word_id(seeded, "tv")) == [{"form": "tvs", "kind": "s"}, {"form": "t.v.", "kind": "alias"}]  # code order, alias last
+    assert words.add_form(seeded, "tee-vee", word_id(seeded, "tv"), "alias") is True and words.add_form(seeded, "TV", word_id(seeded, "tv"), "alias") is False  # headword guard
 
 
 # ------------------------------------------------------------------------------------ validate_headword
@@ -475,7 +516,7 @@ def test_word_brief_shape_and_my_state(seeded, user):
     schemas.WordBrief.model_validate(b)
     assert b["lemma"] == "abandon" and b["display"] == "abandon" and b["kind"] == "word"
     assert b["translation_short"] == "vt. 放弃, 抛弃, 遗弃, 使屈从, 沉溺, 放纵"  # first line only
-    assert b["stages"] == ["gk", "cet4", "cet6"] and b["stage_min"] == 2 and b["cet6_star"] is False
+    assert b["stages"] == ["gk", "cet4", "cet6"] and b["stage_min"] == schemas.stage_to_index("gk") and b["cet6_star"] is False
     assert b["is_public"] is True and b["is_valid_english"] is True and b["my_state"] is None
     assert b["oxford"] is True and b["content_state"] == "none" and b["image_state"] == "none" and b["difficulty"] is None
     add_bank_row(seeded, user, int(row["id"]), "learning")

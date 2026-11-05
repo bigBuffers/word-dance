@@ -6,6 +6,20 @@ handlers, ``href`` / ``xlink:href``, ``style`` containing ``url(``, ``<script>``
 ``<use>`` (and anything else outside the list), allows ``url(#local)`` paint references only, enforces a
 ``viewBox`` (the root's own when valid, else ``0 0 800 500``), drops ``width``/``height`` on the root and
 re-serialises by hand so nothing unexpected can survive. Input and output are capped at 60 KB.
+
+Two repairs and one option (design/images/SYNTHESIS.md §3.1.4, PLAN §5.1 C3):
+
+* a bare ``&`` — anything but the five XML entities and a numeric reference — is rewritten to ``&amp;`` before the
+  parse (:data:`BARE_AMP_RE`, applied by :func:`repair_bare_ampersands` outside ``<![CDATA[…]]>`` sections, where a
+  bare ``&`` is already legal character data); the model writes ``A & B`` in titles and ``url(#a&b)`` in attributes
+  and the parser used to reject the whole drawing (4 of 34 live calls). ``<!ENTITY`` declarations are still rejected
+  first, so the repair never lets an entity declaration through, and ``&nbsp;`` becomes the literal text ``&nbsp;``
+  instead of a rejection;
+* ``clean(svg, allow_text=False)`` drops ``<text>`` / ``<tspan>`` with their subtrees (``<title>`` / ``<desc>`` stay):
+  the store calls it that way for every Claude drawing, so "the picture carries no text" is guaranteed by code, not by
+  the prompt (``word_images.text_free = 1``);
+* :func:`with_label` inserts the implicit AIGC marker ``<desc id="aigc-label">…</desc>`` right after the root's opening
+  tag; a model-supplied ``id="aigc-label"`` is dropped by the attribute filter, so a labelled file carries exactly one.
 """
 
 from __future__ import annotations
@@ -49,6 +63,12 @@ ENTITY_RE = re.compile(r"<!ENTITY", re.IGNORECASE)
 VIEWBOX_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*$")
 XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
 DANGEROUS_VALUE_RE = re.compile(r"javascript:|data:|vbscript:|expression\s*\(|@import|url\s*\(", re.IGNORECASE)
+# a `&` that does not start one of the five XML entities or a numeric character reference (HTML names such as &nbsp; are
+# NOT XML and would still be rejected by the parser, so they are escaped like any other bare ampersand)
+BARE_AMP_RE = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)")
+CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)  # left untouched by the repair: `&` is plain character data inside
+LABEL_ID = "aigc-label"  # the id of the <desc> with_label() inserts; never accepted from the model (see _clean_attrs)
+ROOT_TAG_RE = re.compile(r"<svg\b[^>]*>")  # a clean() output: attribute values are quoteattr()-escaped, so `>` ends the tag
 
 
 class SvgRejected(ValueError):
@@ -62,6 +82,33 @@ def _split_tag(tag: str) -> tuple[str, str]:
     return "", tag
 
 
+def _split_cdata(text: str) -> list[tuple[str, bool]]:
+    """``text`` cut at ``<![CDATA[…]]>`` boundaries (:data:`CDATA_RE`) into ``(segment, is_cdata)`` pieces — the one split
+    the repair and its count share, so the handler's ``svg_repaired`` number is exactly what the repair touched."""
+    parts: list[tuple[str, bool]] = []
+    pos = 0
+    for m in CDATA_RE.finditer(text):
+        parts.append((text[pos : m.start()], False))
+        parts.append((m.group(0), True))
+        pos = m.end()
+    parts.append((text[pos:], False))
+    return parts
+
+
+def repair_bare_ampersands(text: str) -> str:
+    """:data:`BARE_AMP_RE` → ``&amp;`` everywhere except inside ``<![CDATA[…]]>`` sections (:data:`CDATA_RE`): there a bare
+    ``&`` is legal as it stands, the parser hands it over as text and the serialiser escapes it exactly once — repairing it
+    too would turn ``a & b`` into the literal ``a &amp; b``."""
+    return "".join(segment if cdata else BARE_AMP_RE.sub("&amp;", segment) for segment, cdata in _split_cdata(text))
+
+
+def count_bare_ampersands(text: str) -> int:
+    """How many ``&`` :func:`repair_bare_ampersands` rewrites in ``text`` — bare ampersands outside CDATA sections only, so a
+    ``<![CDATA[a & b]]>`` the repair deliberately leaves alone is never reported as repaired (``ai.svg`` logs this number
+    as ``svg_repaired``; a plain ``BARE_AMP_RE.findall`` over-counted it)."""
+    return sum(len(BARE_AMP_RE.findall(segment)) for segment, cdata in _split_cdata(text) if not cdata)
+
+
 def _parse(svg: str) -> ET.Element:
     text = svg.lstrip("﻿").strip()
     if ENTITY_RE.search(text):
@@ -70,6 +117,7 @@ def _parse(svg: str) -> ET.Element:
     text = XML_DECL_RE.sub("", text).strip()
     if not text:
         raise SvgRejected("empty document")
+    text = repair_bare_ampersands(text)  # after the entity check (never repairs a declaration), before the parse
     try:
         root = DET.fromstring(text, forbid_dtd=True, forbid_entities=True, forbid_external=True)
     except (DefusedXmlException, ET.ParseError, ValueError, SyntaxError) as e:
@@ -120,6 +168,8 @@ def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool) -> list[t
         v = str(value).strip()
         if is_root and name in ("width", "height", "viewBox", "xmlns", "version"):
             continue  # set explicitly below
+        if name == "id" and v == LABEL_ID:
+            continue  # the AIGC marker id is ours alone (with_label); a model that writes it must not pass as labelled
         if name == "style":
             if DANGEROUS_VALUE_RE.search(v):
                 continue
@@ -134,9 +184,9 @@ def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool) -> list[t
     return kept
 
 
-def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: bool, is_root: bool = False, depth: int = 0) -> None:
+def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: bool, is_root: bool = False, depth: int = 0, allow_text: bool = True) -> None:
     ns, local = _split_tag(el.tag)
-    if ns != SVG_NS or local not in ALLOWED_ELEMENTS:
+    if ns != SVG_NS or local not in ALLOWED_ELEMENTS or (not allow_text and local in ("text", "tspan")):
         return  # dropped with its subtree (tail handled by the caller)
     if depth > MAX_DEPTH:
         raise SvgRejected(f"elements nested deeper than {MAX_DEPTH}")
@@ -160,25 +210,49 @@ def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: b
     if text:
         out.append(escape(text))
     for child in children:
-        _serialise(child, out, counter, in_text=text_mode, depth=depth + 1)
+        _serialise(child, out, counter, in_text=text_mode, depth=depth + 1, allow_text=allow_text)
         if text_mode and child.tail:
             out.append(escape(child.tail))
     out.append(f"</{local}>")
 
 
-def clean(svg: str) -> str:
-    """Return a safe, re-serialised SVG string or raise :class:`SvgRejected`."""
+def clean(svg: str, *, allow_text: bool = True) -> str:
+    """Return a safe, re-serialised SVG string or raise :class:`SvgRejected`.
+
+    ``allow_text=False`` additionally drops every ``<text>`` / ``<tspan>`` subtree (``<title>`` / ``<desc>`` are kept):
+    the mode :func:`wd.images.store.activate_svg` uses so that a Claude drawing never shows the headword (DESIGN §9,
+    CLAUDE_INTEGRATION §6.7). The default keeps the behaviour every other caller (``images.clean_svg``) had before
+    PLAN §5.1 C3: only the store's call changed.
+    """
     if not isinstance(svg, str):
         raise SvgRejected("svg must be a string")
     if len(svg.encode("utf-8")) > MAX_BYTES:
         raise SvgRejected(f"svg larger than {MAX_BYTES} bytes")
     root = _parse(svg)
     out: list[str] = []
-    _serialise(root, out, [0], in_text=False, is_root=True)
+    _serialise(root, out, [0], in_text=False, is_root=True, allow_text=allow_text)
     result = "".join(out)
     if len(result.encode("utf-8")) > MAX_BYTES:
         raise SvgRejected(f"svg larger than {MAX_BYTES} bytes after cleaning")
     return result
+
+
+def with_label(cleaned: str, label: str) -> str:
+    """Insert ``<desc id="aigc-label">label</desc>`` right after the root's opening tag of a :func:`clean` output.
+
+    The implicit AIGC marker of CLAUDE_INTEGRATION §6.7 (the explicit one is the UI caption): ``<desc>`` is in the
+    element allow-list, invisible when rendered, and survives a second ``clean()`` as a plain description. The output
+    carries exactly one ``id="aigc-label"`` because ``_clean_attrs`` drops that id from model output. Raises
+    :class:`SvgRejected` when ``cleaned`` does not start with a root tag (it was not produced by ``clean()``).
+    """
+    m = ROOT_TAG_RE.match(cleaned)
+    if not m:
+        raise SvgRejected("with_label: no <svg> root tag at the start of the document")
+    desc = f'<desc id="{LABEL_ID}">{escape(" ".join(str(label).split()))}</desc>'
+    tag = m.group(0)
+    if tag.endswith("/>"):  # an empty root: <svg …/> → <svg …><desc …/></svg>
+        return tag[:-2] + ">" + desc + "</svg>" + cleaned[m.end():]
+    return tag + desc + cleaned[m.end():]
 
 
 def iter_elements(svg: str) -> Iterator[str]:

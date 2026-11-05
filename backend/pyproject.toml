@@ -35,5 +35,5 @@ filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",
 ]
 markers = [
-    "full_seed: needs the full 9,162-word seed (set WD_FULL_SEED_DB=<path to an imported DB>); skipped on the mini seed",
+    "full_seed: needs the full seed (data/seed/stats.json total_words records; set WD_FULL_SEED_DB=<path to an imported DB>); skipped on the mini seed",
 ]

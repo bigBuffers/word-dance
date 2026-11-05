@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getBank } from '@/api/endpoints';
 import type { BankItem, BankResponse, UserWord, WordDetail } from '@/api/types';
 import { briefOf } from '@/components/bank/AttentionBadge';
 import { zh } from '@/i18n/zh';
@@ -32,7 +33,7 @@ const bankItem: BankItem = {
   phonetic: null,
   translation_short: 'v. give up',
   stages: ['cet4'],
-  stage_min: 3,
+  stage_min: 4,
   cet6_star: false,
   frq: 1000,
   collins: 3,
@@ -53,11 +54,16 @@ vi.mock('@/api/endpoints', async (importOriginal) => ({
   markWord: vi.fn(() => new Promise(() => undefined)),
 }));
 vi.mock('@/auth/AuthContext', () => {
-  const fake = { settings: { timezone: 'Asia/Shanghai', accent: 'en-US' }, counters: { suggestions_open: 0, attention: 0 }, refreshCounters: vi.fn(() => Promise.resolve()) };
+  // the rows narrow their stage chips to `settings.stages` (`onlyStages`, PLAN §6 S4)
+  const fake = { settings: { timezone: 'Asia/Shanghai', accent: 'en-US', stages: ['xs', 'cet6'] }, counters: { suggestions_open: 0, attention: 0 }, refreshCounters: vi.fn(() => Promise.resolve()) };
   return { useAuth: () => fake, useOptionalAuth: () => fake };
 });
 
 describe('BankPage', () => {
+  afterEach(() => {
+    vi.mocked(getBank).mockImplementation(() => Promise.resolve(bankResponse));
+  });
+
   it('names the sort control "sort", not its first option, and keeps that name after a change', async () => {
     render(
       <MemoryRouter>
@@ -83,6 +89,18 @@ describe('BankPage', () => {
     expect(dialog.querySelector('.confirm__title')?.textContent).toBe(`${zh.word.reset} · abandon`);
     expect(dialog.querySelector('.confirm__message')?.textContent).toBe(zh.word.resetConfirm);
   });
+
+  it('narrows each row\'s stage chips to my target stages plus the word\'s lowest stage (`onlyStages={settings.stages}`)', async () => {
+    const wide: BankItem = { ...bankItem, stages: ['zk', 'gk', 'cet4', 'cet6'], stage_min: 2 };
+    vi.mocked(getBank).mockResolvedValue({ ...bankResponse, items: [wide] });
+    render(
+      <MemoryRouter>
+        <BankPage />
+      </MemoryRouter>,
+    );
+    const chips = within(await screen.findByRole('list', { name: zh.word.examTags })).getAllByRole('listitem');
+    expect(chips.map((li) => li.textContent)).toEqual([zh.stages.zk, zh.stages.cet6]); // settings.stages = ['xs', 'cet6'] + the lowest stage zk; gk / cet4 hidden
+  });
 });
 
 describe('rowBelongsToTab', () => {
@@ -105,7 +123,7 @@ describe('briefOf', () => {
       phonetic: null,
       translation_short: 'give up',
       stages: ['cet4'],
-      stage_min: 3,
+      stage_min: 4,
       cet6_star: false,
       frq: 1,
       collins: null,
@@ -134,7 +152,7 @@ describe('briefOf', () => {
       phonetic: null,
       translation_short: 'give up',
       stages: ['cet4'],
-      stage_min: 3,
+      stage_min: 4,
       cet6_star: false,
       frq: 1,
       collins: null,

@@ -27,6 +27,7 @@ from .. import db, images
 from ..clock import now_iso, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
+from ..schemas import STAGE_ORDER
 from . import ecdict
 
 log = logging.getLogger("wd.words")
@@ -36,8 +37,11 @@ MAX_CHARS = 48
 MAX_TOKENS = 4
 MAX_DOTTED_TOKEN_LEN = 6  # 'a.m.', 'e.g.', 'etc.', 'U.S.A.' pass; 'example.com' fails (DESIGN §5.1)
 KINDS: tuple[str, ...] = ("word", "phrase", "abbreviation", "proper_noun")
-STAGES: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")
-FORM_KINDS: tuple[str, ...] = ("p", "d", "i", "3", "s", "r", "t", "alt")
+# The stage enum lives in schemas.py (DESIGN §0.3, PLAN R-1); the name STAGES stays for bank/screen/batches, which read it here.
+STAGES: tuple[str, ...] = STAGE_ORDER
+# word_forms.kind: ECDICT exchange codes, 'alt' (Claude/suffix rule) and 'alias' (an official list's spelling of a headword,
+# written by the seed import from the record's aliases[] — migration 0013, PLAN §2.1)
+FORM_KINDS: tuple[str, ...] = ("p", "d", "i", "3", "s", "r", "t", "alt", "alias")
 FORM_KIND_ZH: dict[str, str] = {
     "p": "过去式",
     "d": "过去分词",
@@ -47,6 +51,7 @@ FORM_KIND_ZH: dict[str, str] = {
     "r": "比较级",
     "t": "最高级",
     "alt": "变体",
+    "alias": "另一种写法",
 }
 LOOKUP_DEBOUNCE_S = 20  # DESIGN §5.2 step 4: run_after = now + 20 s so pasted words share one lookup call
 LOOKUP_PRIORITY = 10
@@ -94,7 +99,7 @@ _CJK_RE = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
 
 
 def _form_kind_order(column: str = "kind") -> str:
-    """SQL ``CASE`` ranking ``word_forms.kind`` p d i 3 s r t alt (the note/forms order and the kind kept per pair)."""
+    """SQL ``CASE`` ranking ``word_forms.kind`` p d i 3 s r t, then alt/alias (the note/forms order and the kind kept per pair)."""
     return f"CASE {column} WHEN 'p' THEN 0 WHEN 'd' THEN 1 WHEN 'i' THEN 2 WHEN '3' THEN 3 WHEN 's' THEN 4 WHEN 'r' THEN 5 WHEN 't' THEN 6 ELSE 7 END"
 
 
@@ -573,10 +578,7 @@ def _word_defaults() -> dict[str, Any]:
         "bnc": None,
         "frq": None,
         "exchange_json": None,
-        "stage_zk": 0,
-        "stage_gk": 0,
-        "stage_cet4": 0,
-        "stage_cet6": 0,
+        **{f"stage_{s}": 0 for s in STAGE_ORDER},  # a user/ECDICT word is in no official list until the seed says so
         "stage_min": None,
         "cet6_star": 0,
         "sources": None,
@@ -586,13 +588,15 @@ def _word_defaults() -> dict[str, Any]:
     }
 
 
+# the columns of a words row the resolver writes, in DDL order; the five stage flags follow STAGE_ORDER (0011)
+_INSERT_WORD_COLUMNS: tuple[str, ...] = (
+    "lemma", "display", "kind", "phonetic", "translation", "definition", "pos", "collins", "oxford", "exam_tags", "bnc", "frq",
+    "exchange_json", *(f"stage_{s}" for s in STAGE_ORDER), "stage_min", "cet6_star", "sources", "ecdict_id", "source",
+    "is_public", "is_valid_english", "safe_for_sharing", "difficulty", "created_by_user_id",
+)  # fmt: skip
 _INSERT_WORD_SQL = (
-    "INSERT INTO words(lemma, display, kind, phonetic, translation, definition, pos, collins, oxford, exam_tags, bnc, frq, "
-    "exchange_json, stage_zk, stage_gk, stage_cet4, stage_cet6, stage_min, cet6_star, sources, ecdict_id, source, "
-    "is_public, is_valid_english, safe_for_sharing, difficulty, created_by_user_id, created_at, updated_at) "
-    "VALUES (:lemma, :display, :kind, :phonetic, :translation, :definition, :pos, :collins, :oxford, :exam_tags, :bnc, :frq, "
-    ":exchange_json, :stage_zk, :stage_gk, :stage_cet4, :stage_cet6, :stage_min, :cet6_star, :sources, :ecdict_id, :source, "
-    ":is_public, :is_valid_english, :safe_for_sharing, :difficulty, :created_by_user_id, :now, :now) "
+    f"INSERT INTO words({', '.join(_INSERT_WORD_COLUMNS)}, created_at, updated_at) "
+    f"VALUES ({', '.join(':' + c for c in _INSERT_WORD_COLUMNS)}, :now, :now) "
     "ON CONFLICT(lemma) DO NOTHING"
 )
 

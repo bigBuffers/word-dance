@@ -1,0 +1,10 @@
+# lemma<TAB>field<TAB>value<TAB>note   — field ∈ translation | word | phonetic | definition | drop（PLAN §4.1；上限 30 条）。translation 用给定的一行替换整个 translation[]（definition[]、音标、词频照旧来自 ECDICT）；word 改 display（从而改 derive_kind）；drop 让该 lemma 不成为成员也不建行。这些释义是本仓库自己写的 MIT 文本（ATTRIBUTION.md）
+bund	translation	n. 外滩（the Bund，上海黄浦江西岸）	ECDICT「(政治上的)同盟, 联盟」
+the bund	drop		bund 已是词头；避免两行
+mum	translation	n. 妈妈（英式口语，= mom）	ECDICT「n. 菊花, 沉默」；现库该行今天就是这个错义项
+p.e.	translation	n. 体育（课）（= physical education）	ECDICT 首行「排字错误」
+physical education	translation	n. 体育（课）	ECDICT「[医] 体育」
+beijing opera	translation	n. 京剧（= Peking opera）	ECDICT「[网络] 京剧；国戏；京戏」
+children's day	translation	n. 儿童节（6 月 1 日）	ECDICT 释义为基督教节日
+stuck	translation	a. 被卡住的，动不了的（stick 的过去式和过去分词）	上海表以形容词义列为词头；ECDICT 只有「stick 的过去式」
+e-mail	word	e-mail	ECDICT display「E-MAIL」使 derive_kind 判为 proper_noun（现库如此）

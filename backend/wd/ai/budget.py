@@ -270,7 +270,8 @@ def can_spend(
         if prewarm_spent_today(conn, cfg, now) >= cfg.ai_prewarm_daily_budget_usd:
             return False, next_day_resume(now, cfg.tz)
     if kind == "svg":
-        # §7: generate_svg additionally requires SUM(cost_usd) of today's svg calls < sub-cap (0.50 ≈ 18 cards at $0.028)
+        # §7: generate_svg additionally requires SUM(cost_usd) of today's svg calls < sub-cap (0.50 ≈ 35–40 cards at the measured
+        # $0.0124/call — $0.0140 per delivered card, 34 live calls on 2026-11-05; ESTIMATES['svg'] stays 0.03 as the reservation margin)
         svg_spent = svg_spent_today(conn, cfg, now)
         if svg_spent >= cfg.ai_svg_daily_budget_usd:
             event_once(conn, EVENT_SVG, day_begin, {"spent_usd": round(svg_spent, 4), "cap_usd": cfg.ai_svg_daily_budget_usd}, now=now)

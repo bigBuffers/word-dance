@@ -1,6 +1,12 @@
 """Image storage (DESIGN §9): ``images/<2hex>/<sha256>.<jpg|svg>`` files (0600, written atomically, de-duplicated
 by content hash — the same sha may serve several words) and the ``word_images`` rows with exactly one ``active``
 row per word (previous active → ``superseded``; ``words.active_image_id`` / ``image_state`` follow).
+
+Since migration 0012 a row also records how a generated picture came to be (PLAN §2.3): ``prompt_version`` (``svg-v2``
+for Claude drawings made with the current system prompt; NULL for photos and for the drawings made before 0012),
+``model`` (the generator model, ``ai_calls.model_used``), ``text_free`` (1 only when the file went through
+``sanitize_svg.clean(allow_text=False)`` — the single gate any future picture-first study mode may rely on) and
+``eval_json`` (pilot rubric scores, never ``score``). Photos leave the four columns at their defaults.
 """
 
 from __future__ import annotations
@@ -97,18 +103,28 @@ def activate(
     height: int | None = None,
     score: float | None = None,
     now: str | None = None,
+    prompt_version: str | None = None,
+    model: str | None = None,
+    text_free: bool = False,
+    eval_json: str | None = None,
 ) -> int:
-    """Insert the new ``active`` image row, supersede the previous one and point the word at it (one transaction)."""
+    """Insert the new ``active`` image row, supersede the previous one and point the word at it (one transaction).
+
+    ``prompt_version`` / ``model`` / ``text_free`` / ``eval_json`` are the 0012 provenance columns (module docstring);
+    :func:`activate_candidate` leaves them at their defaults (a photo is never text-free by construction).
+    """
     now = now or now_iso()
     with maybe_tx(conn):
         conn.execute("UPDATE word_images SET status = 'superseded' WHERE word_id = ? AND status = 'active'", (int(word_id),))
         cur = conn.execute(
             "INSERT INTO word_images(word_id, provider, provider_ref, query, source_url, landing_url, title, creator, creator_url, "
-            "license, license_url, attribution_text, alt_zh, width, height, file_path, file_bytes, sha256, mime, score, status, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?)",
+            "license, license_url, attribution_text, alt_zh, width, height, file_path, file_bytes, sha256, mime, score, status, created_at, "
+            "prompt_version, model, text_free, eval_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?)",
             (
                 int(word_id), provider, ref, query, source_url, landing_url, title, creator, creator_url,
                 license, license_url, attribution_text, alt_zh, width, height, file_path, int(file_bytes), sha256, mime, score, now,
+                prompt_version, model, 1 if text_free else 0, eval_json,
             ),
         )
         image_id = int(cur.lastrowid)
@@ -149,13 +165,33 @@ def activate_candidate(conn: sqlite3.Connection, word_id: int, cand: Candidate, 
     )
 
 
-def activate_svg(conn: sqlite3.Connection, cfg: Settings, word_id: int, svg: str, alt_zh: str | None, *, now: str | None = None) -> int:
+def aigc_label(model: str | None, now: str) -> str:
+    """The text of the implicit AIGC marker: ``AI-generated illustration · word-Dance · <model> · <date>``."""
+    return f"AI-generated illustration · word-Dance · {model or 'claude'} · {now[:10]}"
+
+
+def activate_svg(
+    conn: sqlite3.Connection,
+    cfg: Settings,
+    word_id: int,
+    svg: str,
+    alt_zh: str | None,
+    *,
+    now: str | None = None,
+    model: str | None = None,
+    prompt_version: str | None = None,
+) -> int:
     """Sanitise a Claude-drawn SVG (CLAUDE_INTEGRATION §6.7), store it as ``.svg`` and activate it.
 
-    Raises :class:`wd.images.sanitize_svg.SvgRejected` when the SVG cannot be made safe; the caller
+    The drawing is cleaned with ``allow_text=False`` — ``<text>`` / ``<tspan>`` are dropped whatever the model wrote,
+    which is what ``text_free = 1`` asserts — then labelled with the implicit AIGC marker (``sanitize_svg.with_label``)
+    and stored; ``model`` (``ai_calls.model_used``) and ``prompt_version`` (``ai.svg.SVG_PROMPT_VERSION``) go to the
+    0012 columns. Raises :class:`wd.images.sanitize_svg.SvgRejected` when the SVG cannot be made safe; the caller
     (``ai/svg.py``) then sets ``image_state='failed'`` so the template card keeps being served.
     """
-    cleaned = sanitize_svg.clean(svg)
+    now = now or now_iso()
+    cleaned = sanitize_svg.clean(svg, allow_text=False)
+    cleaned = sanitize_svg.with_label(cleaned, aigc_label(model, now))
     stored = write_bytes(cfg, cleaned.encode("utf-8"), "svg")
     width, height = sanitize_svg.viewbox_size(cleaned)
     return activate(
@@ -171,6 +207,9 @@ def activate_svg(conn: sqlite3.Connection, cfg: Settings, word_id: int, svg: str
         sha256=stored.sha256,
         mime="image/svg+xml",
         now=now,
+        prompt_version=prompt_version,
+        model=model,
+        text_free=True,
     )
 
 

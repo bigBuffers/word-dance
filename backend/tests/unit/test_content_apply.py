@@ -78,7 +78,7 @@ def test_example_without_the_headword_is_dropped_and_the_rest_stored(ctx, seeded
     stored = json.loads(seeded.execute("SELECT content_json FROM word_contents WHERE id = ?", (applied.content_id,)).fetchone()[0])
     assert len(stored["examples"]) == 3 and all("abandon" in ex["en"].lower() for ex in stored["examples"])
     assert set(stored) == {"word", "valid", "meaning_zh", "meaning_en", "examples", "collocations", "mnemonic_zh", "image_keywords", "image_alt_zh", "difficulty", "version", "prompt_version", "model", "created_at"}
-    assert stored["prompt_version"] == "content-v1" and stored["model"] == "claude-sonnet-fake" and stored["created_at"] == NOW
+    assert stored["prompt_version"] == content.PROMPT_VERSION == "content-v2" and stored["model"] == "claude-sonnet-fake" and stored["created_at"] == NOW
     row = word(seeded, w["id"])
     assert row["content_state"] == "ready" and row["active_content_id"] == applied.content_id and row["difficulty"] == 2  # NULL → filled from the item
 
@@ -259,8 +259,64 @@ def test_prompt_shape_carries_dictionary_data_only(seeded):
     prompt = content.build_user_prompt([entry, abbr])
     assert prompt.startswith("Generate study content for the following English words.") and prompt.endswith("Return one item per word, in this order.")
     data = json.loads(prompt.split("<items>\n", 1)[1].split("\n</items>", 1)[0])
-    assert data["audience"].startswith("Chinese learners") and [x["word"] for x in data["words"]] == ["go", "TV"]
+    assert data["audience"] == content.AUDIENCE == "Chinese learners from primary school (小学) to CET-6, plus working professionals"
+    assert [x["word"] for x in data["words"]] == ["go", "TV"]
     assert "note" not in json.dumps(data) and w is None
+
+
+def test_prompt_entry_labels_the_five_stages_from_schemas(monkeypatch: pytest.MonkeyPatch):
+    """content-v2 (PLAN R-12): the stage labels come from schemas.STAGE_NAMES_ZH in STAGE_ORDER, so a word flagged stage_xs=1
+    is labelled 小学 — the 小学 rules of content_system.txt fire exactly for those words — and a word outside every list has
+    no label at all (no KeyError on an unknown flag). The flags are read through services.words.stages_of, the one reader
+    of the stage_* columns (PLAN R-1: no second copy of the flag → code mapping)."""
+    from wd import schemas
+
+    assert content.STAGE_ZH is schemas.STAGE_NAMES_ZH and list(content.STAGE_ZH) == list(schemas.STAGE_ORDER)
+    base = {"display": "apple", "translation": "n. 苹果", "pos": "n:100", "kind": "word"}
+    xs = content.prompt_entry({**base, "stage_xs": 1, "stage_zk": 1, "stage_gk": 1, "stage_cet4": 1, "stage_cet6": 0})
+    assert xs["stages"] == ["小学", "初中", "高中", "四级"]
+    assert content.prompt_entry({**base, "stage_xs": 1})["stages"] == ["小学"]  # missing flags read as 0
+    assert content.prompt_entry({**base, "stage_cet6": 1, "stage_xs": 0})["stages"] == ["六级"]
+    assert content.prompt_entry({**base, "display": "bungalow"})["stages"] == []  # 课标外
+    assert words.STAGES == schemas.STAGE_ORDER and words.stages_of({**base, "stage_xs": 1, "stage_gk": 1}) == ["xs", "gk"]
+    monkeypatch.setattr(words, "stages_of", lambda row: ["gk", "cet6"])  # whatever the reader says is what the prompt labels
+    assert content.prompt_entry({**base, "stage_xs": 1})["stages"] == ["高中", "六级"]
+
+
+def test_example_of_10_to_14_chars_is_now_kept():
+    """EXAMPLE_EN_MIN 15 → 10 (content-v2): a 小学 sentence such as "I like cats." (12 chars) is a usable example; 9 chars is not."""
+    assert content.EXAMPLE_EN_MIN == 10 and content.EXAMPLE_EN_MAX == 240
+    w = {"id": 1, "lemma": "cat", "display": "cat"}
+    item = json.loads(json.dumps(ITEMS["abandon"]))
+    item["word"] = "cat"
+    item["examples"] = [
+        {"en": "I like cats.", "zh": "我喜欢猫。"},  # 12 chars: kept
+        {"en": "A cat sat.", "zh": "一只猫坐着。"},  # 10 chars: kept (the new minimum)
+        {"en": "Cats nap.", "zh": "猫打盹。"},  # 9 chars: dropped
+        {"en": "The cat sleeps on my bed every afternoon.", "zh": "这只猫每天下午都睡在我床上。"},
+    ]
+    cleaned, reason = content.validate_item(item, w, ["cats"], last_attempt=False)
+    assert reason == "" and [ex["en"] for ex in cleaned["examples"]] == ["I like cats.", "A cat sat.", "The cat sleeps on my bed every afternoon."]
+
+
+def test_lemma_token_is_exempt_in_image_keywords():
+    """content-v2 / C5: the non-photo blocklist (`map|flag|chart|text|…`) lets the lemma's own tokens through — the card for
+    `map` may keep "world map" — while the unsafe list (`weapon|gun|blood|…`) always rejects, lemma or not."""
+    base = json.loads(json.dumps(ITEMS["abandon"]))
+
+    def kw(lemma: str, keywords: list[str]) -> list[str]:
+        examples = [{"en": f"I can see the {lemma} on the wall of our classroom.", "zh": "我能看到我们教室墙上的它。"}] * 3
+        cleaned, reason = content.validate_item({**base, "word": lemma, "examples": examples, "image_keywords": keywords}, {"id": 1, "lemma": lemma, "display": lemma}, [], last_attempt=False)
+        assert reason == "", reason
+        return cleaned["image_keywords"]
+
+    assert kw("map", ["world map", "map of china", "paper chart"]) == ["world map", "map of china"]  # `chart` is not the lemma: still dropped
+    assert kw("apple", ["world map", "red apple"]) == ["red apple"]
+    assert kw("flag", ["red flag on a pole"]) == ["red flag on a pole"]
+    assert kw("weapon", ["ancient weapon display", "museum hall"]) == ["museum hall"]  # unsafe: never exempted
+    assert kw("gun", ["gun shop"]) == ["gun"]  # nothing survives → the lemma (the chain's bare-lemma rule decides the rest)
+    assert content._is_blocked("world map", "map") is False and content._is_blocked("world map", "apple") is True
+    assert content._is_blocked("gun shop", "gun") is True
 
 
 # ------------------------------------------------------------------------------------------- handler

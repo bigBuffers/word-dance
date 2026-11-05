@@ -1,5 +1,5 @@
 // WordHeader — display form (long words shrink), phonetic, SpeakButton, StageChips, KindBadge (FRONTEND §4).
-import type { ItemKind, WordBrief } from '@/api/types';
+import type { ItemKind, Stage, WordBrief } from '@/api/types';
 import { cx } from '@/components/ui/cx';
 import type { Accent } from '@/hooks/useSpeech';
 import { KindBadge } from './KindBadge';
@@ -17,6 +17,8 @@ export interface WordHeaderProps {
   /** Pronunciation accent override (defaults to the user's setting). */
   accent?: Accent;
   showStages?: boolean;
+  /** Narrows the stage chips to these stages plus the word's lowest stage (`StageChips.only`); omitted = every stage. */
+  onlyStages?: readonly Stage[];
   /** Heading element for the display form (`h1` on the detail page, `h2` on cards, `div` in lists). */
   as?: 'h1' | 'h2' | 'h3' | 'div';
   className?: string;
@@ -29,8 +31,9 @@ function lengthBucket(display: string): 'long' | 'xlong' | undefined {
   return undefined;
 }
 
-export function WordHeader({ word, size = 'md', kind, accent, showStages = true, as: Tag = 'div', className }: WordHeaderProps) {
-  const hasMeta = Boolean(word.phonetic) || kind !== undefined || (showStages && word.stages.length > 0);
+export function WordHeader({ word, size = 'md', kind, accent, showStages = true, onlyStages, as: Tag = 'div', className }: WordHeaderProps) {
+  // StageChips always renders something when shown (a stageless word gets the dashed outside-the-lists chip), so it counts as meta.
+  const hasMeta = Boolean(word.phonetic) || kind !== undefined || showStages;
   return (
     <header className={cx('word-head', `word-head--${size}`, className)} data-len={lengthBucket(word.display)}>
       <div className="word-head__row">
@@ -47,7 +50,7 @@ export function WordHeader({ word, size = 'md', kind, accent, showStages = true,
             </span>
           )}
           {kind !== undefined && <KindBadge kind={kind} />}
-          {showStages && <StageChips stages={word.stages} stageMin={word.stage_min} cet6Star={word.cet6_star} size={size === 'lg' ? 'md' : 'sm'} />}
+          {showStages && <StageChips stages={word.stages} stageMin={word.stage_min} cet6Star={word.cet6_star} only={onlyStages} size={size === 'lg' ? 'md' : 'sm'} />}
         </div>
       )}
     </header>

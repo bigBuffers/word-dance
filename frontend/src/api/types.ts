@@ -2,8 +2,8 @@
 // Any change requires updating API.md, backend/wd/schemas.py and this file in one "contract change" commit.
 // Request bodies / query shapes that API.md defines only in prose live in ./endpoints.ts.
 
-export type Stage = 'zk' | 'gk' | 'cet4' | 'cet6';           // index 1..4 in that order
-export type StageIndex = 1 | 2 | 3 | 4;
+export type Stage = 'xs' | 'zk' | 'gk' | 'cet4' | 'cet6';   // index 1..5 in that order
+export type StageIndex = 1 | 2 | 3 | 4 | 5;
 export type UserState = 'new' | 'learning' | 'mastered' | 'known' | 'removed';
 export type Origin = 'browse' | 'custom' | 'screen' | 'push' | 'import';   // 'import' = POST /api/bank/import
 export type MarkAction = 'unfamiliar' | 'known' | 'mastered' | 'remove' | 'reset' | 'restore';
@@ -34,7 +34,7 @@ export interface Counters { suggestions_open: number; attention: number }   // G
 export interface Settings {
   timezone: string; push_time: string; push_enabled: boolean;
   daily_new_count: number; daily_screen_count: number; max_reviews: number;
-  stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–4 index (§9.1)
+  stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–5 index (§9.1)
   show_images: boolean; zh_examples: 'tap' | 'always'; auto_pronounce: boolean; accent: 'en-US' | 'en-GB';
   email_enabled: boolean; webhook_enabled: boolean; webhook_url: string | null; webhook_format: WebhookFormat;
   next_push_at: string | null;          // read-only
@@ -42,7 +42,7 @@ export interface Settings {
   updated_at: string;
 }
 export interface StageInfo {
-  stage: Stage; index: StageIndex; name_zh: string;           // 初中 / 高中 / 四级 / 六级
+  stage: Stage; index: StageIndex; name_zh: string;           // 小学 / 初中 / 高中 / 四级 / 六级
   total: number; new_only_total: number;                      // all words in the stage / words whose lowest stage is this one
   unfamiliar: number; known: number; mastered: number; unseen: number;
 }
@@ -111,7 +111,8 @@ export interface LookupPreview {
 export interface ScreenWord { word: WordBrief; phonetic: string | null }
 export interface ScreenResponse {
   word_id: number; verdict: ScreenVerdict; mine: UserWord | null; added_to_today: boolean;
-  study_item: StudyItem | null; today: TodayCounts | null; duplicate: boolean;
+  study_item: StudyItem | null; today: TodayCounts | null; // counts of today's batch when one exists (「明天开始学」 when added_to_today is false), else null
+  duplicate: boolean;
 }
 export interface AddResult {
   input: string; status: 'added' | 'readded' | 'exists' | 'pending_ai' | 'ambiguous' | 'invalid';
@@ -175,7 +176,7 @@ export interface BatchSummary { id: number; local_date: string; status: string; 
 export interface Stats {
   bank: BankCounts; stages: StageInfo[]; custom_words: number; streak_days: number; longest_streak: number;
   today: { done: number; total: number } | null; total_graded: number; total_mastered: number;
-  heatmap: { date: string; graded: number; goal_met: boolean }[];   // last 84 days
+  heatmap: { date: string; graded: number; goal_met: boolean }[];   // last 84 days; goal_met = the §9.1 predicate (completed_at set, or every non-stale study item final)
   stubborn: WordBrief[];                                             // times_added ≥ 3, max 20
 }
 

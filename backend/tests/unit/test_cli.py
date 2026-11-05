@@ -66,6 +66,18 @@ def test_every_owned_command_is_registered_by_its_module(settings):
     assert e.value.code == 2
 
 
+def test_images_retry_is_owned_and_registered_by_the_images_handler(settings):
+    """PLAN §5.1 C7: `wd images-retry [--limit N] [--dry-run]` joins fetch-image / images-prune under wd.images.handler."""
+    from wd.images import handler, service
+
+    assert cli.COMMAND_OWNERS["wd.images.handler"] == ("fetch-image", "images-prune", "images-retry")
+    parser = cli.build_parser()
+    args = parser.parse_args(["images-retry", "--dry-run", "--limit", "5"])
+    assert args.func is handler.cmd_images_retry and args.dry_run is True and args.limit == 5
+    args = parser.parse_args(["images-retry"])
+    assert args.dry_run is False and args.limit == service.RETRY_NIGHTLY_LIMIT == 50
+
+
 def test_module_without_its_commands_is_a_packaging_error(monkeypatch):
     import sys
     import types

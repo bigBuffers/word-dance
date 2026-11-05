@@ -34,10 +34,22 @@ DEV_PORT     ?= 8000
 FAKE_CLAUDE  := $(CURDIR)/backend/tests/fake_claude.py
 DEV_CLAUDE   := $(if $(filter 1,$(WD_DEV_REAL_CLAUDE)),,WD_CLAUDE_BIN=$(FAKE_CLAUDE))
 
-# make seed: the inputs (ECDICT stardict.db, mahavivo word lists) are NOT needed
-# at deploy time — data/seed/vocab.jsonl.gz is tracked. Set them only to rebuild.
+# make seed: the official lists (data/lists/) and the last committed seed are the
+# only required inputs — data/seed/vocab.jsonl.gz is tracked, nothing is needed
+# at deploy time. ECDICT_DB (stardict.db) is needed only when the lists bring
+# headwords the committed seed lacks; WORDLISTS_DIR (the optional mahavivo CET
+# lists) may be absent, existing rows then keep their CET flags (PLAN §4.5).
+# SEED_BASE is the git revision whose data/seed/vocab.jsonl.gz is the baseline of
+# BOTH the build (--previous) and DIFF.md (PLAN §4.5: the diff is against
+# `git show HEAD:data/seed/vocab.jsonl.gz`). The working-tree archive is never the
+# baseline: pack_seed.sh replaces it, so a second run would relabel its own output
+# and stats.json (previous_sha256, new_words, rows_changed_vs_previous) would
+# describe nothing (impl-review S3b F1). With the committed seed as the baseline
+# `make seed` is idempotent: two runs give byte-identical vocab.jsonl.gz,
+# stats.json and DIFF.md.
 ECDICT_DB     ?=
 WORDLISTS_DIR ?=
+SEED_BASE     ?= HEAD
 
 # Retention passed to `wd backup` (docs/DEPLOY.md §5).
 BACKUP_ARGS  ?= --keep-daily 14 --keep-weekly 8
@@ -90,12 +102,17 @@ smoke: ## End-to-end smoke run against a throwaway instance with the fake claude
 	$(call need,$(PY),run 'make setup' first)
 	$(PYENV) $(PY) scripts/smoke.py $(SMOKE_ARGS)
 
-seed: ## Rebuild data/seed from ECDICT + syllabus lists: make seed ECDICT_DB=<stardict.db> WORDLISTS_DIR=<dir>
-	@test -f "$(ECDICT_DB)" || { echo "make: set ECDICT_DB=<path to ECDICT stardict.db> (deploy/fetch_ecdict.sh downloads it)" >&2; exit 2; }
-	@test -d "$(WORDLISTS_DIR)" || { echo "make: set WORDLISTS_DIR=<directory holding the mahavivo english-wordlists .txt files>" >&2; exit 2; }
-	$(PYTHON) -I scripts/build_seed.py --db "$(ECDICT_DB)" --lists "$(WORDLISTS_DIR)" --out data/seed
-	gzip -9 -n -k -f data/seed/vocab.jsonl
-	@echo "data/seed/vocab.jsonl.gz: $$(zcat data/seed/vocab.jsonl.gz | wc -l) records"
+seed: ## Rebuild data/seed from data/lists + the committed seed: make seed [ECDICT_DB=<stardict.db>] [WORDLISTS_DIR=<mahavivo dir>] [SEED_BASE=<git rev>]
+	$(call need,$(PY),run 'make setup' first)
+	@if [ -n "$(ECDICT_DB)" ] && [ ! -f "$(ECDICT_DB)" ]; then echo "make: ECDICT_DB=$(ECDICT_DB) does not exist (deploy/fetch_ecdict.sh downloads stardict.db)" >&2; exit 2; fi
+	@if [ -n "$(WORDLISTS_DIR)" ] && [ ! -d "$(WORDLISTS_DIR)" ]; then echo "make: WORDLISTS_DIR=$(WORDLISTS_DIR) is not a directory" >&2; exit 2; fi
+	set -e; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; prev="$$tmp/vocab.jsonl.gz"; \
+	git show "$(SEED_BASE):data/seed/vocab.jsonl.gz" > "$$prev" || { echo "make: cannot read $(SEED_BASE):data/seed/vocab.jsonl.gz from git (SEED_BASE must name a commit that tracks the seed)" >&2; exit 2; }; \
+	$(PY) -I scripts/build_seed.py --manifest data/lists/manifest.json --previous "$$prev" \
+	    $(if $(ECDICT_DB),--ecdict "$(ECDICT_DB)") $(if $(WORDLISTS_DIR),--wordlists "$(WORDLISTS_DIR)") --out data/seed; \
+	$(PY) -I scripts/seed_diff.py "$$prev" data/seed/vocab.jsonl --md data/seed/DIFF.md \
+	    --old-label "$(SEED_BASE):data/seed/vocab.jsonl.gz" --new-label data/seed/vocab.jsonl.gz
+	scripts/pack_seed.sh
 
 install: ## Install or upgrade the systemd service on this box (deploy/install.sh; INSTALL_ARGS="--with-caddy DOMAIN" etc.)
 	deploy/install.sh $(INSTALL_ARGS)

@@ -1,7 +1,7 @@
 """jobs/scheduler.py (WP4) with a frozen clock: prebuild window, publish-once, deliveries, catch-up, stale skip, the
 01:00 build_from clamp, Asia/Shanghai + America/New_York across the 2026-11-01 DST change, nightly consolidation guard,
-03:30 maintenance with prefetch (fake wd.ai.budget), finalize via tick, downtime event, hourly GC, thread start/stop,
-`wd tick --once` lease refusal."""
+03:30 maintenance with prefetch (fake wd.ai.budget) and the failed-image retry sweep (PLAN §5.1 C7), finalize via tick,
+downtime event, hourly GC, thread start/stop, `wd tick --once` lease refusal."""
 
 from __future__ import annotations
 
@@ -403,7 +403,7 @@ def test_maintenance_requeues_dead_jobs_once_and_prunes_logs(settings, seeded, m
     (logs / "2026-09-01").mkdir(parents=True)
     (logs / "2026-10-14").mkdir(parents=True)
     r = tick(conn, settings, datetime(2026, 10, 14, 19, 30, tzinfo=UTC))
-    assert r.maintenance and r.prefetched == 0
+    assert r.maintenance and r.prefetched == 0 and r.image_retries == 0  # no failed-image word is being studied
     row = db.row_to_dict(conn.execute("SELECT * FROM jobs WHERE id = ?", (old,)).fetchone())
     assert row["status"] == "queued" and row["attempts"] == 0 and __import__("json").loads(row["payload_json"])["group_size"] == 1
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (fresh,)).fetchone()[0] == "dead"  # younger than 24 h
@@ -413,6 +413,49 @@ def test_maintenance_requeues_dead_jobs_once_and_prunes_logs(settings, seeded, m
     assert scheduler.requeue_dead_once(conn, datetime(2026, 10, 16, 19, 30, tzinfo=UTC)) == 1
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (old,)).fetchone()[0] == "dead"
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (fresh,)).fetchone()[0] == "queued"
+
+
+def test_maintenance_requeues_failed_image_words_being_studied(settings, seeded, monkeypatch, caplog):
+    """PLAN §5.1 C7: after prefetch the 03:30 maintenance runs images.retry_failed_studied — a `failed` word in a bank gets a
+    priority-30 fetch_image job carrying retry:true (image_state → queued); a function word (`some`, d:99) and a word nobody
+    studies (`cat`) stay on the card; the sweep is counted in TickResult.image_retries and logged as `image_retry`."""
+    from dataclasses import replace
+
+    conn = seeded
+    FakeBudget(spent=3.0).install(monkeypatch)  # prefetch skipped: the sweep is what this test looks at
+    alice = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z")
+    t = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
+    for lemma in ("apple", "some"):
+        mark(conn, alice, lemma, t)
+    conn.execute("DELETE FROM jobs")
+    conn.execute("UPDATE words SET image_state = 'failed' WHERE lemma IN ('apple', 'some', 'cat')")
+    assert conn.execute("SELECT pos FROM words WHERE lemma = 'some'").fetchone()[0] == "p:1/d:99"
+    with caplog.at_level(logging.INFO, logger="wd.jobs.scheduler"):
+        r = tick(conn, settings, datetime(2026, 10, 14, 19, 30, tzinfo=UTC))  # 03:30 Asia/Shanghai on 2026-10-15
+    assert r.maintenance is True and r.image_retries == 1
+    fetches = jobs(conn, "fetch_image")
+    assert len(fetches) == 1
+    j = fetches[0]
+    assert j["dedupe_key"] == f"image:{wid(conn, 'apple')}" and j["priority"] == scheduler.PREFETCH_PRIORITY == 30 and j["status"] == "queued"
+    assert json.loads(j["payload_json"]) == {"word_id": wid(conn, "apple"), "retry": True}
+    states = {r_["lemma"]: r_["image_state"] for r_ in conn.execute("SELECT lemma, image_state FROM words WHERE lemma IN ('apple','some','cat')")}
+    assert states == {"apple": "queued", "some": "failed", "cat": "failed"}
+    rec = next(rec for rec in caplog.records if getattr(rec, "event", None) == "image_retry")
+    from wd import logging_setup
+
+    assert json.loads(logging_setup.JsonFormatter().format(rec))["word_ids"] == [wid(conn, "apple")]  # the ids reach the journal (EXTRA_FIELDS)
+    # the next night: the job is still live (nobody drained it) → nothing new; once it is done but < 6 h ago → still nothing
+    assert scheduler.retry_failed_images(conn, datetime(2026, 10, 15, 19, 30, tzinfo=UTC), cfg=settings) == 0
+    conn.execute("UPDATE jobs SET status = 'done', finished_at = '2026-10-15T19:00:00Z' WHERE id = ?", (j["id"],))
+    conn.execute("UPDATE words SET image_state = 'failed' WHERE lemma = 'apple'")
+    assert scheduler.retry_failed_images(conn, datetime(2026, 10, 15, 19, 30, tzinfo=UTC), cfg=settings) == 0
+    assert scheduler.retry_failed_images(conn, datetime(2026, 10, 16, 1, 0, tzinfo=UTC), cfg=settings) == 1
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == 2
+    # WD_IMAGES_ENABLED=0: the sweep queues nothing (the handler would skip the job and strand the word at `queued`)
+    conn.execute("UPDATE jobs SET status = 'done', finished_at = '2026-10-16T01:00:00Z' WHERE type = 'fetch_image'")
+    conn.execute("UPDATE words SET image_state = 'failed' WHERE lemma = 'apple'")
+    assert scheduler.retry_failed_images(conn, datetime(2026, 10, 17, 1, 0, tzinfo=UTC), cfg=replace(settings, images_enabled=False)) == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == 2
 
 
 def _dead(conn, type_: str, word_id: int, key: str, finished: str = "2026-09-30T01:00:00Z") -> int:

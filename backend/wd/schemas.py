@@ -6,7 +6,7 @@ Rules
 * model names mirror the TypeScript interfaces of API.md §9 (``frontend/src/api/types.ts``) so the
   contract audit (``scripts/check_contract.py``) can diff property names; endpoint-specific bodies
   that have no TS interface are named ``<Endpoint>Request`` / ``<Endpoint>Response``;
-* ``current_stage`` is the ``Stage`` string on the wire everywhere; the server maps it to the 1–4
+* ``current_stage`` is the ``Stage`` string on the wire everywhere; the server maps it to the 1–5
   column with :func:`stage_to_index` / :func:`index_to_stage` (API.md §9.1);
 * timestamps are ``str`` (UTC ISO-8601 ``YYYY-MM-DDTHH:MM:SSZ``), local dates ``str`` ``YYYY-MM-DD``.
 """
@@ -22,8 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .clock import PUSH_TIME_RE, is_valid_timezone
 
 # ------------------------------------------------------------------------------------- enums
-Stage = Literal["zk", "gk", "cet4", "cet6"]
-StageIndex = Literal[1, 2, 3, 4]
+Stage = Literal["xs", "zk", "gk", "cet4", "cet6"]
+StageIndex = Literal[1, 2, 3, 4, 5]
 UserState = Literal["new", "learning", "mastered", "known", "removed"]
 Origin = Literal["browse", "custom", "screen", "push", "import"]
 MarkAction = Literal["unfamiliar", "known", "mastered", "remove", "reset", "restore"]
@@ -48,21 +48,32 @@ Difficulty = Literal[1, 2, 3, 4, 5]
 FlagTier = Literal[0, 1]
 AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI or ai/providers/openai_http.py (CLAUDE_INTEGRATION §10)
 
-STAGE_ORDER: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")
-STAGE_NAMES_ZH: dict[str, str] = {"zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
+# The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
+# frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
+# in order). Index = position + 1 (xs=1 … cet6=5; migration 0011 renumbered the stored 1..4 to 2..5). STAGE_INDEX is
+# written out rather than derived so that inserting a stage later fails the position test in test_api_schemas instead
+# of silently renumbering every stored stage_min / current_stage.
+STAGE_ORDER: tuple[str, ...] = ("xs", "zk", "gk", "cet4", "cet6")
+STAGE_INDEX: dict[str, int] = {"xs": 1, "zk": 2, "gk": 3, "cet4": 4, "cet6": 5}  # == STAGE_ORDER.index(s) + 1 (test_api_schemas pins it)
+STAGE_NAMES_ZH: dict[str, str] = {"xs": "小学", "zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_一-龥]{2,32}$")
 
 
 def stage_to_index(stage: str) -> int:
-    """``zk→1, gk→2, cet4→3, cet6→4`` (``user_settings.current_stage`` / ``words.stage_min``)."""
+    """``xs→1, zk→2, gk→3, cet4→4, cet6→5`` (``user_settings.current_stage`` / ``words.stage_min``, API.md §9.1).
+
+    Looks up the explicit :data:`STAGE_INDEX` instead of the position in :data:`STAGE_ORDER` (see the note above the
+    constants); an unknown code is a ``ValueError`` so callers can turn it into a 400 or a seed-build failure.
+    """
     try:
-        return STAGE_ORDER.index(stage) + 1
-    except ValueError:
+        return STAGE_INDEX[stage]
+    except KeyError:
         raise ValueError(f"unknown stage {stage!r}") from None
 
 
 def index_to_stage(index: int) -> str:
-    if not 1 <= int(index) <= 4:
+    """Inverse of :func:`stage_to_index`; ``ValueError`` outside ``1..len(STAGE_ORDER)`` (a stored index from a newer schema)."""
+    if not 1 <= int(index) <= len(STAGE_ORDER):
         raise ValueError(f"stage index out of range: {index!r}")
     return STAGE_ORDER[int(index) - 1]
 
@@ -485,7 +496,7 @@ class WordBrief(Model):
 class VocabQuery(Model):
     """Query parameters of ``GET /api/vocab`` (endpoint 20); ``/vocab/letters`` uses the same minus ``letter``/``q``."""
 
-    stage: Literal["all", "zk", "gk", "cet4", "cet6"] = "all"
+    stage: Literal["all", "xs", "zk", "gk", "cet4", "cet6"] = "all"
     new_only: Literal[0, 1] = 0
     q: str | None = Field(default=None, max_length=64)
     status: Literal["all", "unmarked", "unfamiliar", "known", "mastered"] = "all"
@@ -705,7 +716,7 @@ class ContentRequestResponse(Model):
 
 # -------------------------------------------------------------------------------- screening
 class ScreenNextQuery(Model):
-    stage: Literal["zk", "gk", "cet4", "cet6", "auto"] = "auto"
+    stage: Literal["xs", "zk", "gk", "cet4", "cet6", "auto"] = "auto"
     count: int = Field(default=1, ge=1, le=50)
 
 
@@ -1332,7 +1343,7 @@ class ProbeResponse(Model):
 
 
 class PrewarmRequest(Model):
-    stage: Literal["zk", "gk", "cet4", "cet6", "all"]
+    stage: Literal["xs", "zk", "gk", "cet4", "cet6", "all"]
     limit: int = Field(ge=1, le=2000)
     max_budget_usd: float = Field(ge=0.1, le=50)
 
