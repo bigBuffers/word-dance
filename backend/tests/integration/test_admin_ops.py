@@ -1,24 +1,59 @@
 """routers/admin_ops.py — API.md 54–55, 60–69, 72–74: admin-only guard, overview numbers incl. the photo / svg / card-only
 split and svg_today_usd, health, jobs list/retry/requeue-dead/run-once, the AI ledger, pause/resume, the probe (exact
-object), prewarm fan-out and stops, regenerate (key suffix :r1), refetch-image, events, config masking, push/run."""
+object; the ``{provider}`` body, the per-provider throttle, the fallback probe through the API and ``ai/probe.py``'s
+two-tier / pinned / fallback forms, CLAUDE_INTEGRATION §2 / §10.6), prewarm fan-out and stops, regenerate (key suffix
+:r1), refetch-image, events, config masking, push/run."""
 
 from __future__ import annotations
 
 import json
 import logging
 import secrets
+import sys
 from dataclasses import replace
+from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import fake_openai
 from wd import db
+from wd.ai import probe
+from wd.ai.providers import openai_http
 from wd.deps import hash_token
 from wd.jobs import queue, registry, worker
 from wd.jobs.registry import JobContext
 
 NOW = "2026-10-14T00:00:00Z"
 FAR = "2030-01-01T00:00:00Z"
+FAKE = Path(__file__).resolve().parents[1] / "fake_claude.py"
+#: a configured fallback provider (the spec's defaults; the mock host never resolves — every request goes through ``fake_http``)
+FALLBACK_FIELDS = dict(
+    ai_provider="auto",
+    ai_fallback_kind="openai_http",
+    ai_fallback_base_url="https://mock.example/api/paas/v4",
+    ai_fallback_model="glm-4.7-flash",
+    ai_fallback_dialect="zhipu",
+    ai_fallback_api_key="k",
+)
+
+
+def fake_wrapper(directory: Path, mode: str) -> str:
+    """A ``claude`` stand-in that runs ``fake_claude.py`` in ``mode`` (never the real binary)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / f"claude-{mode}"
+    script.write_text(f"#!/usr/bin/env bash\nFAKE_CLAUDE_MODE='{mode}' exec '{sys.executable}' -I '{FAKE}' \"$@\"\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    """Route the fallback adapter's httpx client to ``fake_openai`` (no socket is ever opened); the recorded requests and a mode switch."""
+    state = {"mode": "ok", "calls": []}
+    monkeypatch.setattr(openai_http, "CLIENT_FACTORY", lambda timeout_s: httpx.Client(transport=fake_openai.transport(state["mode"], calls=state["calls"]), timeout=timeout_s))
+    return state
 
 
 def make_user(conn, name, role="user"):
@@ -203,7 +238,8 @@ def test_ai_calls_ledger_page(client: TestClient, seeded, admin):
     body = r.json()
     assert body["total"] == 2 and len(body["items"]) == 1 and body["items"][0]["kind"] == "content" and body["items"][0]["cost_usd"] == 0.04
     assert body["today_usd"] == pytest.approx(0.04) and body["month_usd"] == pytest.approx(0.54) and body["avg_cost_per_word_7d"] == pytest.approx(0.04)
-    assert set(body["items"][0]) == {"id", "kind", "status", "model_requested", "model_used", "flag_tier", "word_count", "cost_usd", "duration_ms", "input_tokens", "output_tokens", "error", "started_at"}
+    assert set(body["items"][0]) == {"id", "kind", "status", "provider", "model_requested", "model_used", "flag_tier", "word_count", "cost_usd", "duration_ms", "input_tokens", "output_tokens", "error", "started_at"}
+    assert body["items"][0]["provider"] == "claude"  # 0010: every CLI row carries its provider
 
 
 def test_pause_and_resume(client: TestClient, seeded, admin, settings, ctx, frozen_clock):
@@ -214,7 +250,8 @@ def test_pause_and_resume(client: TestClient, seeded, admin, settings, ctx, froz
 
     r = client.post("/api/admin/ai/pause", json={"paused": True})
     assert r.status_code == 200 and r.json() == {"paused": True, "paused_until": "2026-10-15T00:00:00Z"}
-    assert db.kv_get(seeded, "claude.enabled") is None and db.kv_get(seeded, "claude.paused_until") == "2026-10-15T00:00:00Z"
+    # §10: the manual pause is the global `ai.paused_until` (every provider); the automatic `claude.paused_until` stays untouched
+    assert db.kv_get(seeded, "claude.enabled") is None and db.kv_get(seeded, "ai.paused_until") == "2026-10-15T00:00:00Z" and db.kv_get(seeded, "claude.paused_until") is None
     ai = client.get("/api/admin/overview").json()["ai"]
     assert ai["enabled"] is True and ai["paused_until"] == "2026-10-15T00:00:00Z"
     assert client.post("/api/admin/content/prewarm", json={"stage": "cet4", "limit": 5, "max_budget_usd": 1}).json()["error"]["code"] == "ai_disabled"
@@ -235,7 +272,7 @@ def test_pause_and_resume(client: TestClient, seeded, admin, settings, ctx, froz
     db.kv_set(seeded, "claude.enabled", "0")
     r = client.post("/api/admin/ai/pause", json={"paused": False})
     assert r.json() == {"paused": False, "paused_until": None}
-    assert db.kv_get(seeded, "claude.enabled") == "1" and db.kv_get(seeded, "claude.paused_until") is None
+    assert db.kv_get(seeded, "claude.enabled") == "1" and db.kv_get(seeded, "claude.paused_until") is None and db.kv_get(seeded, "ai.paused_until") is None
     assert [e["kind"] for e in client.get("/api/admin/events").json()["items"] if e["kind"].startswith("claude_")] == ["claude_resumed", "claude_paused", "claude_paused"]
 
 
@@ -253,27 +290,144 @@ def test_probe_endpoint_asserts_the_exact_probe_object(client: TestClient, seede
 
 
 def test_probe_falls_back_to_tier0_and_reports_unavailable(seeded, settings, tmp_path, frozen_clock):
-    import sys
-
-    from wd.ai import probe
-
-    fake = __import__("pathlib").Path(__file__).resolve().parents[1] / "fake_claude.py"
-
-    def wrapper(mode):
-        p = tmp_path / f"claude-{mode}"
-        p.write_text(f"#!/usr/bin/env bash\nFAKE_CLAUDE_MODE='{mode}' exec '{sys.executable}' -I '{fake}' \"$@\"\n")
-        p.chmod(0o755)
-        return str(p)
-
-    res = probe.check(seeded, replace(settings, claude_bin=wrapper("usage_error")), now=NOW)
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "usage_error")), now=NOW)
     assert res.ok and res.flag_tier == 0 and res.fallback and db.kv_get(seeded, "claude.flag_tier") == "0" and db.kv_get(seeded, "claude.available") == "1"
     assert [tuple(r) for r in seeded.execute("SELECT status, flag_tier FROM ai_calls ORDER BY id")] == [("error", 1), ("success", 0)]
     assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'claude_probe_fallback'").fetchone()[0] == 1
-    res = probe.check(seeded, replace(settings, claude_bin=wrapper("auth")), now=NOW)
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "auth")), now=NOW)
     assert not res.ok and db.kv_get(seeded, "claude.available") == "0" and "tier 1" in res.error and "tier 0" in res.error
     assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'claude_unavailable'").fetchone()[0] == 1
     assert db.kv_get(seeded, "claude.flag_tier") == "0"  # the runner never changes the tier on its own; the probe keeps the last good one
     assert probe.record_version(seeded, settings) is None  # the fake has no --version
+
+
+def test_pinned_probe_keeps_the_recorded_tier(seeded, settings, tmp_path):
+    """``probe.check(tier=…)`` — the fail-back probe's form (CLAUDE_INTEGRATION §10.6, AI_FALLBACK_MODEL §4.5): ONE attempt
+    at that tier; ``claude.available`` / ``last_probe_at`` / ``claude_unavailable`` exactly like the two-tier probe's;
+    ``claude.flag_tier`` is never rewritten, neither down (a tier-1 failure) nor up (a pinned success)."""
+    db.kv_set(seeded, "claude.flag_tier", "1")
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "usage_error")), now=NOW, tier="1")
+    assert not res.ok and res.flag_tier == 1 and not res.fallback and res.error.startswith("tier 1:") and "tier 0" not in res.error
+    assert len(res.call_ids) == 1 and db.kv_get(seeded, "claude.flag_tier") == "1"  # the two-tier form would have recorded '0' here
+    assert db.kv_get(seeded, "claude.available") == "0" and db.kv_get(seeded, "claude.last_probe_at") == NOW
+    assert [tuple(r) for r in seeded.execute("SELECT kind, status, flag_tier FROM ai_calls ORDER BY id")] == [("probe", "error", 1)]  # no tier-0 attempt
+    events = seeded.execute("SELECT kind, detail_json FROM system_events WHERE kind IN ('claude_unavailable', 'claude_probe_fallback') ORDER BY id").fetchall()
+    assert [e["kind"] for e in events] == ["claude_unavailable"]
+    detail = json.loads(events[0]["detail_json"])
+    assert detail["pinned_tier"] == 1 and set(detail) == {"tier1", "pinned_tier"} and detail["tier1"]["status"] == "error"
+    later = "2026-10-14T00:30:00Z"
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "ok")), now=later, tier="1")
+    assert res.ok and res.flag_tier == 1 and res.error is None and res.model_used == "claude-sonnet-fake" and res.cost_usd == pytest.approx(0.004)
+    assert db.kv_get(seeded, "claude.flag_tier") == "1" and db.kv_get(seeded, "claude.available") == "1" and db.kv_get(seeded, "claude.last_probe_at") == later
+    db.kv_set(seeded, "claude.flag_tier", "0")
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "ok")), now="2026-10-14T01:00:00Z", tier="1")
+    assert res.ok and res.flag_tier == 1 and db.kv_get(seeded, "claude.flag_tier") == "0"  # a pinned success does not promote the tier either
+    res = probe.check(seeded, replace(settings, claude_bin=fake_wrapper(tmp_path, "ok")), now="2026-10-14T01:30:00Z", tier="0")
+    assert res.ok and res.flag_tier == 0 and db.kv_get(seeded, "claude.flag_tier") == "0"
+    assert [r[0] for r in seeded.execute("SELECT flag_tier FROM ai_calls ORDER BY id")] == [1, 1, 1, 0]
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'claude_unavailable'").fetchone()[0] == 1
+
+
+def test_housekeeping_failback_probe_is_pinned_to_the_recorded_tier(seeded, connect, frozen_clock, settings, tmp_path, fake_http):
+    """CLAUDE_INTEGRATION §10.6 / AI_FALLBACK_MODEL §4.5: while the fallback is active the automatic probe runs ONE attempt at
+    the recorded tier — a flaky tier-1 attempt must not fail back through tier 0 and downgrade ``claude.flag_tier`` on the
+    way; once the CLI answers at that tier the probe fails back with the tier intact."""
+    cfg = replace(settings, claude_bin=fake_wrapper(tmp_path, "usage_error"), **FALLBACK_FIELDS)
+    db.kv_set(seeded, "claude.flag_tier", "1")
+    db.kv_set(seeded, "ai.active_provider", "fallback")
+
+    def housekeeping(cfg):
+        w = worker.ClaudeWorker(JobContext(db=connect, cfg=cfg, clock=frozen_clock, enqueue=queue.enqueue, log=logging.getLogger("t"), worker_id="claude-1", boot_id="boot"))
+        w.maybe_sweep()  # the first housekeeping after a start forces the fail-back probe
+
+    housekeeping(cfg)
+    assert db.kv_get(seeded, "claude.flag_tier") == "1" and db.kv_get(seeded, "ai.active_provider") == "fallback"
+    assert db.kv_get(seeded, "ai.failover.probe_failures") == "1" and db.kv_get(seeded, "claude.available") == "0"
+    assert [tuple(r) for r in seeded.execute("SELECT kind, status, flag_tier, provider FROM ai_calls")] == [("probe", "error", 1, "claude")]
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind IN ('ai_failback', 'claude_probe_fallback')").fetchone()[0] == 0
+    assert fake_http["calls"] == []  # the probe never touches the fallback
+    frozen_clock.advance(minutes=6)  # past failover.PROBE_FORCE_GRACE: a restart with a healthy CLI probes again
+    housekeeping(replace(cfg, claude_bin=fake_wrapper(tmp_path, "ok")))
+    assert db.kv_get(seeded, "ai.active_provider") == "claude" and db.kv_get(seeded, "claude.flag_tier") == "1" and db.kv_get(seeded, "claude.available") == "1"
+    assert [tuple(r) for r in seeded.execute("SELECT status, flag_tier FROM ai_calls ORDER BY id")] == [("error", 1), ("success", 1)]
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'ai_failback'").fetchone()[0] == 1
+
+
+def test_probe_endpoint_validates_the_body_and_throttles_per_provider(client: TestClient, seeded, admin):
+    """API.md 66: a ``provider`` other than claude / fallback → 400 ``validation_error``; an unconfigured fallback answers
+    ``ok:false`` without a ledger row or a kv write; the 1/min throttle is keyed per provider."""
+    r = client.post("/api/admin/ai/probe", json={"provider": "x"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+    r = client.post("/api/admin/ai/probe", json={"provider": "fallback"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False and body["flag_tier"] == 0 and body["cost_usd"] == 0 and body["duration_ms"] == 0 and body["model_used"] is None
+    assert body["error"].startswith("fallback provider not configured")
+    assert seeded.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 0
+    assert db.kv_get(seeded, "ai.fallback.available") is None and db.kv_get(seeded, "ai.fallback.last_probe_at") is None
+    r = client.post("/api/admin/ai/probe", json={"provider": "fallback"})
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited" and r.headers["Retry-After"]
+    r = client.post("/api/admin/ai/probe", json={"provider": "claude"})  # its own key: the fallback probe did not spend it
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True and r.json()["flag_tier"] == 1 and r.json()["model_used"] == "claude-sonnet-fake"
+    assert [tuple(row) for row in seeded.execute("SELECT kind, status, provider FROM ai_calls")] == [("probe", "success", "claude")]
+    assert client.post("/api/admin/ai/probe", json={"provider": "claude"}).status_code == 429
+    assert client.post("/api/admin/ai/probe").status_code == 429  # no body = claude
+
+
+def test_fallback_probe_through_the_api_records_availability_and_lifts_its_pause(seeded, settings, frozen_clock, fake_http):
+    """API.md 66 ``{provider:'fallback'}`` on a configured fallback (CLAUDE_INTEGRATION §10.6): one ``kind='probe'`` row with
+    ``provider='fallback'``, ``kv.ai.fallback.available='1'`` (a sticky ``'0'`` is lifted — the probe is proof),
+    ``last_probe_at`` / ``model_seen`` recorded, the success reported to ``failover.record_success`` (the fallback's
+    automatic pause ends), the CLI never spawned."""
+    from wd.main import create_app
+
+    cfg = replace(settings, **FALLBACK_FIELDS)
+    db.kv_set(seeded, "ai.fallback.available", "0")  # left behind by a not_found: on a model id that has since been fixed
+    db.kv_set(seeded, "ai.fallback.paused_until", "2026-10-14T00:30:00Z")
+    db.kv_set(seeded, "claude.paused_until", "2026-10-15T00:00:00Z")  # a balance: pause of the CLI: not this probe's business
+    _, token = make_user(seeded, "root", role="admin")
+    with TestClient(create_app(cfg, clock=frozen_clock, configure_logs=False), base_url="http://testserver") as api:
+        api.headers["X-WD-Request"] = "1"
+        api.cookies.set("wd_session", token)
+        r = api.post("/api/admin/ai/probe", json={"provider": "fallback"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True and body["flag_tier"] == 0 and body["error"] is None and body["model_used"] == "glm-4.7-flash"
+        assert body["cost_usd"] == 0 and body["duration_ms"] >= 0
+        assert api.post("/api/admin/ai/probe", json={"provider": "fallback"}).status_code == 429
+    assert db.kv_get(seeded, "ai.fallback.available") == "1" and db.kv_get(seeded, "ai.fallback.last_probe_at") == NOW
+    assert db.kv_get(seeded, "ai.fallback.model_seen") == "glm-4.7-flash"
+    assert db.kv_get(seeded, "ai.fallback.paused_until") is None and db.kv_get(seeded, "claude.paused_until") == "2026-10-15T00:00:00Z"
+    assert [tuple(row) for row in seeded.execute("SELECT kind, status, provider, flag_tier FROM ai_calls")] == [("probe", "success", "fallback", 0)]
+    assert len(fake_http["calls"]) == 1 and fake_http["calls"][0]["url"] == "https://mock.example/api/paas/v4/chat/completions"
+    assert fake_http["calls"][0]["json"]["model"] == "glm-4.7-flash"
+    assert db.kv_get(seeded, "claude.last_probe_at") is None and db.kv_get(seeded, "claude.available") is None
+
+
+def test_fallback_probe_marks_unavailable_only_for_configuration_failures(seeded, settings, fake_http):
+    """CLAUDE_INTEGRATION §10.6: ``ai.fallback.available='0'`` — the sticky mark ``failover.fallback_eligible`` refuses on —
+    is written by a ``not_found:`` / ``spawn_error`` probe failure only; a transient failure keeps the previous value and
+    records just ``last_probe_at`` + the ``fallback_unavailable`` event."""
+    cfg = replace(settings, **FALLBACK_FIELDS)
+    assert probe.check_fallback(seeded, cfg, now=NOW).ok and db.kv_get(seeded, "ai.fallback.available") == "1"
+    for mode, at in (("503", "2026-10-14T00:01:00Z"), ("timeout", "2026-10-14T00:02:00Z"), ("network", "2026-10-14T00:03:00Z"), ("schema_mismatch", "2026-10-14T00:04:00Z")):
+        fake_http["mode"] = mode
+        res = probe.check_fallback(seeded, cfg, now=at)
+        assert not res.ok and res.error and len(res.call_ids) == 1, mode
+        assert db.kv_get(seeded, "ai.fallback.available") == "1" and db.kv_get(seeded, "ai.fallback.last_probe_at") == at, mode
+    events = [json.loads(r[0]) for r in seeded.execute("SELECT detail_json FROM system_events WHERE kind = 'fallback_unavailable' ORDER BY id")]
+    assert len(events) == 4 and all(e["marked_unavailable"] is False and e["model"] == "glm-4.7-flash" for e in events)
+    fake_http["mode"] = "404_model"  # Zhipu 1211: the model id does not exist at this endpoint — a configuration failure
+    res = probe.check_fallback(seeded, cfg, now="2026-10-14T00:05:00Z")
+    assert not res.ok and res.error.startswith("not_found:") and db.kv_get(seeded, "ai.fallback.available") == "0"
+    assert json.loads(seeded.execute("SELECT detail_json FROM system_events WHERE kind = 'fallback_unavailable' ORDER BY id DESC LIMIT 1").fetchone()[0])["marked_unavailable"] is True
+    fake_http["mode"] = "ok"
+    assert probe.check_fallback(seeded, cfg, now="2026-10-14T00:06:00Z").ok and db.kv_get(seeded, "ai.fallback.available") == "1"
+    # the adapter's own configuration check (a key file that is not there) is a spawn_error without a request: '0' again
+    res = probe.check_fallback(seeded, replace(cfg, ai_fallback_api_key="", ai_fallback_api_key_file=str(settings.data_dir / "missing.key")), now="2026-10-14T00:07:00Z")
+    assert not res.ok and db.kv_get(seeded, "ai.fallback.available") == "0" and len(fake_http["calls"]) == 8  # schema_mismatch cost two requests (answer + repair round); the missing key made none
+    assert [row[0] for row in seeded.execute("SELECT status FROM ai_calls ORDER BY id")] == ["success", "overloaded", "timeout", "overloaded", "error", "spawn_error", "success", "spawn_error"]
 
 
 # -------------------------------------------------------------------------------------------- prewarm

@@ -46,7 +46,7 @@ COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.seed": ("import-seed",),
     "wd.security": ("create-admin", "set-password", "promote", "demote", "invite"),
     "wd.backup": ("backup", "restore"),
-    "wd.ai.probe": ("claude-check",),
+    "wd.ai.probe": ("claude-check", "ai-check"),
     "wd.jobs.worker": ("worker-once",),
     "wd.jobs.scheduler": ("tick",),
     "wd.services.batches": ("build-batch", "push-now"),

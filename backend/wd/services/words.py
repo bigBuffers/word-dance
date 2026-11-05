@@ -412,17 +412,28 @@ def confusables_for(conn: sqlite3.Connection, user_id: int, lemma: str) -> list[
     return out
 
 
-def content_deferred_until(conn: sqlite3.Connection, word_id: int, *, now: str | None = None) -> str | None:
+def content_deferred_until(conn: sqlite3.Connection, word_id: int, *, now: str | None = None, cfg: Any = None) -> str | None:
     """API.md 24 ``deferred_until``: the live ``generate_content`` job's ``run_after`` when it lies more than 5 minutes
-    ahead (budget deferral), else ``kv.claude.paused_until`` while AI is paused, else None."""
+    ahead (budget deferral), else the instant AI may serve content again, else None.
+
+    With ``cfg`` the pause question is CLAUDE_INTEGRATION §10's "any provider" rule for the content kind
+    (``failover.availability``): a paused CLI with a fallback that may serve content is not a pause. Without ``cfg``
+    the legacy answer applies — ``kv.claude.paused_until`` or the admin's global pause (``budget.paused_until``).
+    """
     now = now or now_iso()
     job = queue.live_job(conn, f"content:{int(word_id)}")
     if job is not None and job.run_after > to_iso(parse_iso(now) + timedelta(seconds=DEFERRAL_THRESHOLD_S)):
         return str(job.run_after)
-    paused = db.kv_get(conn, "claude.paused_until")
-    if paused and paused > now:
-        return paused
-    return None
+    from ..ai import budget  # local import: services → ai must not become a module cycle at import time
+
+    if cfg is not None:
+        from ..ai import failover
+
+        avail = failover.availability(conn, cfg, kind="content", now=now, priority=job.priority if job is not None else 20)
+        if avail.ok:
+            return None
+        return avail.resumes_at or budget.paused_until(conn, now)
+    return budget.paused_until(conn, now)  # kv.claude.paused_until or the admin's global pause (CLAUDE_INTEGRATION §10)
 
 
 def active_content(conn: sqlite3.Connection, row: Mapping[str, Any]) -> dict[str, Any] | None:

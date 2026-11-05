@@ -42,6 +42,7 @@ from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as cl
 from ..services import bank, batches
 from . import lease, queue
 from .registry import JobContext
+from .worker import REVIVE_CONTENT_WORD_SQL
 
 log = logging.getLogger("wd.jobs.scheduler")
 
@@ -249,7 +250,7 @@ def prefetch(conn: sqlite3.Connection, now: datetime | str | None, *, cfg: Any =
         from ..config import get_settings
 
         cfg = get_settings()
-    if not budget.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now_s) is not None:
+    if not budget.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now_s, cfg=cfg, kind="content") is not None:
         return 0
     spent = float(budget.spent_today(conn, cfg, now_s))
     cap = float(getattr(cfg, "ai_daily_budget_usd", 0.0) or 0.0)
@@ -301,15 +302,21 @@ def requeue_dead_once(conn: sqlite3.Connection, now: datetime) -> int:
     of the same word — is not a candidate: its work is already queued, and it must not take one of the 50 slots. Each
     candidate is updated on its own, so a key shared by two dead rows (a dead job and its re-enqueued, also-dead
     successor) or a race with a concurrent enqueue only skips that row (``ux_jobs_dedupe_live``) instead of aborting
-    the whole night's requeue; a skipped row keeps ``requeued_at`` NULL and stays eligible. Returns the rows requeued.
+    the whole night's requeue; a skipped row keeps ``requeued_at`` NULL and stays eligible. A revived ``generate_content``
+    job's word goes back from ``failed`` to ``queued`` in the same transaction (``worker.REVIVE_CONTENT_WORD_SQL``, keyed
+    on the row's ``payload.word_id`` and guarded like every enqueue site: validated, not merged, no active version), so
+    the word is ``queued`` exactly while it has a live content job (CLAUDE_INTEGRATION §6.3) — the content routes and
+    the batch builder then wait for it instead of reporting 生成失败. The once-only ``requeued_at`` stamp is the
+    nightly's alone: the admin requeue-dead and the fail-back (``worker.requeue_dead_jobs``) neither set nor honour it.
+    Returns the rows requeued.
     """
     now_s = to_iso(now)
     cutoff = to_iso(now - DEAD_REQUEUE_AGE)
     with db.maybe_tx(conn):
-        ids = [
-            int(r[0])
+        rows = [
+            (int(r[0]), str(r[1]), r[2])
             for r in conn.execute(
-                "SELECT j.id FROM jobs j WHERE j.status = 'dead' AND j.type IN ('generate_content','lookup_word') "
+                "SELECT j.id, j.type, j.payload_json FROM jobs j WHERE j.status = 'dead' AND j.type IN ('generate_content','lookup_word') "
                 "AND COALESCE(j.finished_at, j.updated_at) < ? AND json_extract(j.payload_json, '$.requeued_at') IS NULL "
                 "AND NOT EXISTS (SELECT 1 FROM jobs l WHERE l.dedupe_key = j.dedupe_key AND l.status IN ('queued','running')) "
                 "ORDER BY j.id LIMIT ?",
@@ -317,16 +324,21 @@ def requeue_dead_once(conn: sqlite3.Connection, now: datetime) -> int:
             )
         ]
         requeued = 0
-        for job_id in ids:
+        for job_id, job_type, payload_json in rows:
             try:
                 cur = conn.execute(
                     "UPDATE jobs SET status = 'queued', attempts = 0, payload_json = json_set(payload_json, '$.group_size', 1, '$.requeued_at', ?), "
                     "run_after = ?, updated_at = ?, finished_at = NULL, locked_at = NULL, locked_by = NULL WHERE id = ? AND status = 'dead'",
                     (now_s, now_s, now_s, job_id),
                 )
-                requeued += int(cur.rowcount)
             except sqlite3.IntegrityError:  # statement-level abort: the transaction stays open
                 log.info("dead job %d not requeued: its dedupe key is held by a live job", job_id, extra={"event": "dead_requeue_skipped", "job_id": job_id})
+                continue
+            if cur.rowcount != 1:
+                continue
+            requeued += 1
+            if job_type == "generate_content":  # the revived job is live now: its failed word is queued again (same transaction)
+                conn.execute(REVIVE_CONTENT_WORD_SQL, (now_s, payload_json))
         return requeued
 
 

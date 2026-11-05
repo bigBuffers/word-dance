@@ -448,6 +448,39 @@ def test_requeue_dead_once_skips_keys_held_by_live_jobs_and_duplicate_dead_rows(
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (b,)).fetchone()[0] == "queued"
 
 
+def test_requeue_dead_once_revives_the_failed_word_of_a_content_job(seeded):
+    """CLAUDE_INTEGRATION §6.3: "a word is ``queued`` ⇔ it has a live content job" in both directions — the nightly requeue of a
+    dead ``generate_content`` job puts its ``failed`` word back to ``queued`` in the same transaction (guarded like every enqueue
+    site: validated, not merged, no active version), while its own marks (``group_size`` 1, the once-only ``requeued_at``
+    stamp) are unchanged; a lookup row touches no word."""
+    conn = seeded
+    now = datetime(2026, 10, 14, 19, 30, tzinfo=UTC)
+    dog, cat, bank_w, run = (wid(conn, l) for l in ("dog", "cat", "bank", "run"))
+    conn.execute("UPDATE words SET content_state = 'failed' WHERE id IN (?, ?, ?, ?)", (dog, cat, bank_w, run))
+    conn.execute("UPDATE words SET is_valid_english = 0, is_public = 0 WHERE id = ?", (cat,))  # rejected: keeps failed
+    cid = conn.execute("INSERT INTO word_contents(word_id, version, prompt_version, model, content_json) VALUES (?, 1, 'content-v1', 'm', '{}') RETURNING id", (bank_w,)).fetchone()[0]
+    conn.execute("UPDATE words SET active_content_id = ? WHERE id = ?", (cid, bank_w))  # a live version: never flipped off it
+    d_dog = _dead(conn, "generate_content", dog, f"content:{dog}")
+    d_cat = _dead(conn, "generate_content", cat, f"content:{cat}")
+    d_bank = _dead(conn, "generate_content", bank_w, f"content:{bank_w}")
+    d_run = _dead(conn, "lookup_word", run, f"lookup:{run}")  # a lookup touches no word
+    assert scheduler.requeue_dead_once(conn, now) == 4
+    states = {w: conn.execute("SELECT content_state FROM words WHERE id = ?", (w,)).fetchone()[0] for w in (dog, cat, bank_w, run)}
+    assert states == {dog: "queued", cat: "failed", bank_w: "failed", run: "failed"}
+    for jid in (d_dog, d_cat, d_bank, d_run):
+        job = db.row_to_dict(conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone())
+        payload = json.loads(job["payload_json"])
+        assert (job["status"], job["attempts"], payload["group_size"], payload["requeued_at"]) == ("queued", 0, 1, "2026-10-14T19:30:00Z"), jid  # the nightly's marks as before
+    # a dead row whose key is held by a live job is skipped (as before) and its word is left alone
+    conn.execute("DELETE FROM jobs")
+    conn.execute("UPDATE words SET content_state = 'failed' WHERE id = ?", (dog,))
+    held = _dead(conn, "generate_content", dog, f"content:{dog}")
+    queue.enqueue(conn, "generate_content", {"word_id": dog}, dedupe_key=f"content:{dog}", run_after="2026-10-15T00:05:00Z", now="2026-10-14T10:00:00Z")
+    assert scheduler.requeue_dead_once(conn, now) == 0
+    assert conn.execute("SELECT status FROM jobs WHERE id = ?", (held,)).fetchone()[0] == "dead"
+    assert conn.execute("SELECT content_state FROM words WHERE id = ?", (dog,)).fetchone()[0] == "failed"
+
+
 def test_maintenance_requeues_dead_jobs_when_prefetch_just_made_one_of_their_keys_live(settings, seeded, monkeypatch, caplog):
     """maintenance() runs prefetch BEFORE the dead requeue: a failed-content word in tomorrow's selection gets a live
     priority-30 job first; the unrelated dead rows must still be requeued in the same night."""

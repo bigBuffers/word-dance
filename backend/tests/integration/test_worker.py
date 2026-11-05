@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -360,3 +361,103 @@ def test_requeue_dead_jobs_helper(seeded):
         job = queue.get_job(seeded, j)
         assert job.status == "queued" and job.attempts == 0 and job.payload["group_size"] == 1 and job.run_after == NOW and job.finished_at is None
     assert queue.get_job(seeded, ids[0]).status == "dead"
+    # the fail-back filter (CLAUDE_INTEGRATION §10.6): only jobs that died at or after ``died_after`` (ai.failover.since) come back
+    late, early = enqueue_content(seeded, seed_words(seeded, 5)[3:])
+    seeded.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = '2026-10-14T00:10:00Z' WHERE id = ?", (late,))
+    seeded.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = '2026-10-13T23:59:59Z' WHERE id = ?", (early,))
+    assert worker.requeue_dead_jobs(seeded, now="2026-10-14T00:31:00Z", types=("generate_content", "lookup_word"), died_after=NOW, limit=200) == 1
+    job = queue.get_job(seeded, late)
+    assert job.status == "queued" and job.attempts == 0 and job.payload["group_size"] == 1 and job.run_after == "2026-10-14T00:31:00Z"
+    assert queue.get_job(seeded, early).status == "dead"  # died one second before the instant: the nightly requeue's business
+    assert queue.get_job(seeded, ids[0]).status == "dead"  # still held by the live key (and older than the instant anyway)
+
+
+def test_requeue_dead_jobs_counts_only_real_candidates_and_revives_the_failed_word(seeded):
+    """CLAUDE_INTEGRATION §10.6 / §6.3: ``limit`` counts real candidates (a dead row whose key is live again takes no slot),
+    ``group_size=None`` removes the mark so the revived jobs batch like fresh claims (the admin button keeps 1), and a
+    revived ``generate_content`` job's ``failed`` word goes back to ``queued`` in the same transaction — guarded like every
+    enqueue site (validated, not merged, no active version); a lookup row touches no word."""
+
+    def state(word_id):
+        return seeded.execute("SELECT content_state FROM words WHERE id = ?", (word_id,)).fetchone()[0]
+
+    def dead(word_id, finished_at, type_="generate_content", key=None):
+        jid = queue.enqueue(seeded, type_, {"word_id": word_id}, dedupe_key=key or f"content:{word_id}", priority=20, now=NOW)
+        seeded.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = ?, payload_json = json_set(payload_json, '$.group_size', 2) WHERE id = ?", (finished_at, jid))
+        return jid
+
+    w1, w2, w3, w4, w5 = seed_words(seeded, 5)
+    seeded.execute("UPDATE words SET content_state = 'failed' WHERE id IN (?, ?, ?, ?)", (w1, w2, w3, w5))
+    seeded.execute("UPDATE words SET is_valid_english = 0, is_public = 0 WHERE id = ?", (w3,))  # rejected: keeps failed
+    cid = seeded.execute("INSERT INTO word_contents(word_id, version, prompt_version, model, content_json) VALUES (?, 1, 'content-v1', 'm', '{}') RETURNING id", (w5,)).fetchone()[0]
+    seeded.execute("UPDATE words SET active_content_id = ? WHERE id = ?", (cid, w5))  # a live version: never flipped off it
+    held = dead(w2, NOW)  # the earliest row, but its key is live again (a fresh request): not a candidate
+    live = queue.enqueue(seeded, "generate_content", {"word_id": w2}, dedupe_key=f"content:{w2}", priority=20, now="2026-10-14T00:01:00Z")
+    j1 = dead(w1, "2026-10-14T00:01:00Z")
+    j3 = dead(w3, "2026-10-14T00:02:00Z")
+    j4 = dead(w4, "2026-10-14T00:03:00Z")  # its word never went failed
+    j5 = dead(w5, "2026-10-14T00:04:00Z")
+    lk = dead(w1, "2026-10-14T00:05:00Z", "lookup_word", "lookup:x")
+    # limit=1 revives j1: the held row never took the slot
+    assert worker.requeue_dead_jobs(seeded, now="2026-10-14T00:31:00Z", types=("generate_content", "lookup_word"), died_after=NOW, limit=1, group_size=None) == 1
+    job = queue.get_job(seeded, j1)
+    assert (job.status, job.attempts, job.run_after, job.finished_at) == ("queued", 0, "2026-10-14T00:31:00Z", None) and "group_size" not in job.payload  # the bisection mark went too
+    assert queue.get_job(seeded, held).status == "dead" and queue.get_job(seeded, live).status == "queued"
+    assert state(w1) == "queued" and state(w2) == "failed"  # the revived job's word is queued again; the held row's word was not touched
+    assert worker.requeue_dead_jobs(seeded, now="2026-10-14T00:32:00Z", types=("generate_content", "lookup_word"), died_after=NOW, group_size=None) == 4
+    assert all(queue.get_job(seeded, j).status == "queued" and "group_size" not in queue.get_job(seeded, j).payload for j in (j3, j4, j5, lk))
+    assert (state(w3), state(w4), state(w5)) == ("failed", "none", "failed")  # the guard: rejected / never failed / a live version
+    # the admin button keeps the mark 1 (the default); an explicit size is written
+    s1 = dead(w1, "2026-10-14T00:06:00Z", "generate_svg", "svg:1")
+    assert worker.requeue_dead_jobs(seeded, now="2026-10-14T00:33:00Z") == 1 and queue.get_job(seeded, s1).payload["group_size"] == 1
+    s2 = dead(w1, "2026-10-14T00:07:00Z", "generate_svg", "svg:2")
+    assert worker.requeue_dead_jobs(seeded, now="2026-10-14T00:34:00Z", group_size=3) == 1 and queue.get_job(seeded, s2).payload["group_size"] == 3
+
+
+def test_claude_worker_first_housekeeping_ends_a_stale_failover_episode_outside_mode_auto(seeded, ctx):
+    """CLAUDE_INTEGRATION §10.6: a start in mode ``claude_cli`` with ``ai.active_provider='fallback'`` left by an earlier
+    ``auto`` tour resets the state and drops the episode keys (``failover.reconcile_mode``) before anything can "fail back"
+    from it — no probe (not mode auto), no requeue, no event; only the first housekeeping after start does it."""
+    db.kv_set(seeded, "ai.active_provider", "fallback", now=NOW)
+    for key, value in (("ai.failover.since", NOW), ("ai.failover.reason", "auth"), ("ai.failover.trigger_call_id", "3"), ("ai.failover.next_probe_at", "2026-10-14T00:30:00Z")):
+        db.kv_set(seeded, key, value, now=NOW)
+    (dead_id,) = enqueue_content(seeded, seed_words(seeded, 1))
+    seeded.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = '2026-10-14T00:05:00Z' WHERE id = ?", (dead_id,))
+    w = worker.ClaudeWorker(ctx)
+    w.maybe_sweep()
+    assert db.kv_get(seeded, "ai.active_provider") == "claude"
+    for key in ("ai.failover.since", "ai.failover.reason", "ai.failover.trigger_call_id", "ai.failover.next_probe_at", "ai.failover.probe_failures", "ai.failover.last_probe_at"):
+        assert db.kv_get(seeded, key) is None, key
+    assert calls(seeded) == [] and queue.get_job(seeded, dead_id).status == "dead"
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'ai_failback'").fetchone()[0] == 0
+    db.kv_set(seeded, "ai.active_provider", "fallback", now=NOW)  # a later housekeeping leaves the state alone (the admin's resume resets it)
+    conn = ctx.db()
+    try:
+        w.housekeeping(conn, "2026-10-14T00:10:00Z")
+    finally:
+        conn.close()
+    assert db.kv_get(seeded, "ai.active_provider") == "fallback"
+
+
+def test_claim_limit_falls_back_to_the_plain_limit_on_an_unexpected_error(seeded, ctx, monkeypatch, caplog):
+    """CLAUDE_INTEGRATION §10.5: the claim size comes from ``failover.claim_limit``; a kv / config surprise there must never
+    stop the queue — the plain ``queue.limit_for`` is used and a warning logged — while sqlite errors still escape."""
+    from wd.ai import failover
+
+    assert worker.claim_limit(ctx, seeded, "generate_content", now=NOW) == 10 and worker.claim_limit(ctx, seeded, "lookup_word", now=NOW) == 20
+
+    def surprise(*args, **kwargs):
+        raise RuntimeError("kv surprise")
+
+    monkeypatch.setattr(failover, "claim_limit", surprise)
+    with caplog.at_level(logging.WARNING, logger="t"):
+        assert worker.claim_limit(ctx, seeded, "generate_content", now=NOW) == 10
+        assert worker.claim_limit(ctx, seeded, "lookup_word", now=NOW) == 20
+    assert [getattr(r, "event", None) for r in caplog.records].count("claim_limit_fallback") == 2, caplog.text
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(failover, "claim_limit", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        worker.claim_limit(ctx, seeded, "generate_content", now=NOW)

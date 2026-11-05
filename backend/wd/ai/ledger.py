@@ -18,6 +18,7 @@ from ..clock import now_iso
 from ..db import maybe_tx
 
 KINDS: tuple[str, ...] = ("content", "lookup", "consolidate", "svg", "probe")
+PROVIDERS: tuple[str, ...] = ("claude", "fallback")  # ai_calls.provider (migration 0010): the CLI or ai/providers/openai_http.py
 STATUSES: tuple[str, ...] = ("running", "success", "error", "timeout", "invalid_output", "budget", "auth", "overloaded", "spawn_error")
 ERROR_MAX_CHARS = 1000
 PHOTO_PROVIDERS_SQL = "('wikimedia','openverse','pixabay','pexels')"
@@ -34,15 +35,18 @@ def insert_call(
     max_budget_usd: float,
     reserved_usd: float,
     now: str | None = None,
+    provider: str = "claude",
 ) -> int:
-    """Insert the ``running`` ledger row (THE row that exists before the spawn) and return its id."""
+    """Insert the ``running`` ledger row (THE row that exists before the spawn / request) and return its id."""
     if kind not in KINDS:
         raise ValueError(f"unknown ai_calls.kind {kind!r}")
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown ai_calls.provider {provider!r}")
     now = now or now_iso()
     with maybe_tx(conn):
         cur = conn.execute(
-            "INSERT INTO ai_calls(kind, status, model_requested, flag_tier, word_count, job_ids_json, max_budget_usd, reserved_usd, started_at) "
-            "VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ai_calls(kind, status, model_requested, flag_tier, word_count, job_ids_json, max_budget_usd, reserved_usd, started_at, provider) "
+            "VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 kind,
                 model_requested,
@@ -52,6 +56,7 @@ def insert_call(
                 float(max_budget_usd),
                 float(reserved_usd),
                 now,
+                provider,
             ),
         )
         return int(cur.lastrowid)
@@ -119,31 +124,39 @@ def get_call(conn: sqlite3.Connection, call_id: int) -> dict[str, Any] | None:
 
 
 # ------------------------------------------------------------------------------------------- aggregates
-def sum_cost(conn: sqlite3.Connection, since: str, until: str, *, kind: str | None = None) -> float:
+def _filters(kind: str | None, provider: str | None) -> tuple[str, list[Any]]:
+    """Optional ``kind`` / ``provider`` predicates appended to an aggregate's WHERE clause."""
+    sql, params = "", []
+    if kind is not None:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if provider is not None:
+        sql += " AND provider = ?"
+        params.append(provider)
+    return sql, params
+
+
+def sum_cost(conn: sqlite3.Connection, since: str, until: str, *, kind: str | None = None, provider: str | None = None) -> float:
     """``SUM(cost_usd)`` of the calls started in ``[since, until)`` (every status: failures cost money too)."""
-    if kind is None:
-        row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE started_at >= ? AND started_at < ?", (since, until)).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE started_at >= ? AND started_at < ? AND kind = ?", (since, until, kind)
-        ).fetchone()
+    extra, params = _filters(kind, provider)
+    row = conn.execute(f"SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE started_at >= ? AND started_at < ?{extra}", [since, until, *params]).fetchone()
     return float(row[0] or 0.0)
 
 
-def reserved_running(conn: sqlite3.Connection, *, kind: str | None = None) -> float:
+def reserved_running(conn: sqlite3.Connection, *, kind: str | None = None, provider: str | None = None) -> float:
     """``SUM(reserved_usd)`` of the calls still ``running`` (the reservation half of ``spent_today``, §7)."""
-    if kind is None:
-        row = conn.execute("SELECT COALESCE(SUM(reserved_usd), 0) FROM ai_calls WHERE status = 'running'").fetchone()
-    else:
-        row = conn.execute("SELECT COALESCE(SUM(reserved_usd), 0) FROM ai_calls WHERE status = 'running' AND kind = ?", (kind,)).fetchone()
+    extra, params = _filters(kind, provider)
+    row = conn.execute(f"SELECT COALESCE(SUM(reserved_usd), 0) FROM ai_calls WHERE status = 'running'{extra}", params).fetchone()
     return float(row[0] or 0.0)
 
 
-def count_started(conn: sqlite3.Connection, since: str, until: str | None = None) -> int:
+def count_started(conn: sqlite3.Connection, since: str, until: str | None = None, *, provider: str | None = None) -> int:
+    """Calls started since ``since`` (and before ``until``), optionally of one provider (the per-provider hourly caps)."""
+    extra, params = _filters(None, provider)
     if until is None:
-        row = conn.execute("SELECT COUNT(*) FROM ai_calls WHERE started_at >= ?", (since,)).fetchone()
+        row = conn.execute(f"SELECT COUNT(*) FROM ai_calls WHERE started_at >= ?{extra}", [since, *params]).fetchone()
     else:
-        row = conn.execute("SELECT COUNT(*) FROM ai_calls WHERE started_at >= ? AND started_at < ?", (since, until)).fetchone()
+        row = conn.execute(f"SELECT COUNT(*) FROM ai_calls WHERE started_at >= ? AND started_at < ?{extra}", [since, until, *params]).fetchone()
     return int(row[0] or 0)
 
 
@@ -191,6 +204,7 @@ def call_dto(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "id": int(r["id"]),
         "kind": r["kind"],
         "status": r["status"],
+        "provider": str(r.get("provider") or "claude"),
         "model_requested": r["model_requested"],
         "model_used": r.get("model_used"),
         "flag_tier": 1 if int(r.get("flag_tier") or 0) == 1 else 0,
@@ -206,6 +220,7 @@ def call_dto(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "KINDS",
+    "PROVIDERS",
     "STATUSES",
     "avg_cost_per_word",
     "call_dto",

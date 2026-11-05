@@ -4,7 +4,7 @@
   --tools "" --no-session-persistence --model <m> --max-budget-usd <usd>``); tier 1 adds ``--system-prompt
   --restricted --strict-mcp-config --disable-slash-commands``. Under tier 0 the system prompt is folded into the
   positional prompt as ``<system_instructions>…</system_instructions>\\n\\n<user prompt>``. Never ``--bare``;
-  ``--fallback-model`` only when ``WD_AI_FALLBACK_MODEL`` is set; ``WD_AI_EXTRA_ARGS`` appended verbatim.
+  ``--fallback-model`` only when ``WD_AI_CLI_FALLBACK_MODEL`` is set; ``WD_AI_EXTRA_ARGS`` appended verbatim.
 * :func:`claude_env` — an allow-list, never a copy of ``os.environ`` (no ``CLAUDECODE``, no ``CLAUDE_CODE_*``,
   no ``WD_*``).
 * :func:`run_claude` — ledger row **before** the spawn, ``Popen`` + ``communicate(timeout)`` +
@@ -13,7 +13,8 @@
   An argv element of :data:`MAX_ARG_BYTES` or more (Linux ``MAX_ARG_STRLEN``) is refused before the spawn, and the
   kernel's own ``E2BIG`` / ``ENAMETOOLONG`` is classified the same way: a per-call ``error`` (the job backs off and
   eventually dies alone), never ``spawn_error`` (which means the binary is missing and pauses AI for everyone).
-* :func:`parse_and_classify` — the §3 status table.
+* :func:`parse_and_classify` — the §3 status table (``balance:`` / ``network:`` prefixes on ``Parsed.error`` tell
+  ``ai/failover.py`` a balance failure from an ordinary ``auth`` and a connection failure from an API overload).
 """
 
 from __future__ import annotations
@@ -68,9 +69,21 @@ MAX_ARG_BYTES = 131_072
 #: spawn ``OSError`` values that are about the argv we built (an input-dependent, per-call error), not about the binary
 ARG_SIZE_ERRNOS: tuple[int, ...] = (errno.E2BIG, errno.ENAMETOOLONG)
 
-AUTH_RE = re.compile(r"not logged in|log ?in|authentication|unauthori[sz]ed|\b401\b|invalid api key|credential", re.IGNORECASE)
+# §3 classification. 2026-11 (AI_FALLBACK_MODEL §1): the strings of the real outages — the enterprise "managed settings"
+# fetch failure, region blocks (403 "Request not allowed"), balance / plan limits, Chinese vendor bodies behind a gateway,
+# HTTP 429 and Node network errors — used to fall through to `error` (backoff → bisect → dead) instead of pausing/switching.
+# The numeric codes added in 2026-11 are anchored to the CLI's "API Error: <code>" / "HTTP <code>" shape so that a Node
+# stack-frame column (`cli.js:12:403`) or a number inside model text never becomes an auth / balance / overload verdict;
+# the pre-existing bare `\b401\b` / `\b503\b` / `\b529\b` keep today's behaviour.
+AUTH_RE = re.compile(
+    r"not logged in|log ?in|authentication|unauthori[sz]ed|\b401\b|invalid api key|credential|managed settings|forbidden|"
+    r"request not allowed|(?:API Error:|HTTP)\s*\(?403\b|令牌已过期|身份验证失败|token is invalid|usage limit|hit your limit",
+    re.IGNORECASE,
+)
+BALANCE_RE = re.compile(r"(?:API Error:|HTTP)\s*\(?402\b|insufficient balance|insufficient_quota|余额不足|欠费|arrearage", re.IGNORECASE)
 BUDGET_RE = re.compile(r"max.?budget|budget", re.IGNORECASE)
-OVERLOADED_RE = re.compile(r"overloaded|\b529\b|\b503\b|rate.?limit|too many requests", re.IGNORECASE)
+OVERLOADED_RE = re.compile(r"overloaded|\b529\b|\b503\b|(?:API Error:|HTTP)\s*\(?(?:429|502|504)\b|rate.?limit|too many requests", re.IGNORECASE)
+NETWORK_RE = re.compile(r"ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|fetch failed|network error|socket hang up", re.IGNORECASE)
 USAGE_ERROR_RE = re.compile(r"unknown option|error: option|too many arguments", re.IGNORECASE)
 
 #: test hooks called right before ``Popen`` as ``hook(conn, call_id, argv)`` (the ledger row must already exist)
@@ -142,8 +155,8 @@ def build_argv(cfg: Settings, tier: str, system_prompt: str, user_prompt: str, s
     ]
     if tier == "1":
         argv += ["--system-prompt", system_prompt, *TIER1_FLAGS]
-    if cfg.ai_fallback_model:
-        argv += ["--fallback-model", cfg.ai_fallback_model]
+    if cfg.ai_cli_fallback_model:
+        argv += ["--fallback-model", cfg.ai_cli_fallback_model]
     if cfg.ai_extra_args:
         argv += shlex.split(cfg.ai_extra_args)
     return argv
@@ -268,11 +281,20 @@ def parse_and_classify(returncode: int | None, stdout: str, stderr: str, schema:
         return parsed
     subtype = str((data or {}).get("subtype") or "")
     result_text = str((data or {}).get("result") or "")
-    text = f"{err}\n{result_text}\n{subtype}"
-    if AUTH_RE.search(text):
+    # a parsed envelope with is_error False and no structured_output is the model's own prose: never classify on it
+    model_prose = data is not None and data.get("is_error") is False
+    text = f"{err}\n{subtype}" if model_prose else f"{err}\n{result_text}\n{subtype}"
+    prefix = ""
+    if BALANCE_RE.search(text):
+        parsed.status = "auth"  # the ledger has no `balance` status; the prefix lets failover pause 24 h instead of 30 min
+        prefix = "balance: "
+    elif AUTH_RE.search(text):
         parsed.status = "auth"
     elif "budget" in subtype.lower() or BUDGET_RE.search(text):
         parsed.status = "budget"
+    elif NETWORK_RE.search(text):
+        parsed.status = "overloaded"  # deferral semantics; the prefix feeds the separate network streak
+        prefix = "network: "
     elif OVERLOADED_RE.search(text):
         parsed.status = "overloaded"
     else:
@@ -281,7 +303,7 @@ def parse_and_classify(returncode: int | None, stdout: str, stderr: str, schema:
     detail = err.strip() or result_text.strip() or subtype or ("unparseable stdout" if data is None else "is_error")
     if returncode != 0 and not err.strip():
         detail = f"exit {returncode}: {detail}"
-    parsed.error = detail[:STDERR_EXCERPT_CHARS]
+    parsed.error = (prefix + detail)[:STDERR_EXCERPT_CHARS]
     return parsed
 
 
@@ -366,6 +388,7 @@ def _finish(conn: sqlite3.Connection, call_id: int, parsed: Parsed, *, stdout_pa
         call_id=int(call_id),
         model_used=parsed.model_used,
         error=parsed.error,
+        provider="claude",
     )
 
 
@@ -419,6 +442,7 @@ def run_claude(
             max_budget_usd=max_budget_usd,
             reserved_usd=budget.estimate(kind, word_count),
             now=now,
+            provider="claude",
         )
     env = claude_env(cfg)
     started = time.perf_counter()
@@ -534,7 +558,11 @@ class Runner:
 
 __all__ = [
     "ARG_SIZE_ERRNOS",
+    "AUTH_RE",
+    "BALANCE_RE",
     "MAX_ARG_BYTES",
+    "NETWORK_RE",
+    "OVERLOADED_RE",
     "PASSTHROUGH_ENV",
     "Parsed",
     "Runner",

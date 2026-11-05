@@ -147,7 +147,7 @@ def bank_consolidate(
     uid = int(me["id"])
     now_dt = clock.now_utc()
     now = to_iso(now_dt)
-    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
+    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now, cfg=cfg, kind="consolidate") is not None:
         raise ApiError("ai_disabled")
     recent = conn.execute(
         "SELECT started_at FROM consolidation_runs WHERE user_id = ? AND started_at > ? ORDER BY started_at DESC LIMIT 1",

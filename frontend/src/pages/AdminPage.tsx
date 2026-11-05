@@ -8,7 +8,7 @@ import { Link } from 'react-router';
 import { errorMessage, type ApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { AdminInviteCreated, AdminUserUpdateBody, AiCallsResponse, PrewarmStage, ReportStatusFilter } from '@/api/endpoints';
-import type { AdminHealth, AdminOverview, AdminUser, AiCall, Job, Page, Report, SystemEvent } from '@/api/types';
+import type { AdminHealth, AdminOverview, AdminUser, AiCall, AiProvider, Job, Page, Report, SystemEvent } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Pager, usePagedList } from '@/components/list/Pager';
 import { SearchBox } from '@/components/list/SearchBox';
@@ -109,6 +109,35 @@ function StatusTag({ status }: { status: string }) {
 
 function useTz(): string | undefined {
   return useAuth().settings?.timezone;
+}
+
+/**
+ * The pause note of the AI status (API.md 54): the admin's own pause (`manual_paused_until`, what the toggle keys off)
+ * reads as paused; the CLI's automatic pause alone (`paused_until` set while `manual_paused_until` is null — the
+ * fallback may be serving learners meanwhile, CLAUDE_INTEGRATION §10.5) is a note, never the "paused" state.
+ */
+function PauseNote({ ai, tz }: { ai: Pick<AdminOverview['ai'], 'paused_until' | 'manual_paused_until'>; tz: string | undefined }) {
+  if (ai.manual_paused_until) {
+    return (
+      <>
+        <StatusTag status="paused" /> {zh.admin.paused} · <When iso={ai.manual_paused_until} tz={tz} />
+      </>
+    );
+  }
+  if (ai.paused_until) {
+    return (
+      <>
+        <StatusTag status="paused" /> {zh.admin.claudeAutoPaused} <When iso={ai.paused_until} tz={tz} />
+      </>
+    );
+  }
+  return null;
+}
+
+/** kv ai.fallback.available as copy: null = never probed, true = usable, false = marked unavailable (CLAUDE_INTEGRATION §10.6). */
+function fallbackAvailability(available: boolean | null): string {
+  if (available === null) return zh.admin.fallbackAvailability.unprobed;
+  return available ? zh.admin.fallbackAvailability.available : zh.admin.fallbackAvailability.unavailable;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -257,10 +286,10 @@ function OverviewTab() {
           <dt>{L.status}</dt>
           <dd>
             <StatusTag status={ai.enabled ? 'ok' : 'error'} />
-            {ai.paused_until && (
+            {(ai.manual_paused_until || ai.paused_until) && (
               <>
                 {' '}
-                <StatusTag status="paused" /> {zh.admin.paused} · <When iso={ai.paused_until} tz={tz} />
+                <PauseNote ai={ai} tz={tz} />
               </>
             )}
           </dd>
@@ -706,19 +735,22 @@ function AiTab() {
   const toast = useToast();
   const overview = useApi((signal) => endpoints.adminOverview(signal), []);
   const calls = usePagedList<AiCall, AiCallsResponse>((page, signal) => endpoints.adminAiCalls(page, signal), []);
-  const [busy, setBusy] = useState<'pause' | 'probe' | 'prewarm' | null>(null);
+  const [busy, setBusy] = useState<'pause' | 'probe' | 'probeFallback' | 'prewarm' | null>(null);
   const [stage, setStage] = useState<PrewarmStage>('cet4');
   const [limit, setLimit] = useState('50');
   const [budget, setBudget] = useState('1');
 
   const ai = overview.data?.ai;
-  const paused = Boolean(ai?.paused_until);
+  // the toggle is the admin's own pause; the CLI's automatic pause (fallback serving) is a note, see PauseNote
+  const paused = Boolean(ai?.manual_paused_until);
 
   const togglePause = async () => {
     setBusy('pause');
     try {
       const res = await endpoints.adminAiPause(!paused);
-      overview.setData((prev) => (prev ? { ...prev, ai: { ...prev.ai, paused_until: res.paused_until } } : prev));
+      // a pause sets the global pause (the merged paused_until follows it); a resume clears every pause (CLAUDE_INTEGRATION §10.5)
+      overview.setData((prev) => (prev ? { ...prev, ai: { ...prev.ai, manual_paused_until: res.paused_until, paused_until: res.paused_until } } : prev));
+      void overview.reload(); // a resume also clears the fallback pause and resets the active provider
       toast.success(res.paused ? zh.admin.paused : zh.admin.resume);
     } catch (e) {
       toast.error(errorMessage(e));
@@ -726,11 +758,13 @@ function AiTab() {
       setBusy(null);
     }
   };
-  const probe = async () => {
-    setBusy('probe');
+  const probe = async (provider: AiProvider = 'claude') => {
+    setBusy(provider === 'fallback' ? 'probeFallback' : 'probe');
     try {
-      const res = await endpoints.adminAiProbe();
-      if (res.ok) toast.success(`${zh.admin.probeOk(res.flag_tier)} · ${formatUsd(res.cost_usd)} · ${formatInt(res.duration_ms)} ms`);
+      const res = await endpoints.adminAiProbe(provider);
+      const prefix = provider === 'fallback' ? `${zh.admin.providerFallback} · ` : '';
+      const okText = provider === 'fallback' ? zh.admin.probeFallbackOk(res.model_used ?? '') : zh.admin.probeOk(res.flag_tier);
+      if (res.ok) toast.success(`${provider === 'fallback' ? '' : prefix}${okText} · ${formatUsd(res.cost_usd)} · ${formatInt(res.duration_ms)} ms`);
       else toast.error(res.error ?? zh.errors.server);
       void overview.reload();
       void calls.reload();
@@ -768,6 +802,12 @@ function AiTab() {
             <Tile label={zh.admin.spendMonth} value={formatUsd(calls.data?.month_usd ?? ai.month_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.monthly_budget_usd)}`} meter={{ part: ai.month_usd, total: ai.monthly_budget_usd }} />
             <Tile label={zh.admin.flagTier} value={ai.flag_tier} sub={ai.enabled ? L.enabled : L.disabled} tone={ai.enabled ? 'good' : 'bad'} />
             <Tile
+              label={zh.admin.activeProvider}
+              value={ai.active_provider === 'fallback' ? zh.admin.providerFallback : zh.admin.providerClaude}
+              sub={ai.fallback_configured ? `${zh.admin.providerFallback} ${fallbackAvailability(ai.fallback_available)} · ${L.calls} ${formatInt(ai.fallback_calls_today)}` : undefined}
+              tone={ai.active_provider === 'fallback' ? 'bad' : 'good'}
+            />
+            <Tile
               label={L.avgCostPerWord7d}
               value={(calls.data?.avg_cost_per_word_7d ?? ai.avg_cost_per_word_7d) === null ? '—' : formatUsd(calls.data?.avg_cost_per_word_7d ?? ai.avg_cost_per_word_7d ?? 0)}
             />
@@ -777,14 +817,24 @@ function AiTab() {
           <Button size="sm" variant={paused ? 'primary' : 'secondary'} loading={busy === 'pause'} disabled={!ai} onClick={() => void togglePause()}>
             {paused ? zh.admin.resume : zh.admin.pause}
           </Button>
-          {paused && ai?.paused_until && (
+          {ai && (ai.manual_paused_until || ai.paused_until) && (
             <span className="muted">
-              {zh.admin.paused} · <When iso={ai.paused_until} tz={tz} />
+              <PauseNote ai={ai} tz={tz} />
+            </span>
+          )}
+          {ai?.fallback_paused_until && (
+            <span className="muted">
+              {zh.admin.fallbackPaused} · <When iso={ai.fallback_paused_until} tz={tz} />
             </span>
           )}
           <Button size="sm" loading={busy === 'probe'} onClick={() => void probe()}>
             {zh.admin.probe}
           </Button>
+          {ai?.fallback_configured && (
+            <Button size="sm" loading={busy === 'probeFallback'} onClick={() => void probe('fallback')}>
+              {zh.admin.probeFallback}
+            </Button>
+          )}
         </div>
         <form className="admin__form" onSubmit={prewarm}>
           <Field label={zh.admin.prewarm}>
@@ -815,6 +865,7 @@ function AiTab() {
               <tr>
                 <th>{L.id}</th>
                 <th>{L.kind}</th>
+                <th>{L.source}</th>
                 <th>{L.status}</th>
                 <th>{L.model}</th>
                 <th className="num">{L.tier}</th>
@@ -831,6 +882,7 @@ function AiTab() {
                 <tr key={c.id}>
                   <td className="num">{c.id}</td>
                   <td>{c.kind}</td>
+                  <td>{c.provider === 'fallback' ? zh.admin.providerFallback : zh.admin.providerClaude}</td>
                   <td>
                     <StatusTag status={c.status} />
                   </td>

@@ -225,9 +225,27 @@ def ai_enabled(conn: sqlite3.Connection, cfg: Any) -> bool:
     return db.kv_get(conn, "claude.enabled") != "0"
 
 
-def ai_paused_until(conn: sqlite3.Connection, now: str) -> str | None:
-    paused = db.kv_get(conn, "claude.paused_until")
-    return paused if paused and paused > now else None
+def ai_paused_until(conn: sqlite3.Connection, now: str, *, cfg: Any = None, kind: str | None = None) -> str | None:
+    """When AI may serve again, or None when it can right now (the user-facing gates: 生成例句, 立即整理, prefetch, batches).
+
+    With ``cfg`` and ``kind`` the answer is CLAUDE_INTEGRATION §10's "any provider" rule (``failover.availability``):
+    a paused CLI with a configured fallback that may serve ``kind`` is not a pause. Without them the legacy meaning
+    applies: ``kv.claude.paused_until`` or the admin's global pause (``budget.paused_until``).
+    """
+    from ..ai import budget  # local import: services → ai must not become a module cycle at import time
+
+    if cfg is not None and kind is not None:
+        from ..ai import failover
+
+        avail = failover.availability(conn, cfg, kind=kind, now=now)
+        if avail.ok:
+            return None
+        if avail.resumes_at:
+            return avail.resumes_at
+        # not routable right now with no known end (e.g. openai_http mode and a kind outside WD_AI_FALLBACK_KINDS):
+        # answer like claude_call's default deferral instead of pretending AI is available
+        return budget.paused_until(conn, now) or to_iso(parse_iso(now) + timedelta(minutes=30))
+    return budget.paused_until(conn, now)
 
 
 def content_deferred_until(conn: sqlite3.Connection, word_id: int, *, now: str, cfg: Any = None) -> str | None:
@@ -235,7 +253,7 @@ def content_deferred_until(conn: sqlite3.Connection, word_id: int, *, now: str, 
     ``kv.claude.paused_until``; with the kill switch off entirely it is ``paused_until`` or None (``eta_s`` is null then too)."""
     if not ai_enabled(conn, cfg):
         return ai_paused_until(conn, now)
-    return words.content_deferred_until(conn, int(word_id), now=now)
+    return words.content_deferred_until(conn, int(word_id), now=now, cfg=cfg)
 
 
 # ------------------------------------------------------------------------------------- query models

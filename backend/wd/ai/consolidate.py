@@ -525,6 +525,7 @@ def handle_consolidate_bank(ctx: JobContext, jobs: list[Job]) -> None:
                 common.fail_job(conn, job, f"apply failed: {e}", now=now)
                 continue
             finish_run(conn, run_id, "done", auto_applied=summary.auto_applied, suggestions=summary.suggestions, ai_call_id=result.call_id, summary={**summary.as_dict(), **trimmed}, now=now)
+            common.record_applied(conn, ctx.cfg, result, now=now)  # the answering provider's quality streak ends (§10.4)
             queue.finish(conn, job.id, {"run_id": run_id, "examined": len(items), **summary.as_dict(), **trimmed}, now=now)
             ctx.log.info(
                 "consolidate_bank user %s: %d examined, %d auto, %d suggestions", uid, len(items), summary.auto_applied, summary.suggestions,

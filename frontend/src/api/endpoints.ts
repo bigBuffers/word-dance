@@ -11,6 +11,7 @@ import type {
   AdminOverview,
   AdminUser,
   AiCall,
+  AiProvider,
   BankResponse,
   Content,
   ContentState,
@@ -529,7 +530,7 @@ export const adminAiCalls = (page = 1, signal?: AbortSignal) => api.get<AiCallsR
 // #65 POST /api/admin/ai/pause
 export const adminAiPause = (paused: boolean) => api.post<AiPauseResponse>('/api/admin/ai/pause', { paused });
 // #66 POST /api/admin/ai/probe
-export const adminAiProbe = () => api.post<AiProbeResponse>('/api/admin/ai/probe');
+export const adminAiProbe = (provider: AiProvider = 'claude') => api.post<AiProbeResponse>('/api/admin/ai/probe', { provider });
 // #67 POST /api/admin/content/prewarm
 export const adminPrewarm = (body: PrewarmBody) => api.post<PrewarmResponse>('/api/admin/content/prewarm', body);
 // #68 POST /api/admin/words/{id}/regenerate

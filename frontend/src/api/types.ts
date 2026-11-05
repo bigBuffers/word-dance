@@ -16,6 +16,7 @@ export type WordKind = 'word' | 'phrase' | 'abbreviation' | 'proper_noun';
 export type ReportReason = 'wrong_meaning' | 'unnatural_example' | 'bad_translation' | 'irrelevant_image' | 'inappropriate_image' | 'other';
 export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bark';
 export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
+export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Claude CLI or the fallback HTTP provider (CLAUDE_INTEGRATION §10)
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -185,9 +186,12 @@ export interface AdminOverview {
   // with_photo = active word_images.provider ∈ wikimedia/openverse/pixabay/pexels · with_claude_svg = provider claude_svg · card_only = content ready but no active image
   bank_entries: number; batches_today: number;
   jobs: { queued: number; running: number; dead: number; by_type: Record<string, number> };
-  ai: { enabled: boolean; paused_until: string | null; flag_tier: 0 | 1; today_usd: number; month_usd: number;
+  ai: { enabled: boolean; paused_until: string | null; manual_paused_until: string | null; flag_tier: 0 | 1; today_usd: number; month_usd: number;
         daily_budget_usd: number; monthly_budget_usd: number; svg_today_usd: number; svg_daily_budget_usd: number;
-        calls_today: number; avg_cost_per_word_7d: number | null; last_error: string | null };
+        calls_today: number; avg_cost_per_word_7d: number | null; last_error: string | null;
+        active_provider: AiProvider; fallback_configured: boolean; fallback_paused_until: string | null; fallback_calls_today: number; fallback_available: boolean | null };
+  // ai.paused_until = the CLI's automatic pause or the admin's global pause, whichever ends later · manual_paused_until = the admin's own pause alone (what the pause/resume toggle keys off)
+  // · active_provider = kv ai.active_provider · fallback_* = the HTTP fallback provider; fallback_available null = never probed, false = marked unavailable until the next fallback success (CLAUDE_INTEGRATION §10)
   images: { providers: { provider: string; minute_count: number; day_count: number; minute_limit: number | null; day_limit: number | null; cooldown_until: string | null }[] };
   scheduler: { last_tick_at: string | null; alive: boolean };
   events_24h: SystemEvent[];
@@ -205,7 +209,7 @@ export interface Job {
   attempts: number; max_attempts: number; run_after: string; locked_by: string | null; last_error: string | null; created_at: string; finished_at: string | null;
 }
 export interface AiCall {
-  id: number; kind: string; status: string; model_requested: string; model_used: string | null; flag_tier: 0 | 1; word_count: number;
+  id: number; kind: string; status: string; provider: AiProvider; model_requested: string; model_used: string | null; flag_tier: 0 | 1; word_count: number;
   cost_usd: number; duration_ms: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null; started_at: string;
 }
 export interface Report {

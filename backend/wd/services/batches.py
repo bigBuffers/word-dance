@@ -381,7 +381,7 @@ def finalize_building(conn: sqlite3.Connection, now: datetime | str | None, *, c
     Returns the number of batches flipped.
     """
     now_dt, now_s = bank.coerce_now(now)
-    ai_on = bank.ai_enabled(conn, cfg) and bank.ai_paused_until(conn, now_s) is None
+    ai_on = bank.ai_enabled(conn, cfg) and bank.ai_paused_until(conn, now_s, cfg=cfg, kind="content") is None
     images_on = bool(getattr(cfg, "images_enabled", True)) if cfg is not None else True
     flipped = 0
     for b in _rows(conn, "SELECT * FROM push_batches WHERE status = 'building' ORDER BY id"):
@@ -495,7 +495,7 @@ def today_counts(conn: sqlite3.Connection, batch: Mapping[str, Any], items: Sequ
 
 def pending_content(conn: sqlite3.Connection, batch: Mapping[str, Any], items: Sequence[Mapping[str, Any]], *, now: str, cfg: Any = None) -> int:
     """Items whose word is ``queued`` with a live content job runnable before the end of the batch's day (API.md 43)."""
-    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
+    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now, cfg=cfg, kind="content") is not None:
         return 0
     day_end = day_end_iso(str(batch["local_date"]), str(batch["timezone"]))
     runnable: dict[int, bool] = {}

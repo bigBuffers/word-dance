@@ -1,6 +1,9 @@
 """ai/content.py application rules (CLAUDE_INTEGRATION §6.4) on the mini seed: unmatched words, example filtering,
 retry on too few examples, the seed anomaly, valid=false on a custom word, versioning, the single image job, skipping
-unvalidated words without a call, the model fallback and the prewarm plan accounting."""
+unvalidated words without a call, the model fallback and the prewarm plan accounting; the slice-2 rules (§10.4 / §6.3):
+``valid=false`` from the fallback never invalidates a word, a fallback group that stored nothing counts a quality strike
+while an applied group ends the streak, a ``truncated:`` answer bisects without an attempt, and a revived forced regenerate
+superseded by a newer card is skipped."""
 
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from wd import db
-from wd.ai import common, content, runner
+from wd.ai import common, content, ledger, runner
 from wd.interfaces import ClaudeResult, Job
 from wd.jobs import queue, registry
 from wd.jobs.registry import JobContext
@@ -334,3 +337,139 @@ def test_every_item_failing_is_invalid_output_with_backoff(ctx, seeded, monkeypa
     for j in jobs:
         row = queue.get_job(seeded, j.id)
         assert row.status == "queued" and row.attempts == 1 and row.run_after == "2026-10-14T00:02:00Z" and "invalid_output" in row.last_error
+
+
+# ----------------------------------------------------------------------------------- slice 2 (§10.4 / §6.3 / §6.4)
+STREAK = "ai.fallback.streak.invalid"
+
+
+def fallback_answer(conn, jobs, items: list[dict]) -> ClaudeResult:
+    """An HTTP-ok fallback answer with a real ledger row (the handler's re-classification sets its status)."""
+    cid = ledger.insert_call(conn, kind="content", model_requested="glm-4.7-flash", flag_tier=0, word_count=len(jobs), job_ids=[j.id for j in jobs], max_budget_usd=0.25, reserved_usd=0.0, now=NOW)
+    ledger.finish_call(conn, cid, status="success", cost_usd=0.0, now=NOW)
+    return ClaudeResult(ok=True, status="success", structured={"items": items}, cost_usd=0.0, call_id=cid, model_used="glm-4.7-flash", error=None, provider="fallback")
+
+
+def ledger_status(conn, call_id: int) -> str:
+    return str(conn.execute("SELECT status FROM ai_calls WHERE id = ?", (call_id,)).fetchone()[0])
+
+
+def test_valid_false_from_the_fallback_on_a_custom_word_is_a_post_validation_failure_without_a_write(ctx, seeded, alice):
+    """§10.4: only the CLI may invalidate a word. The fallback's ``valid=false`` on a validated user word is an ``invalid``
+    item — no ``reject_word``, the word stays valid and public, no holder is flagged — and the job follows §6.3 like any
+    miss; a seed word keeps the anomaly path on either provider; the CLI's verdict (the default provider) still rejects."""
+    bob = int(seeded.execute("INSERT INTO users(username, password_hash) VALUES ('bob', 'x')").lastrowid)
+    bank.add_custom_words(seeded, alice, "zzqx", None, False, NOW, "Asia/Shanghai")
+    bank.add_custom_words(seeded, bob, "zzqx", None, False, NOW, "Asia/Shanghai")
+    w_id = wid(seeded, "zzqx")
+    seeded.execute("UPDATE words SET is_valid_english = 1, is_public = 1, source = 'claude' WHERE id = ?", (w_id,))  # validated by a lookup earlier
+    item = {**ITEMS["abandon"], "word": "zzqx", "valid": False, "meaning_zh": "这不是一个英文单词"}
+    job = make_job(seeded, w_id)
+    applied = content.apply_item(ctx, seeded, job, word(seeded, w_id), item, model="glm-4.7-flash", cost_share=0.0, call_id=None, now=NOW, provider="fallback")
+    assert applied.status == "invalid" and "only the CLI may invalidate" in applied.detail
+    row = word(seeded, w_id)
+    assert (row["is_valid_english"], row["is_public"], row["content_state"]) == (1, 1, "none")
+    assert all(bank.my_row(seeded, uid, w_id)["needs_attention"] == 0 for uid in (alice, bob))
+    assert seeded.execute("SELECT COUNT(*) FROM word_contents").fetchone()[0] == 0
+    queue.finish(seeded, job.id, now=NOW)
+    apple = word(seeded, wid(seeded, "apple"))
+    seed_job = make_job(seeded, apple["id"])
+    assert content.apply_item(ctx, seeded, seed_job, apple, {**item, "word": "apple"}, model="m", cost_share=0.0, call_id=None, now=NOW, provider="fallback").status == "anomaly"
+    assert word(seeded, apple["id"])["is_valid_english"] == 1
+    cli_job = make_job(seeded, w_id)
+    assert apply(ctx, seeded, cli_job, word(seeded, w_id), item).status == "rejected"  # the CLI (the default provider): §6.4 as before
+    row = word(seeded, w_id)
+    assert (row["is_valid_english"], row["is_public"], row["content_state"]) == (0, 0, "failed")
+    assert all(bank.my_row(seeded, uid, w_id)["needs_attention"] == 1 for uid in (alice, bob))
+
+
+def test_a_fallback_group_that_stored_nothing_counts_a_quality_strike_and_only_a_stored_item_ends_the_streak(ctx, seeded, monkeypatch):
+    """§10.4: ``record_applied`` runs only when at least one item was stored; a fallback group that stored nothing — every
+    item an anomaly, or anomalies next to misses — is reported as a quality strike while its ledger row stays ``success``
+    and the anomaly / partial handling is unchanged; a group rejected whole (every item unmatched) is re-classified
+    ``invalid_output`` and strikes with ``provider=result.provider``; the same shapes on the CLI never touch the streak."""
+    answer: dict = {}
+    monkeypatch.setattr(common, "claude_call", lambda c, conn, **kw: fallback_answer(conn, kw["jobs"], answer["items"]))
+
+    def run(lemmas: list[str], items: list[dict]) -> list[Job]:
+        for lemma in lemmas:
+            make_job(seeded, wid(seeded, lemma), claim=False)
+        jobs = queue.claim_batch(seeded, "generate_content", 10, "claude-1:test", now=NOW)
+        assert len(jobs) == len(lemmas)
+        answer["items"] = items
+        content.handle_generate_content(ctx, jobs)
+        return jobs
+
+    def anomaly(lemma: str) -> dict:
+        return {**ITEMS["abandon"], "word": word(seeded, wid(seeded, lemma))["display"], "valid": False, "meaning_zh": "这不是单词"}
+
+    # 1. every item an anomaly (valid=false on seed words): nothing stored → one strike; the anomaly handling is unchanged
+    jobs = run(["apple", "dog"], [anomaly("apple"), anomaly("dog")])
+    assert db.kv_get(seeded, STREAK) == "1"
+    assert ledger_status(seeded, seeded.execute("SELECT MAX(id) FROM ai_calls").fetchone()[0]) == "success"
+    assert all((queue.get_job(seeded, j.id).status, queue.get_job(seeded, j.id).payload["anomaly"]) == ("queued", 1) for j in jobs)
+    assert seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'content_anomaly'").fetchone()[0] == 2
+    # 2. one item stored next to a miss: the streak ends, the miss is `partial` (the other job is unaffected)
+    stored, missed = run(["abandon", "ability"], [ITEMS["abandon"]])
+    assert db.kv_get(seeded, STREAK) == "0"
+    assert queue.get_job(seeded, stored.id).status == "done" and word(seeded, wid(seeded, "abandon"))["content_state"] == "ready"
+    assert queue.get_job(seeded, missed.id).status == "queued" and queue.get_job(seeded, missed.id).last_error.startswith("partial:")
+    # 3. an anomaly next to a miss (progressed, nothing stored): the third strike pauses the fallback with the reclassified detail
+    db.kv_set(seeded, STREAK, "2")
+    bank_job, cat_job = run(["bank", "cat"], [anomaly("bank")])
+    assert db.kv_get(seeded, STREAK) == "0" and db.kv_get(seeded, "ai.fallback.paused_until") == "2026-10-14T00:30:00Z"
+    quality = json.loads(seeded.execute("SELECT detail_json FROM system_events WHERE kind = 'ai_fallback_quality'").fetchone()[0])
+    assert (quality["consecutive"], quality["status"], quality["error"]) == (3, "invalid_output", "nothing stored: 1 anomaly, 1 failed")
+    assert ledger_status(seeded, quality["call_id"]) == "success"  # the ledger row is not re-classified for a partial group
+    assert queue.get_job(seeded, bank_job.id).payload["anomaly"] == 1 and queue.get_job(seeded, cat_job.id).last_error.startswith("partial:")
+    # 4. every item unmatched: the existing re-classification (ledger `invalid_output`) strikes with the fallback's provider
+    jobs = run(["absence", "go"], [{**ITEMS["ability"], "word": "zzz"}])
+    assert db.kv_get(seeded, STREAK) == "1"
+    assert ledger_status(seeded, seeded.execute("SELECT MAX(id) FROM ai_calls").fetchone()[0]) == "invalid_output"
+    assert all((queue.get_job(seeded, j.id).status, queue.get_job(seeded, j.id).attempts) == ("queued", 1) and queue.get_job(seeded, j.id).last_error.startswith("invalid_output:") for j in jobs)
+    # 5. the same all-anomaly answer from the CLI (the default provider) is no business of the fallback's streak
+    db.kv_set(seeded, STREAK, "2")
+    monkeypatch.setattr(common, "claude_call", lambda c, conn, **kw: replace(fallback_answer(conn, kw["jobs"], answer["items"]), provider="claude"))
+    run(["book", "house"], [anomaly("book"), anomaly("house")])
+    assert db.kv_get(seeded, STREAK) == "2" and seeded.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'ai_fallback_quality'").fetchone()[0] == 1
+
+
+def test_a_truncated_answer_bisects_the_group_without_spending_an_attempt(ctx, seeded):
+    """§6.3: a ``truncated:`` error (the answer hit the output limit) is a size signal, halved like a ``budget`` stop — the
+    claim's attempt given back, runnable at once; a single truncated job and any other error keep today's error path."""
+    ids = [make_job(seeded, wid(seeded, lemma), claim=False).id for lemma in ("abandon", "ability", "absence", "apple", "dog")]
+    group = queue.claim_batch(seeded, "generate_content", 5, "claude-1:test", now=NOW)
+    truncated = ClaudeResult(ok=False, status="error", structured=None, cost_usd=0.0, call_id=1, model_used=None, error="truncated: finish_reason=length", provider="fallback")
+    assert common.handle_failure(ctx, seeded, group, truncated, now=NOW) == "bisect"
+    for j in ids:
+        job = queue.get_job(seeded, j)
+        assert (job.status, job.attempts, job.payload["group_size"], job.run_after) == ("queued", 0, 3, NOW) and job.last_error == "truncated answer; bisecting to groups of 3"
+    (solo,) = queue.claim_batch(seeded, "generate_content", 1, "claude-1:test", now=NOW)
+    assert common.handle_failure(ctx, seeded, [solo], truncated, now=NOW) == "fail"  # nothing left to halve: the ordinary error path
+    job = queue.get_job(seeded, solo.id)
+    assert (job.status, job.attempts, job.run_after) == ("queued", 1, "2026-10-14T00:02:00Z") and job.last_error.startswith("error: truncated:")
+    rest = queue.claim_batch(seeded, "generate_content", 2, "claude-1:test", now=NOW)
+    assert len(rest) == 2
+    assert common.handle_failure(ctx, seeded, rest, replace(truncated, error="schema: items[0]: 'examples' is a required property"), now=NOW) == "fail"
+    assert all((queue.get_job(seeded, r.id).status, queue.get_job(seeded, r.id).attempts, queue.get_job(seeded, r.id).payload["group_size"]) == ("queued", 1, 3) for r in rest)
+
+
+def test_select_jobs_skips_a_force_job_superseded_by_a_newer_card(seeded):
+    """§6.4: a ``force`` job whose word's ACTIVE card was created after the job itself (a revived dead ``content:<id>:r<n>``
+    answered by a later regenerate) is finished ``superseded_regenerate`` — strictly later, so a card stored in the same
+    second keeps the job; a regenerate asked for after the card stays, a non-``force`` job on the ready word is still
+    ``already_ready``."""
+    w = word(seeded, wid(seeded, "abandon"))
+    forced = make_job(seeded, w["id"], extra={"force": True}, claim=False)
+    assert forced.created_at == NOW
+    assert [j.id for j, _ in content.select_jobs(seeded, [forced], now=NOW)] == [forced.id]  # no card yet: the regenerate stands
+    content_id, _ = content.store_content(seeded, w, dict(ITEMS["abandon"]), model="m", cost_share=0.0, call_id=None, now=NOW, force=False)
+    assert [j.id for j, _ in content.select_jobs(seeded, [forced], now=NOW)] == [forced.id] and queue.get_job(seeded, forced.id).status == "queued"  # same second: kept
+    seeded.execute("UPDATE word_contents SET created_at = '2026-10-14T00:00:01Z' WHERE id = ?", (content_id,))
+    assert content.select_jobs(seeded, [forced], now=NOW) == []
+    done = queue.get_job(seeded, forced.id)
+    assert done.status == "done" and done.result == {"skipped": "superseded_regenerate"}
+    later = queue.enqueue(seeded, "generate_content", {"word_id": w["id"], "force": True}, dedupe_key=f"content:{w['id']}:r2", priority=10, now="2026-10-14T00:00:05Z")
+    assert [j.id for j, _ in content.select_jobs(seeded, [queue.get_job(seeded, later)], now=NOW)] == [later]
+    plain = queue.enqueue(seeded, "generate_content", {"word_id": w["id"]}, dedupe_key=f"content:{w['id']}", priority=20, now=NOW)
+    assert content.select_jobs(seeded, [queue.get_job(seeded, plain)], now=NOW) == [] and queue.get_job(seeded, plain).result == {"skipped": "already_ready"}

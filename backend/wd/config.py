@@ -9,17 +9,30 @@ Validation rules:
   see :func:`ensure_dirs`);
 * ``WD_TZ`` must be a known IANA zone;
 * numeric ranges raise :class:`ConfigError`, except ``WD_AI_BATCH_SIZE`` (clamped to 1–12
-  because ``content_v1.json`` has ``items.maxItems: 12``) and ``WD_AI_CONCURRENCY``
-  (clamped to 1–3), which are clamped with a warning as DEPLOY §4 specifies;
+  because ``content_v1.json`` has ``items.maxItems: 12``), ``WD_AI_FALLBACK_BATCH_SIZE`` (the same
+  1–12 rule) and ``WD_AI_CONCURRENCY`` (clamped to 1–3), which are clamped with a warning as
+  DEPLOY §4 specifies;
 * ``WD_SEED_PATH`` defaults to ``<repo>/data/seed/vocab.jsonl.gz`` resolved from the
-  installed package (``Path(wd.__file__).parents[2]``), correct for the editable install.
+  installed package (``Path(wd.__file__).parents[2]``), correct for the editable install;
+* the fallback provider (docs/AI_FALLBACK_MODEL.md §4.3, CLAUDE_INTEGRATION §10.1): ``WD_AI_FALLBACK_BASE_URL``
+  follows the ``WD_PUBLIC_URL`` rule (``http://`` or ``https://`` plus a host; plain ``http://`` to a non-loopback
+  host only warns — the bearer key would travel in cleartext), ``WD_AI_FALLBACK_API_KEY_FILE`` must be an existing
+  readable regular file (a group/other-readable mode warns), ``WD_AI_FALLBACK_PRICE_JSON`` names exactly ``input`` /
+  ``output`` (both, when the object is not empty) and optionally ``cache_read``; ``WD_AI_FALLBACK_KINDS`` defaults to
+  ``content,lookup,consolidate`` (an empty or blank value — ``""``, ``" "``, ``","`` — is the default; ``svg`` is never
+  accepted) and
+  ``WD_AI_FALLBACK_BATCH_SIZE`` (words per ``generate_content`` call while the fallback takes the group, default 5)
+  is clamped like ``WD_AI_BATCH_SIZE``; ``openai_http`` mode with a kind removed from ``WD_AI_FALLBACK_KINDS`` starts
+  with a warning that those jobs (and SVG jobs, always) wait indefinitely.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
+import stat
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
@@ -39,6 +52,14 @@ COOKIE_SECURE_MODES = ("auto", "1", "0")
 IMAGE_PROVIDERS = ("wikimedia", "openverse", "pixabay", "pexels")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOG_FORMATS = ("json", "text")
+# fallback provider (docs/AI_FALLBACK_MODEL.md §4.3, CLAUDE_INTEGRATION §10)
+AI_PROVIDER_MODES = ("claude_cli", "openai_http", "auto")
+FALLBACK_KINDS = ("none", "openai_http")
+FALLBACK_DIALECTS = ("auto", "zhipu", "bailian", "deepseek", "generic")
+FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
+FALLBACK_THINKING_MODES = ("off", "on", "default")
+FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg` and `probe` are never routed by WD_AI_FALLBACK_KINDS
+FALLBACK_PRICE_KEYS = frozenset({"input", "output", "cache_read"})  # WD_AI_FALLBACK_PRICE_JSON names (CNY per million tokens)
 
 # values masked as "***" by GET /api/admin/config (API.md 73) and never logged
 SECRET_KEYS = frozenset(
@@ -49,6 +70,7 @@ SECRET_KEYS = frozenset(
         "WD_PIXABAY_KEY",
         "WD_PEXELS_KEY",
         "WD_ADMIN_PASSWORD",
+        "WD_AI_FALLBACK_API_KEY",
     }
 )
 
@@ -88,7 +110,7 @@ class Settings:
     claude_cwd: Path = DEFAULT_DATA_DIR / "claude-cwd"
     ai_enabled: bool = True
     ai_model: str = "sonnet"
-    ai_fallback_model: str = ""
+    ai_cli_fallback_model: str = ""  # the CLI's own --fallback-model (Claude ↔ Claude only); was WD_AI_FALLBACK_MODEL before 0010
     ai_extra_args: str = ""
     ai_batch_size: int = 10
     ai_concurrency: int = 1
@@ -106,6 +128,29 @@ class Settings:
     ai_hourly_call_cap: int = 60
     ai_svg_daily_budget_usd: float = 0.50
     ai_log_keep_days: int = 14
+    # --- fallback provider + automatic failover (docs/AI_FALLBACK_MODEL.md §4.3) --------
+    ai_provider: str = "claude_cli"  # claude_cli = today · openai_http = fallback only · auto = claude + automatic failover
+    ai_fallback_kind: str = "none"  # none | openai_http
+    ai_fallback_base_url: str = ""  # e.g. https://open.bigmodel.cn/api/paas/v4
+    ai_fallback_api_key: str = ""  # secret; prefer the 0600 file below
+    ai_fallback_api_key_file: str = ""
+    ai_fallback_model: str = ""  # vendor model id, e.g. glm-4.7-flash
+    ai_fallback_dialect: str = "auto"  # auto | zhipu | bailian | deepseek | generic
+    ai_fallback_json_mode: str = "auto"  # auto | json_object | json_schema
+    ai_fallback_thinking: str = "off"  # off | on | default
+    ai_fallback_timeout_scale: float = 1.5
+    ai_fallback_max_output_tokens: int = 0  # 0 = the adapter's per-kind table
+    ai_fallback_hourly_call_cap: int = 40
+    ai_fallback_batch_size: int = 5  # words per generate_content call while the fallback takes the group (effective min(WD_AI_BATCH_SIZE, this))
+    ai_fallback_kinds: tuple[str, ...] = ("content", "lookup", "consolidate")
+    ai_fallback_prewarm: bool = False
+    ai_fallback_price_json: str = ""  # {"input": CNY per 1M tokens, "output": …}; empty = free
+    ai_cny_per_usd: float = 7.2
+    ai_failover_cooldown_min: int = 30
+    ai_failover_probe_every_min: int = 30
+    ai_failover_overloaded_after: int = 3
+    ai_failover_timeout_after: int = 2
+    ai_failover_network_after: int = 2
     ecdict_db_path: Path | None = None
     # --- images ---------------------------------------------------------------------
     images_enabled: bool = True
@@ -164,6 +209,16 @@ class Settings:
     def email_configured(self) -> bool:
         """The e-mail channel exists when host and from-address are set (DEPLOY §4)."""
         return bool(self.smtp_host and self.smtp_from)
+
+    @property
+    def fallback_configured(self) -> bool:
+        """A fallback provider is fully configured: kind, base URL, model and a key (or a key file)."""
+        return (
+            self.ai_fallback_kind == "openai_http"
+            and bool(self.ai_fallback_base_url)
+            and bool(self.ai_fallback_model)
+            and bool(self.ai_fallback_api_key or self.ai_fallback_api_key_file)
+        )
 
     @property
     def claude_home_effective(self) -> str:
@@ -262,6 +317,18 @@ class Settings:
                 raise ConfigError(f"{name} must be one of {', '.join(allowed)}, got {v!r}")
             return v
 
+        def number(name: str, default: float, lo: float, hi: float) -> float:
+            v = raw(name)
+            if v is None:
+                return default
+            try:
+                x = float(v.strip())
+            except ValueError:
+                raise ConfigError(f"{name} must be a number, got {v!r}") from None
+            if x < lo or x > hi:
+                raise ConfigError(f"{name} must be between {lo:g} and {hi:g}, got {x:g}")
+            return x
+
         data_dir = Path(text("WD_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve()
         db_path = Path(text("WD_DB_PATH", str(data_dir / "word-dance.db"))).expanduser().resolve()
         seed_path = Path(text("WD_SEED_PATH", str(DEFAULT_SEED_PATH))).expanduser().resolve()
@@ -305,6 +372,86 @@ class Settings:
         if log_level not in LOG_LEVELS:
             raise ConfigError(f"WD_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
 
+        # fallback provider (docs/AI_FALLBACK_MODEL.md §4.3)
+        ai_provider = choice("WD_AI_PROVIDER", "claude_cli", AI_PROVIDER_MODES)
+        fallback_kind = choice("WD_AI_FALLBACK_KIND", "none", FALLBACK_KINDS)
+        fallback_model = text("WD_AI_FALLBACK_MODEL", "")
+        fallback_base_url = text("WD_AI_FALLBACK_BASE_URL", "").rstrip("/")
+        if fallback_base_url:
+            # the WD_PUBLIC_URL rule (CLAUDE_INTEGRATION §10.1): httpx raises UnsupportedProtocol / InvalidURL before any
+            # I/O for a scheme-less or ftp:// value, which the adapter classifies as a soft `network:` failure — every
+            # group would defer forever instead of the service refusing to start. http:// stays allowed: the mock
+            # server and local gateways listen on loopback; elsewhere the bearer key would travel in cleartext.
+            if not fallback_base_url.lower().startswith(("http://", "https://")) or origin_of(fallback_base_url) is None:
+                raise ConfigError(f"WD_AI_FALLBACK_BASE_URL must start with http:// or https:// and name a host, got {fallback_base_url!r}")
+            if fallback_base_url.lower().startswith("http://") and not is_loopback_url(fallback_base_url):
+                log.warning("WD_AI_FALLBACK_BASE_URL=%s uses plain http:// to a non-loopback host; the bearer key travels in cleartext", fallback_base_url)
+        fallback_key = text("WD_AI_FALLBACK_API_KEY", "")
+        fallback_key_file = text("WD_AI_FALLBACK_API_KEY_FILE", "")
+        if fallback_key_file:
+            # checked here, not at the first call: a typo would otherwise count as a configured fallback until a failover
+            # reruns a group on it and gets `not_found: fallback not configured (api_key missing)` (CLAUDE_INTEGRATION §10.2)
+            key_path = Path(fallback_key_file).expanduser()
+            if not key_path.is_file():
+                raise ConfigError(f"WD_AI_FALLBACK_API_KEY_FILE must name an existing regular file, got {fallback_key_file!r}")
+            if not os.access(key_path, os.R_OK):
+                raise ConfigError(f"WD_AI_FALLBACK_API_KEY_FILE is not readable by this user: {fallback_key_file!r}")
+            key_mode = stat.S_IMODE(key_path.stat().st_mode)
+            if key_mode & 0o077:
+                log.warning("WD_AI_FALLBACK_API_KEY_FILE %s is readable by group/others (mode %o); chmod 600 it", fallback_key_file, key_mode)
+        if fallback_kind == "none" and fallback_model:
+            raise ConfigError(
+                "WD_AI_FALLBACK_MODEL now names the fallback provider's model (set WD_AI_FALLBACK_KIND=openai_http); "
+                "the Claude CLI --fallback-model moved to WD_AI_CLI_FALLBACK_MODEL"
+            )
+        fallback_ready = fallback_kind == "openai_http" and bool(fallback_base_url) and bool(fallback_model) and bool(fallback_key or fallback_key_file)
+        if ai_provider != "claude_cli" and not fallback_ready:
+            raise ConfigError(
+                f"WD_AI_PROVIDER={ai_provider} needs WD_AI_FALLBACK_KIND=openai_http, WD_AI_FALLBACK_BASE_URL, WD_AI_FALLBACK_MODEL "
+                "and WD_AI_FALLBACK_API_KEY (or WD_AI_FALLBACK_API_KEY_FILE)"
+            )
+        fallback_kinds: list[str] = []
+        for k in (x.strip().lower() for x in text("WD_AI_FALLBACK_KINDS", "content,lookup,consolidate").split(",")):
+            if not k:
+                continue
+            if k not in FALLBACK_TASK_KINDS:
+                raise ConfigError(f"WD_AI_FALLBACK_KINDS contains an unsupported kind {k!r}; allowed: {', '.join(FALLBACK_TASK_KINDS)}")
+            if k not in fallback_kinds:
+                fallback_kinds.append(k)
+        if not fallback_kinds:
+            # "", " ", ",", " , " … all mean the default (DEPLOY §4 "empty or blank"): an empty list has no legitimate use —
+            # auto would still switch to a fallback that serves nothing, openai_http would run nothing at all
+            fallback_kinds = list(FALLBACK_TASK_KINDS)
+        if ai_provider == "openai_http":
+            # the CLI is never spawned in this mode, so a kind the operator removed from the list is never routable:
+            # failover.choose answers (None, None) and common.claude_call re-defers the group every 30 minutes
+            # (CLAUDE_INTEGRATION §10.1). svg never runs on the fallback. The default list names every routable kind, so
+            # this fires only when one was removed. A warning, not a ConfigError: the documented emergency switch must keep working.
+            idle = [k for k in FALLBACK_TASK_KINDS if k not in fallback_kinds]
+            if idle:
+                log.warning(
+                    "WD_AI_PROVIDER=openai_http with WD_AI_FALLBACK_KINDS=%s: %s jobs wait indefinitely (svg jobs always do in this mode — "
+                    "they never run on the fallback and the CLI is never spawned); add %s back to WD_AI_FALLBACK_KINDS to run them on the fallback",
+                    ",".join(fallback_kinds),
+                    "/".join(idle),
+                    "/".join(idle),
+                )
+        price_json = text("WD_AI_FALLBACK_PRICE_JSON", "")
+        if price_json:
+            try:
+                price = json.loads(price_json)
+            except ValueError:
+                raise ConfigError("WD_AI_FALLBACK_PRICE_JSON must be a JSON object such as {\"input\": 0.2, \"output\": 0.8} (CNY per million tokens)") from None
+            if not isinstance(price, dict) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in price.values()):
+                raise ConfigError("WD_AI_FALLBACK_PRICE_JSON must map price names to non-negative numbers (CNY per million tokens)")
+            # the adapter reads input / output / cache_read with .get(…, 0.0): a mis-keyed table would silently record
+            # cost_usd 0 for a paid leg and the daily / monthly caps would never see the spend. {} stays the free tier.
+            unknown = set(price) - FALLBACK_PRICE_KEYS
+            if unknown:
+                raise ConfigError(f"WD_AI_FALLBACK_PRICE_JSON has unknown price name(s) {sorted(unknown)}; allowed: input, output, cache_read (CNY per million tokens)")
+            if price and not {"input", "output"} <= set(price):
+                raise ConfigError('WD_AI_FALLBACK_PRICE_JSON needs both "input" and "output" (write 0 for a free side); "cache_read" is optional')
+
         return cls(
             data_dir=data_dir,
             db_path=db_path,
@@ -331,7 +478,7 @@ class Settings:
             claude_cwd=claude_cwd,
             ai_enabled=flag("WD_AI_ENABLED", True),
             ai_model=text("WD_AI_MODEL", "sonnet"),
-            ai_fallback_model=text("WD_AI_FALLBACK_MODEL", ""),
+            ai_cli_fallback_model=text("WD_AI_CLI_FALLBACK_MODEL", ""),
             ai_extra_args=text("WD_AI_EXTRA_ARGS", ""),
             ai_batch_size=clamped("WD_AI_BATCH_SIZE", 10, 1, 12),
             ai_concurrency=clamped("WD_AI_CONCURRENCY", 1, 1, 3),
@@ -349,6 +496,28 @@ class Settings:
             ai_hourly_call_cap=integer("WD_AI_HOURLY_CALL_CAP", 60, 1, 100_000),
             ai_svg_daily_budget_usd=money("WD_AI_SVG_DAILY_BUDGET_USD", 0.50),
             ai_log_keep_days=integer("WD_AI_LOG_KEEP_DAYS", 14, 0, 3650),
+            ai_provider=ai_provider,
+            ai_fallback_kind=fallback_kind,
+            ai_fallback_base_url=fallback_base_url,
+            ai_fallback_api_key=fallback_key,
+            ai_fallback_api_key_file=fallback_key_file,
+            ai_fallback_model=fallback_model,
+            ai_fallback_dialect=choice("WD_AI_FALLBACK_DIALECT", "auto", FALLBACK_DIALECTS),
+            ai_fallback_json_mode=choice("WD_AI_FALLBACK_JSON_MODE", "auto", FALLBACK_JSON_MODES),
+            ai_fallback_thinking=choice("WD_AI_FALLBACK_THINKING", "off", FALLBACK_THINKING_MODES),
+            ai_fallback_timeout_scale=number("WD_AI_FALLBACK_TIMEOUT_SCALE", 1.5, 0.5, 5.0),
+            ai_fallback_max_output_tokens=integer("WD_AI_FALLBACK_MAX_OUTPUT_TOKENS", 0, 0, 131_072),
+            ai_fallback_hourly_call_cap=integer("WD_AI_FALLBACK_HOURLY_CALL_CAP", 40, 1, 100_000),
+            ai_fallback_batch_size=clamped("WD_AI_FALLBACK_BATCH_SIZE", 5, 1, 12),
+            ai_fallback_kinds=tuple(fallback_kinds),
+            ai_fallback_prewarm=flag("WD_AI_FALLBACK_PREWARM", False),
+            ai_fallback_price_json=price_json,
+            ai_cny_per_usd=number("WD_AI_CNY_PER_USD", 7.2, 0.01, 1000.0),
+            ai_failover_cooldown_min=integer("WD_AI_FAILOVER_COOLDOWN_MIN", 30, 1, 1440),
+            ai_failover_probe_every_min=integer("WD_AI_FAILOVER_PROBE_EVERY_MIN", 30, 1, 1440),
+            ai_failover_overloaded_after=integer("WD_AI_FAILOVER_OVERLOADED_AFTER", 3, 1, 100),
+            ai_failover_timeout_after=integer("WD_AI_FAILOVER_TIMEOUT_AFTER", 2, 1, 100),
+            ai_failover_network_after=integer("WD_AI_FAILOVER_NETWORK_AFTER", 2, 1, 100),
             ecdict_db_path=ecdict_db_path,
             images_enabled=flag("WD_IMAGES_ENABLED", True),
             image_providers=tuple(providers),
@@ -410,10 +579,24 @@ def origin_of(url: str) -> str | None:
     """``scheme://host[:port]`` of a URL (lower-case), or None when it has no host."""
     from urllib.parse import urlsplit
 
-    parts = urlsplit(url.strip())
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:  # e.g. an unbalanced IPv6 bracket: "no origin", never an exception out of Settings.from_env
+        return None
     if not parts.scheme or not parts.netloc:
         return None
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the URL's host is this machine (``localhost``, ``127.0.0.0/8``, ``::1``) — plain ``http://`` is fine there."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url.strip()).hostname or "").lower()
+    except ValueError:  # malformed IPv6 bracket: not loopback (and origin_of() already refuses it)
+        return False
+    return host == "localhost" or host == "::1" or host.startswith("127.")
 
 
 def ensure_dirs(cfg: Settings, mode: int = 0o700) -> None:

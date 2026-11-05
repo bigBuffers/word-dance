@@ -1,18 +1,26 @@
 """``generate_content`` handler (CLAUDE_INTEGRATION §5.1–5.2, §6.1, §6.3–6.4).
 
-Batching happens at claim time (``queue.claim_batch`` hands the handler up to ``WD_AI_BATCH_SIZE`` jobs). The
+Batching happens at claim time (``queue.claim_batch`` hands the handler up to ``WD_AI_BATCH_SIZE`` jobs —
+``WD_AI_FALLBACK_BATCH_SIZE`` while the fallback provider takes the group, ``failover.claim_limit``, §10.5). The
 handler drops words that must not be generated (``is_valid_english IS NULL`` → ``done {"skipped":"unvalidated"}``,
-rejected / merged / missing words, words already ``ready`` under the current prompt version unless ``force``),
+rejected / merged / missing words, words already ``ready`` under the current prompt version unless ``force``, a
+``force`` job whose word already got a newer card after the job was created — a revived dead regenerate —
+``{"skipped":"superseded_regenerate"}``),
 builds the §5.2 user prompt from dictionary data only (never a user's private 备注), runs one ``claude`` call for
 the group and applies each returned item with the §6.4 post-validation:
 
 * ``item.word`` must match the requested lemma/display, else the item is unmatched (that job fails and retries);
 * ``valid=false`` on a seed word is an anomaly (event, one retry alone, then ``content_state='failed'``); on a
-  user/ECDICT/Claude word it makes the word ``is_valid_english=0, is_public=0`` and flags every bank row;
+  user/ECDICT/Claude word it makes the word ``is_valid_english=0, is_public=0`` and flags every bank row — when the
+  CLI answered; from the fallback the same verdict on a non-seed word is a post-validation failure instead (only the
+  CLI may invalidate a word, §10.4): the job follows §6.3 and the word stays valid / public;
 * lengths, CJK/ASCII checks, examples containing the headword or a known form (≥ 3 kept, ≥ 2 on the last attempt),
   image keywords filtered through the DESIGN §9 blocklist;
 * stored as a new ``word_contents`` version (``model = model_used or model_requested``), the word's ``difficulty``
-  filled, ``prewarm:<plan_id>:spent`` credited, ``fetch_image`` enqueued with the job's priority.
+  filled, ``prewarm:<plan_id>:spent`` credited, ``fetch_image`` enqueued with the job's priority;
+* the answering provider's quality streak (§10.4): ``common.record_applied`` only when at least one item was stored; a
+  group that stored nothing (every item an anomaly, unmatched or invalid) is reported through
+  ``common.record_invalid_output`` — a strike on the fallback, a no-op for the CLI; a rejection-only group does neither.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from ..jobs import queue
 from ..jobs.registry import JobContext, register
 from ..services import bank, words
 from . import common, ledger, models, runner
+from .providers import CLAUDE, FALLBACK
 
 log = logging.getLogger("wd.ai.content")
 
@@ -307,13 +316,22 @@ def apply_item(
     cost_share: float,
     call_id: int | None,
     now: str,
+    provider: str = CLAUDE,
 ) -> Applied:
-    """Apply one response item to ``word`` (§6.4). The job itself is finished / failed by the caller from the status."""
+    """Apply one response item to ``word`` (§6.4). The job itself is finished / failed by the caller from the status.
+
+    ``provider`` is who answered (``result.provider``): ``valid=false`` on a non-seed word invalidates it
+    (:func:`reject_word`) only when the CLI said so; from the fallback it is an ``invalid`` post-validation failure with
+    no write — the job follows §6.3 like any other miss (backoff → bisect → dead → ``mark_failed``), the word stays
+    valid / public and the fail-back requeue gives the CLI the final say (§10.4). Seed words keep the anomaly path.
+    """
     if item is None:
         return Applied("unmatched", "no item for this word in the response")
     if item.get("valid") is False:
         if word.get("source") == "seed":
             return Applied("anomaly", "valid=false on a seed word")
+        if provider == FALLBACK:
+            return Applied("invalid", "valid=false from the fallback: only the CLI may invalidate a word")
         reject_word(conn, word, str(item.get("meaning_zh") or ""), now=now)
         return Applied("rejected", "valid=false; word marked is_valid_english=0")
     last_attempt = job.attempts >= job.max_attempts
@@ -343,8 +361,26 @@ def _active_prompt_version(conn: sqlite3.Connection, word: Mapping[str, Any]) ->
     return None if row is None else str(row[0])
 
 
+def _active_created_at(conn: sqlite3.Connection, word: Mapping[str, Any]) -> str | None:
+    """``created_at`` of the word's active ``word_contents`` row (None without one): the sibling of
+    :func:`_active_prompt_version` behind the ``superseded_regenerate`` skip of :func:`select_jobs`."""
+    cid = word.get("active_content_id")
+    if cid is None:
+        return None
+    row = conn.execute("SELECT created_at FROM word_contents WHERE id = ? AND status = 'active'", (int(cid),)).fetchone()
+    return None if row is None else str(row[0])
+
+
 def select_jobs(conn: sqlite3.Connection, jobs: list[Job], *, now: str) -> list[tuple[Job, dict[str, Any]]]:
-    """Drop the jobs that must not call Claude (finishing them as skipped) and return ``(job, word row)`` pairs."""
+    """Drop the jobs that must not call Claude (finishing them as skipped) and return ``(job, word row)`` pairs.
+
+    Skips: ``missing_word``, ``merged``, ``unvalidated``, ``invalid_word``, ``already_ready`` (a non-``force`` job whose
+    word is ``ready`` under the current prompt version) and ``superseded_regenerate`` — a ``force`` job whose word's
+    ACTIVE card was created after the job itself (``word_contents.created_at > jobs.created_at``, strictly, both UTC
+    ``YYYY-MM-DDTHH:MM:SSZ``): the regenerate the admin asked for has been answered by a newer card already, as happens
+    to a dead ``content:<id>:r<n>`` revived by the fail-back requeue, the nightly or the admin's requeue-dead (§10.6), so
+    the learner's current card is kept and no call is spent. A job created after the card (a fresh regenerate) stays.
+    """
     todo: list[tuple[Job, dict[str, Any]]] = []
     for job in jobs:
         wid = common.payload_int(job, "word_id")
@@ -361,6 +397,11 @@ def select_jobs(conn: sqlite3.Connection, jobs: list[Job], *, now: str) -> list[
         if int(word["is_valid_english"]) == 0:
             _skip(conn, job, "invalid_word", now=now)
             continue
+        if job.payload.get("force"):
+            card_at = _active_created_at(conn, word)
+            if card_at is not None and card_at > job.created_at:
+                _skip(conn, job, "superseded_regenerate", now=now)
+                continue
         if not job.payload.get("force") and word.get("content_state") == "ready" and _active_prompt_version(conn, word) == PROMPT_VERSION:
             _skip(conn, job, "already_ready", now=now)
             continue
@@ -422,32 +463,65 @@ def handle_generate_content(ctx: JobContext, jobs: list[Job]) -> None:
         cost_share = result.cost_usd / max(1, returned)
         model = result.model_used or ctx.cfg.ai_model
         failures: list[tuple[Job, str]] = []
-        progressed = 0
+        progressed = 0  # stored + rejected + anomaly: the flow control below
+        stored = 0  # items actually stored — the only outcome that ends the answering provider's quality streak (§10.4)
+        anomalies = 0
         for job, word in todo:
             item = index.get(str(word["lemma"]).lower()) or index.get(str(word["display"]).lower())
-            applied = apply_item(ctx, conn, job, word, item, model=model, cost_share=cost_share, call_id=result.call_id, now=now)
+            applied = apply_item(ctx, conn, job, word, item, model=model, cost_share=cost_share, call_id=result.call_id, now=now, provider=result.provider)
             if applied.status == "stored":
                 queue.finish(conn, job.id, {"content_id": applied.content_id, "version": applied.version, "cost_usd": round(cost_share, 6)}, now=now)
                 progressed += 1
+                stored += 1
             elif applied.status == "rejected":
                 queue.finish(conn, job.id, {"valid": False, "detail": applied.detail}, now=now)
                 progressed += 1
             elif applied.status == "anomaly":
                 handle_anomaly(ctx, conn, job, word, now=now)
                 progressed += 1
+                anomalies += 1
             else:
                 failures.append((job, applied.detail))
+        if stored:
+            common.record_applied(conn, ctx.cfg, result, now=now)  # the answering provider's quality streak ends (§10.4)
         if failures and not progressed:
-            # every item failed post-validation → the call is re-classified and the group follows the §6.3 error path
+            # every item failed post-validation → the call is re-classified and the group follows the §6.3 error path;
+            # on the fallback the rejected group also counts its quality streak (three in a row pause it, §10.4)
             ledger.set_status(conn, result.call_id, "invalid_output", error="; ".join(d for _, d in failures)[:1000])
-            failed_result = type(result)(ok=False, status="invalid_output", structured=None, cost_usd=result.cost_usd, call_id=result.call_id, model_used=result.model_used, error=failures[0][1])
+            failed_result = type(result)(
+                ok=False, status="invalid_output", structured=None, cost_usd=result.cost_usd, call_id=result.call_id, model_used=result.model_used, error=failures[0][1], provider=result.provider
+            )
+            common.record_invalid_output(conn, ctx.cfg, failed_result, kind=KIND, priority=min(j.priority for j, _ in todo), now=now)
             common.handle_failure(ctx, conn, [j for j, _ in failures], failed_result, now=now, on_dead=on_dead)
         else:
+            if not stored and (failures or anomalies):
+                # nothing stored although the answer was schema-valid (every item an anomaly, unmatched or invalid, or
+                # anomalies next to rejections): streak bookkeeping only — a fallback quality strike, a no-op for the CLI;
+                # the ledger row stays `success` and the anomaly / partial handling is unchanged (§10.4)
+                common.record_invalid_output(
+                    conn,
+                    ctx.cfg,
+                    type(result)(
+                        ok=False,
+                        status="invalid_output",
+                        structured=None,
+                        cost_usd=result.cost_usd,
+                        call_id=result.call_id,
+                        model_used=result.model_used,
+                        error=f"nothing stored: {anomalies} anomaly, {len(failures)} failed",
+                        provider=result.provider,
+                    ),
+                    kind=KIND,
+                    priority=min(j.priority for j, _ in todo),
+                    now=now,
+                )
             for job, detail in failures:  # `partial`: the other jobs are unaffected
                 common.fail_job(conn, job, f"partial: {detail}", now=now, on_dead=on_dead)
         ctx.log.info(
-            "generate_content: %d stored/handled, %d failed (call %s, $%.4f)",
+            "generate_content: %d stored/handled (%d stored, %d anomaly), %d failed (call %s, $%.4f)",
             progressed,
+            stored,
+            anomalies,
             len(failures),
             result.call_id,
             result.cost_usd,

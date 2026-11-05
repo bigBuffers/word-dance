@@ -4,8 +4,10 @@
   job types** (``queue.head_type`` over ``generate_content / lookup_word / consolidate_bank / generate_svg /
   prewarm_plan`` ordered ``priority, run_after, id``), so a priority-10 lookup is never stuck behind priority-20/90
   content jobs; it idles while the kill switch is off (jobs untouched — only the bank rows behind queued lookups are
-  flagged 「暂时无法校验」, CLAUDE_INTEGRATION §6.5). Budget / pause checks run inside the handlers
-  (``wd.ai.common.claude_call``), so a synchronous drain applies exactly the same rules.
+  flagged 「暂时无法校验」, CLAUDE_INTEGRATION §6.5). The claim size comes from ``failover.claim_limit`` (``queue.limit_for``,
+  except that a content group shrinks to ``WD_AI_FALLBACK_BATCH_SIZE`` while the fallback provider takes it, §10.5).
+  Budget / pause checks run inside the handlers (``wd.ai.common.claude_call``), so a synchronous drain applies exactly
+  the same rules.
 * :class:`IoWorker` (``io-1``) drains ``fetch_image / send_email / send_webhook`` one job at a time.
 * Both sweep stale ``running`` jobs every five minutes (``queue.requeue_stale(boot_id)``); the Claude worker also
   prunes ``claude-logs`` older than ``WD_AI_LOG_KEEP_DAYS``.
@@ -77,6 +79,21 @@ def dispatch(ctx: JobContext, jobs: list[Job]) -> None:
         conn.close()
 
 
+def claim_limit(ctx: JobContext, conn: sqlite3.Connection, job_type: str, *, now: str) -> int:
+    """Jobs per claim: ``failover.claim_limit`` (``queue.limit_for``, except content groups of ``WD_AI_FALLBACK_BATCH_SIZE``
+    while the fallback takes them, CLAUDE_INTEGRATION §10.5). An unexpected non-sqlite error there must never stop the
+    queue: it is logged and the plain ``queue.limit_for`` is used."""
+    from ..ai import failover  # local import: ai → jobs must not become a module cycle at import time
+
+    try:
+        return failover.claim_limit(conn, ctx.cfg, job_type, now=now)
+    except sqlite3.Error:
+        raise
+    except Exception as e:  # noqa: BLE001 — a kv / config surprise in the claim-size lookup is not a reason to stop claiming
+        ctx.log.warning("claim limit for %s fell back to queue.limit_for: %r", job_type, e, extra={"job_type": job_type, "worker": ctx.worker_id, "event": "claim_limit_fallback"})
+        return queue.limit_for(job_type, ctx.cfg)
+
+
 def process_next(ctx: JobContext, types: Sequence[str], *, now: str | None = None) -> tuple[int, bool]:
     """Claim the head group among ``types`` and run its handler; returns ``(jobs handled, something was runnable)``."""
     conn = ctx.db()
@@ -85,7 +102,7 @@ def process_next(ctx: JobContext, types: Sequence[str], *, now: str | None = Non
         job_type = queue.head_type(conn, tuple(types), now)
         if job_type is None:
             return 0, False
-        jobs = queue.claim_batch(conn, job_type, queue.limit_for(job_type, ctx.cfg), ctx.locked_by, now=now)
+        jobs = queue.claim_batch(conn, job_type, claim_limit(ctx, conn, job_type, now=now), ctx.locked_by, now=now)
     finally:
         conn.close()
     if not jobs:
@@ -107,6 +124,16 @@ def drain(ctx: JobContext, types: Sequence[str] = JOB_TYPES, *, max_claims: int 
     return processed
 
 
+#: A revived ``generate_content`` job's word goes back from ``failed`` to ``queued`` — the mirror image of ``content.mark_failed``,
+#: guarded exactly like every enqueue site (``bank.enqueue_content_if_needed``, the content request route): validated, not
+#: merged, no active version (``content.select_jobs`` finishes the job without touching such a word, which an unguarded flip
+#: would strand at ``queued``). Parameters: ``(now, payload_json)`` of the revived row. Shared with ``scheduler.requeue_dead_once``.
+REVIVE_CONTENT_WORD_SQL = (
+    "UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = json_extract(?, '$.word_id') "
+    "AND content_state = 'failed' AND is_valid_english = 1 AND merged_into_word_id IS NULL AND active_content_id IS NULL"
+)
+
+
 def requeue_dead_jobs(
     conn: sqlite3.Connection,
     *,
@@ -114,14 +141,32 @@ def requeue_dead_jobs(
     types: Sequence[str] | None = None,
     older_than: timedelta | None = None,
     limit: int | None = None,
+    died_after: str | None = None,
+    group_size: int | None = 1,
 ) -> int:
-    """Put ``dead`` jobs back to ``queued`` (``attempts = 0``, ``group_size = 1``, ``run_after = now``).
+    """Put ``dead`` jobs back to ``queued`` (``attempts = 0``, ``run_after = now``, ``payload.group_size = group_size`` — or
+    that mark REMOVED with ``json_remove`` when ``group_size`` is None, a bisection mark included, so the revived jobs
+    batch like fresh claims: ``failover.claim_limit`` 10 on the CLI / 5 on the fallback).
 
-    Used by ``POST /api/admin/jobs/requeue-dead`` (everything) and by the nightly maintenance (≤ 50 content/lookup
-    jobs older than 24 h, CLAUDE_INTEGRATION §6.3). A dead job whose dedupe key is held by a live job is skipped.
+    Used by ``POST /api/admin/jobs/requeue-dead`` (everything, ``group_size=1``) and by the fail-back
+    (``failover._requeue_outage_dead``: ``died_after`` = the outage start, only rows with ``finished_at >= died_after``,
+    ``group_size=None``, CLAUDE_INTEGRATION §10.6). The nightly maintenance is NOT a caller: it is
+    ``scheduler.requeue_dead_once`` with its own SQL and the once-only ``payload.requeued_at`` stamp (§6.3) — this
+    function neither sets nor honours that stamp, on purpose: an outage casualty keeps its single nightly retry, and a
+    nightly-revived job that died again during the outage gets its CLI try. A dead job whose dedupe key is held by a
+    live (``queued`` / ``running``) job is not a candidate — it never takes one of ``limit``'s slots, exactly like the
+    nightly — and the per-row ``IntegrityError`` guard still covers the race with a concurrent enqueue and two dead rows
+    sharing one key. A revived ``generate_content`` job's word goes back from ``failed`` to ``queued`` in the same
+    transaction (:data:`REVIVE_CONTENT_WORD_SQL`, keyed on the row's ``payload.word_id``), so "a word is ``queued`` ⇔ it
+    has a live content job" holds in both directions and the content routes / batches wait for it instead of showing
+    生成失败; ``lookup_word`` rows change nothing else. Each row is its own ``db.maybe_tx`` statement group, so the
+    function also works inside a caller's open transaction.
     """
     now = now or now_iso()
-    where = ["status = 'dead'"]
+    where = [
+        "status = 'dead'",
+        "NOT EXISTS (SELECT 1 FROM jobs l WHERE l.dedupe_key = jobs.dedupe_key AND l.status IN ('queued','running'))",
+    ]
     params: list[Any] = []
     if types:
         where.append(f"type IN ({','.join('?' * len(types))})")
@@ -129,20 +174,30 @@ def requeue_dead_jobs(
     if older_than is not None:
         where.append("finished_at <= ?")
         params.append(to_iso(parse_iso(now) - older_than))
-    sql = f"SELECT id FROM jobs WHERE {' AND '.join(where)} ORDER BY finished_at, id"
+    if died_after is not None:
+        where.append("finished_at >= ?")
+        params.append(died_after)
+    sql = f"SELECT id, type, payload_json FROM jobs WHERE {' AND '.join(where)} ORDER BY finished_at, id"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    ids = [int(r[0]) for r in conn.execute(sql, params)]
+    rows = [(int(r[0]), str(r[1]), r[2]) for r in conn.execute(sql, params)]
+    if group_size is None:
+        mark_sql, mark_params = "json_remove(payload_json, '$.group_size')", ()
+    else:
+        mark_sql, mark_params = "json_set(payload_json, '$.group_size', ?)", (int(group_size),)
     requeued = 0
-    for job_id in ids:
+    for job_id, job_type, payload_json in rows:
         try:
             with db.maybe_tx(conn):
                 cur = conn.execute(
                     "UPDATE jobs SET status = 'queued', attempts = 0, run_after = ?, locked_at = NULL, locked_by = NULL, finished_at = NULL, "
-                    "payload_json = json_set(payload_json, '$.group_size', 1), updated_at = ? WHERE id = ? AND status = 'dead'",
-                    (now, now, job_id),
+                    f"payload_json = {mark_sql}, updated_at = ? WHERE id = ? AND status = 'dead'",
+                    (now, *mark_params, now, job_id),
                 )
-                requeued += int(cur.rowcount)
+                if cur.rowcount == 1:
+                    requeued += 1
+                    if job_type == "generate_content":
+                        conn.execute(REVIVE_CONTENT_WORD_SQL, (now, payload_json))
         except sqlite3.IntegrityError:
             log.info("dead job %d not requeued: its dedupe key is held by a live job", job_id)
     return requeued
@@ -242,9 +297,19 @@ class BaseWorker(threading.Thread):
 
 class ClaudeWorker(BaseWorker):
     """``claude-N``: the five Claude job types, head job across types; idles while AI is disabled (flagging the bank
-    rows of queued lookups 「暂时无法校验」 so learners get the 修改 / 重试 / 保留 / 删除 buttons, §6.5)."""
+    rows of queued lookups 「暂时无法校验」 so learners get the 修改 / 重试 / 保留 / 删除 buttons, §6.5). Its five-minute
+    housekeeping also runs the fail-back probe while the fallback provider is active (CLAUDE_INTEGRATION §10.6) — once
+    immediately after start (a restart must not sit on the fallback for another 30 minutes) — pinned to the recorded
+    ``kv.claude.flag_tier`` (one attempt; ``probe.check(tier=…)`` never rewrites the tier, AI_FALLBACK_MODEL §4.5), whereas
+    ``wd claude-check`` and the admin button keep the two-tier install probe. That first housekeeping also ends a stale
+    failover episode when the mode is not ``auto`` (``failover.reconcile_mode``: ``ai.active_provider`` back to claude, the
+    ``ai.failover.*`` keys dropped, log event ``ai_failover_reconciled``; failures are logged, never raised)."""
 
     types = CLAUDE_TYPES
+
+    def __init__(self, ctx: JobContext, *, idle_wait: float = IDLE_WAIT_S, lease_lost: threading.Event | None = None):
+        super().__init__(ctx, idle_wait=idle_wait, lease_lost=lease_lost)
+        self._first_housekeeping = True
 
     def gate(self) -> float | None:
         from ..ai import budget, lookup  # local import: ai → jobs must not become a module cycle at import time
@@ -262,7 +327,7 @@ class ClaudeWorker(BaseWorker):
 
     def housekeeping(self, conn: sqlite3.Connection, now: str) -> None:
         super().housekeeping(conn, now)
-        from ..ai import runner
+        from ..ai import failover, probe, runner
 
         try:
             removed = runner.prune_logs(self.ctx.cfg, now)
@@ -270,6 +335,25 @@ class ClaudeWorker(BaseWorker):
                 log.info("pruned %d day(s) of claude logs", removed, extra={"worker": self.worker_id})
         except OSError as e:  # pragma: no cover - best effort
             log.warning("claude log pruning failed: %s", e)
+        force = self._first_housekeeping
+        self._first_housekeeping = False
+        if force:
+            try:  # a stale auto-mode episode means nothing in claude_cli / openai_http: end it before anything can "fail back" from it
+                failover.reconcile_mode(conn, self.ctx.cfg, now=now)
+            except Exception:  # noqa: BLE001 — bookkeeping must never take the worker down
+                log.exception("failover state reconciliation failed", extra={"worker": self.worker_id})
+        try:
+            outcome = failover.maybe_probe(
+                conn,
+                self.ctx.cfg,
+                now=now,
+                probe_claude=lambda: probe.check(conn, self.ctx.cfg, now=now, tier=runner.flag_tier(conn)),
+                force=force,
+            )
+            if outcome:
+                log.info("fail-back probe: %s", outcome, extra={"worker": self.worker_id, "event": "ai_failback_probe"})
+        except Exception:  # noqa: BLE001 — the probe must never take the worker down
+            log.exception("fail-back probe failed", extra={"worker": self.worker_id})
 
 
 class IoWorker(BaseWorker):
@@ -316,6 +400,8 @@ __all__ = [
     "BaseWorker",
     "ClaudeWorker",
     "IoWorker",
+    "REVIVE_CONTENT_WORD_SQL",
+    "claim_limit",
     "dispatch",
     "drain",
     "process_next",

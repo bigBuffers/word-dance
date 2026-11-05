@@ -27,6 +27,11 @@ transaction per word (:func:`apply_item`):
 A job that ends ``dead`` leaves the word unvalidated and flags its bank rows with 「暂时无法校验，请稍后重试或检查拼写」
 (UI buttons 修改 / 重试 / 保留 / 删除, API.md 36); while AI is disabled the Claude worker applies the same flag to the
 rows behind every queued lookup (:func:`flag_queued_lookups`) and the jobs wait untouched.
+
+A local write failure (``sqlite3.Error`` inside :func:`apply_item`) is not a model miss: that job alone fails with
+``apply failed: …`` (§6.3 backoff → dead, the same flag on dead — exactly like consolidate) and the group's call is never
+re-classified ``invalid_output`` because of it; only genuine misses (no item for the string) count as the answer's
+post-validation failure and, on the fallback, its quality streak (§10.4).
 """
 
 from __future__ import annotations
@@ -554,8 +559,9 @@ def handle_lookup_word(ctx: JobContext, jobs: list[Job]) -> None:
             return
         common.record_success(conn, now=now)
         index = common.item_index(models.valid_items(result.structured, models.LookupItem), "input")
-        failures: list[tuple[Job, str]] = []
+        failures: list[tuple[Job, str]] = []  # genuine post-validation misses only (no item for the string)
         done = 0
+        apply_errors = 0
         for job, word in todo:
             item = index.get(str(word["display"]).lower()) or index.get(str(word["lemma"]).lower())
             if item is None:
@@ -564,19 +570,29 @@ def handle_lookup_word(ctx: JobContext, jobs: list[Job]) -> None:
             try:
                 outcome = apply_item(conn, word, item, now=now)
             except sqlite3.Error as e:
+                # a local write failure, not a model miss (mirrors consolidate): this job backs off / dies on its own and
+                # never feeds the group's re-classification or the fallback's quality streak (§6.5, §10.4)
                 log.exception("lookup apply failed for word %s", word["lemma"], extra={"job_id": job.id, "job_type": job.type})
-                failures.append((job, f"apply failed: {e}"))
+                common.fail_job(conn, job, f"apply failed: {e}", now=now, on_dead=on_dead)
+                apply_errors += 1
                 continue
             queue.finish(conn, job.id, outcome, now=now)
             done += 1
-        if failures and not done:
+        if done:
+            common.record_applied(conn, ctx.cfg, result, now=now)  # the answering provider's quality streak ends (§10.4)
+        if failures and not done and not apply_errors:
+            # every item failed post-validation → re-classified; on the fallback the rejected group counts its quality streak (§10.4)
+            # (an item that reached apply_item was usable: a group with apply errors is never re-classified, its misses stay `partial`)
             ledger.set_status(conn, result.call_id, "invalid_output", error="; ".join(d for _, d in failures)[:1000])
-            failed = type(result)(ok=False, status="invalid_output", structured=None, cost_usd=result.cost_usd, call_id=result.call_id, model_used=result.model_used, error=failures[0][1])
+            failed = type(result)(
+                ok=False, status="invalid_output", structured=None, cost_usd=result.cost_usd, call_id=result.call_id, model_used=result.model_used, error=failures[0][1], provider=result.provider
+            )
+            common.record_invalid_output(conn, ctx.cfg, failed, kind=KIND, priority=min(j.priority for j in group), now=now)
             common.handle_failure(ctx, conn, [j for j, _ in failures], failed, now=now, on_dead=on_dead)
         else:
             for job, detail in failures:
                 common.fail_job(conn, job, f"partial: {detail}", now=now, on_dead=on_dead)
-        ctx.log.info("lookup_word: %d applied, %d failed (call %s)", done, len(failures), result.call_id, extra={"job_type": "lookup_word", "cost_usd": result.cost_usd, "event": "lookup_applied"})
+        ctx.log.info("lookup_word: %d applied, %d failed, %d apply error(s) (call %s)", done, len(failures), apply_errors, result.call_id, extra={"job_type": "lookup_word", "cost_usd": result.cost_usd, "event": "lookup_applied"})
     finally:
         conn.close()
 

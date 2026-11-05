@@ -102,7 +102,7 @@ def test_tier1_argv_adds_the_four_hardened_flags_and_the_escape_hatches(settings
     tier0 = runner.build_argv(settings, "0", "", "Look up", schema, 0.15)
     assert argv[:14] == tier0 and argv[2] == "Look up"  # the user prompt stays positional; no folding under tier 1
     assert argv[14:] == ["--system-prompt", "SYS", "--restricted", "--strict-mcp-config", "--disable-slash-commands"]
-    cfg = replace(settings, ai_fallback_model="haiku", ai_extra_args="--effort low")
+    cfg = replace(settings, ai_cli_fallback_model="haiku", ai_extra_args="--effort low")
     assert runner.build_argv(cfg, "0", "S", "U", schema, 0.4)[-4:] == ["--fallback-model", "haiku", "--effort", "low"]
     assert runner.format_budget(0.4) == "0.4" and runner.format_budget(2.0) == "2" and runner.format_budget(0.05) == "0.05"
 
@@ -181,7 +181,21 @@ def test_ledger_row_exists_before_the_spawn(conn, cfg_for):
 
 @pytest.mark.parametrize(
     "mode,status,ok",
-    [("invalid_json", "error", False), ("auth", "auth", False), ("overloaded", "overloaded", False), ("budget", "budget", False), ("partial", "success", True), ("invalid_word", "success", True), ("stdin_hang", "success", True), ("schema_mismatch", "success", True)],
+    [
+        ("invalid_json", "error", False),
+        ("auth", "auth", False),
+        ("managed_settings", "auth", False),
+        ("forbidden", "auth", False),
+        ("balance", "auth", False),
+        ("network", "overloaded", False),
+        ("rate429", "overloaded", False),
+        ("overloaded", "overloaded", False),
+        ("budget", "budget", False),
+        ("partial", "success", True),
+        ("invalid_word", "success", True),
+        ("stdin_hang", "success", True),
+        ("schema_mismatch", "success", True),
+    ],
 )
 def test_every_fake_mode_is_classified(conn, cfg_for, mode, status, ok):
     result = run(conn, cfg_for(mode), prompt=content.build_user_prompt([*WORDS, {"word": "zzzq", "dictionary_hint": "", "pos_hint": "", "stages": []}]))
@@ -199,8 +213,19 @@ def test_every_fake_mode_is_classified(conn, cfg_for, mode, status, ok):
         assert "budget" in (row["error"] or "").lower()
     if mode == "auth":
         assert "Not logged in" in row["error"]
+    if mode == "managed_settings":
+        assert "managed settings" in row["error"] and not row["error"].startswith(("balance:", "network:"))
+    if mode == "forbidden":
+        assert "403" in row["error"]
+    if mode == "balance":
+        assert row["error"].startswith("balance: ") and "402" in row["error"]  # §10: failover pauses 24 h on this prefix
+    if mode == "network":
+        assert row["error"].startswith("network: ") and "ECONNREFUSED" in row["error"]  # §10: the separate network streak
+    if mode == "rate429":
+        assert "429" in row["error"] and not row["error"].startswith("network:")
     if mode == "overloaded":
         assert "529" in row["error"]
+    assert row["provider"] == "claude" and result.provider == "claude"
     if mode == "invalid_json":
         assert row["exit_code"] == 0 and "unparseable" in row["error"]
 
@@ -321,6 +346,20 @@ def test_parse_and_classify_table():
     assert runner.parse_and_classify(1, envelope(subtype="error_during_execution", is_error=True, total_cost_usd=0.03), "x" * 5000).cost_usd == 0.03
     assert len(runner.parse_and_classify(1, "", "x" * 5000).error) == 1000
     assert runner.parse_and_classify(0, envelope(modelUsage={}), "").model_used is None  # modelUsage absent → None (model_requested is stored)
+
+
+def test_classifier_anchors_the_new_codes_and_ignores_model_prose():
+    """§3 / §10: the 2026-11 regex additions must not turn stack-frame columns or model text into auth/balance/overload."""
+    assert runner.parse_and_classify(1, "", "TypeError: boom\n    at run (file:///opt/claude/cli.js:12:403)").status == "error"
+    assert runner.parse_and_classify(1, "", "    at run (file:///opt/claude/cli.js:12:402)").status == "error"
+    assert runner.parse_and_classify(1, "", "API Error: 403 Request not allowed").status == "auth"
+    assert runner.parse_and_classify(1, "", "API Error: 402 insufficient balance").error.startswith("balance: ")
+    assert runner.parse_and_classify(1, "", "API Error: 429 Too Many Requests").status == "overloaded"
+    assert runner.parse_and_classify(1, "", "API Error: 502 Bad Gateway").status == "overloaded"
+    assert runner.parse_and_classify(1, "", "Your organization requires remote managed settings to load, but they could not be fetched").status == "auth"
+    # a success envelope without structured_output carries the model's prose: `error`, whatever the prose says
+    prose = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "forbidden usage limit 403 402 overloaded", "total_cost_usd": 0.01})
+    assert runner.parse_and_classify(0, prose, "").status == "error"
 
 
 def test_prune_logs_removes_old_day_directories(settings):

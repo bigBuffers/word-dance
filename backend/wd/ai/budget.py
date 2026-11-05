@@ -33,6 +33,11 @@ ESTIMATES: dict[str, tuple[float, float]] = {
     "svg": (0.03, 0.0),
     "probe": (0.01, 0.0),
 }
+PROVIDERS: tuple[str, ...] = ("claude", "fallback")
+KV_GLOBAL_PAUSE = "ai.paused_until"  # the admin's manual pause: every provider (POST /api/admin/ai/pause)
+KV_CLAUDE_PAUSE = "claude.paused_until"  # automatic pause of the CLI provider (auth / spawn_error / overload streak)
+KV_FALLBACK_PAUSE = "ai.fallback.paused_until"  # automatic pause of the fallback provider
+PAUSE_KEYS: dict[str, str] = {"claude": KV_CLAUDE_PAUSE, "fallback": KV_FALLBACK_PAUSE}
 PREWARM_PRIORITY = 90
 PREWARM_DAILY_SHARE = 0.5  # prewarm additionally requires spent_today < 0.5 × daily cap
 RESUME_MINUTE = 5  # deferrals resume at 00:05 local
@@ -42,8 +47,14 @@ EVENT_MONTHLY = "budget_monthly"
 EVENT_SVG = "budget_svg"
 
 
-def estimate(kind: str, word_count: int = 1) -> float:
-    """Reservation estimate in USD for a call of ``kind`` over ``word_count`` words/strings."""
+def estimate(kind: str, word_count: int = 1, provider: str = "claude") -> float:
+    """Reservation estimate in USD for a call of ``kind`` over ``word_count`` words/strings.
+
+    The fallback provider reserves nothing (its free tier costs 0; a paid price table is charged post hoc through
+    ``cost_usd`` and still counts in ``spent_today`` / ``spent_month``, CLAUDE_INTEGRATION §10).
+    """
+    if provider != "claude":
+        return 0.0
     fixed, per = ESTIMATES.get(kind, ESTIMATES["content"])
     return round(fixed + per * max(0, int(word_count)), 6)
 
@@ -59,15 +70,19 @@ def budget_for(cfg: Settings, kind: str) -> float:
     }[kind]
 
 
-def timeout_for(cfg: Settings, kind: str) -> int:
-    """Per-kind timeout in seconds (CLAUDE_INTEGRATION §1.2: content 180 · lookup 120 · consolidate 240 · svg 120 · probe 60)."""
-    return {
+def timeout_for(cfg: Settings, kind: str, provider: str = "claude") -> int:
+    """Per-kind timeout in seconds (CLAUDE_INTEGRATION §1.2: content 180 · lookup 120 · consolidate 240 · svg 120 · probe 60);
+    the fallback provider gets the same figure × ``WD_AI_FALLBACK_TIMEOUT_SCALE`` (slower free-tier models, §10)."""
+    base = {
         "content": cfg.ai_timeout_content_sec,
         "lookup": cfg.ai_timeout_lookup_sec,
         "consolidate": cfg.ai_timeout_consolidate_sec,
         "svg": cfg.ai_timeout_svg_sec,
         "probe": 60,
     }[kind]
+    if provider != "claude":
+        return max(5, int(round(base * float(getattr(cfg, "ai_fallback_timeout_scale", 1.5) or 1.5))))
+    return int(base)
 
 
 # --------------------------------------------------------------------------------------- windows
@@ -119,18 +134,35 @@ def ai_enabled(conn: sqlite3.Connection, cfg: Settings | None = None) -> bool:
     return db.kv_get(conn, "claude.enabled") != "0"
 
 
-def paused_until(conn: sqlite3.Connection, now: str) -> str | None:
-    """``kv.claude.paused_until`` while it lies in the future, else None."""
-    value = db.kv_get(conn, "claude.paused_until")
+def _future(value: str | None, now: str) -> str | None:
     return value if value and value > now else None
 
 
-def set_paused_until(conn: sqlite3.Connection, until: str | None, *, now: str | None = None) -> None:
+def global_paused_until(conn: sqlite3.Connection, now: str) -> str | None:
+    """The admin's manual pause (``kv.ai.paused_until``, every provider) while it lies in the future, else None."""
+    return _future(db.kv_get(conn, KV_GLOBAL_PAUSE), now)
+
+
+def provider_paused_until(conn: sqlite3.Connection, provider: str, now: str) -> str | None:
+    """The automatic pause of one provider (``claude.paused_until`` / ``ai.fallback.paused_until``) while in the future."""
+    return _future(db.kv_get(conn, PAUSE_KEYS.get(provider, KV_CLAUDE_PAUSE)), now)
+
+
+def paused_until(conn: sqlite3.Connection, now: str) -> str | None:
+    """When the CLI provider may run again: ``kv.claude.paused_until`` or the admin's global pause, whichever lies
+    further in the future (None when neither is set). The legacy readers (routers, scheduler, diag) keep this meaning."""
+    candidates = [v for v in (provider_paused_until(conn, "claude", now), global_paused_until(conn, now)) if v]
+    return max(candidates) if candidates else None
+
+
+def set_paused_until(conn: sqlite3.Connection, until: str | None, *, now: str | None = None, provider: str = "claude") -> None:
+    """Set (or clear with None) the automatic pause of ``provider``."""
+    key = PAUSE_KEYS.get(provider, KV_CLAUDE_PAUSE)
     with db.maybe_tx(conn):
         if until is None:
-            db.kv_delete(conn, "claude.paused_until")
+            db.kv_delete(conn, key)
         else:
-            db.kv_set(conn, "claude.paused_until", until, now=now)
+            db.kv_set(conn, key, until, now=now)
 
 
 def spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, now: str | None = None) -> float:
@@ -166,8 +198,13 @@ def prewarm_spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, n
     return ledger.prewarm_cost(conn, start, end)
 
 
-def calls_last_hour(conn: sqlite3.Connection, now: str) -> int:
-    return ledger.count_started(conn, to_iso(parse_iso(now) - timedelta(hours=1)))
+def calls_last_hour(conn: sqlite3.Connection, now: str, provider: str = "claude") -> int:
+    """Calls of ``provider`` started in the last 60 minutes (each provider has its own hourly cap)."""
+    return ledger.count_started(conn, to_iso(parse_iso(now) - timedelta(hours=1)), provider=provider)
+
+
+def hourly_cap_for(cfg: Settings, provider: str) -> int:
+    return int(cfg.ai_hourly_call_cap if provider == "claude" else getattr(cfg, "ai_fallback_hourly_call_cap", 40))
 
 
 def event_once(conn: sqlite3.Connection, kind: str, since: str, detail: dict, *, now: str) -> bool:
@@ -192,23 +229,29 @@ def can_spend(
     now: str | datetime | None,
     *,
     cfg: Settings | None = None,
+    provider: str = "claude",
 ) -> tuple[bool, str | None]:
-    """``(ok, resumes_at_iso)`` — the CLAUDE_INTEGRATION §7 guards for one call of ``kind`` (TASKS §I signature).
+    """``(ok, resumes_at_iso)`` — the CLAUDE_INTEGRATION §7 guards for one call of ``kind`` on ``provider`` (TASKS §I signature).
 
-    ``cfg`` defaults to the current environment (the WP3 content-request route has no settings object at hand).
-    Deferral is never failure: a ``False`` answer carries the instant at which the jobs may run again.
+    Order: kill switch → the admin's global pause → the provider's own pause → the provider's hourly cap → monthly →
+    daily → prewarm sub-cap → SVG sub-cap. ``cfg`` defaults to the current environment (the WP3 content-request route
+    has no settings object at hand). Deferral is never failure: a ``False`` answer carries the instant at which the
+    jobs may run again.
     """
     cfg = cfg or Settings.from_env()
     if isinstance(now, datetime):
         now = to_iso(now)
     now = now or now_iso()
-    est = estimate(kind, word_count)
+    est = estimate(kind, word_count, provider)
     if not ai_enabled(conn, cfg):
         return False, to_iso(parse_iso(now) + DISABLED_WAIT)
-    paused = paused_until(conn, now)
+    paused = global_paused_until(conn, now)
     if paused is not None:
         return False, paused
-    if calls_last_hour(conn, now) >= cfg.ai_hourly_call_cap:
+    paused = provider_paused_until(conn, provider, now)
+    if paused is not None:
+        return False, paused
+    if calls_last_hour(conn, now, provider) >= hourly_cap_for(cfg, provider):
         return False, next_hour_resume(now)
     day_begin, _ = day_window(now, cfg.tz)
     month_begin, _ = month_window(now, cfg.tz)
@@ -260,43 +303,67 @@ def reserve(
     job_ids: Sequence[int],
     max_budget_usd: float | None = None,
     model_requested: str | None = None,
+    provider: str = "claude",
 ) -> Reservation:
-    """Atomically check :func:`can_spend` and insert the ``running`` ledger row (the reservation).
+    """Atomically check :func:`can_spend` and insert the ``running`` ledger row (the reservation) for ``provider``.
 
     The check and the insert run inside one ``BEGIN IMMEDIATE``, so a concurrent reservation on another connection
     waits for this one and then sees its ``reserved_usd`` — two callers can never both squeeze under the cap.
     """
-    est = estimate(kind, word_count)
+    est = estimate(kind, word_count, provider)
     with db.maybe_tx(conn):
-        ok, resumes_at = can_spend(conn, kind, word_count, priority, now, cfg=cfg)
+        ok, resumes_at = can_spend(conn, kind, word_count, priority, now, cfg=cfg, provider=provider)
         if not ok:
             return Reservation(None, resumes_at, est)
         call_id = ledger.insert_call(
             conn,
             kind=kind,
-            model_requested=model_requested or cfg.ai_model,
+            model_requested=model_requested or (cfg.ai_model if provider == "claude" else getattr(cfg, "ai_fallback_model", "") or "fallback"),
             flag_tier=int(flag_tier),
             word_count=word_count,
             job_ids=list(job_ids),
             max_budget_usd=budget_for(cfg, kind) if max_budget_usd is None else float(max_budget_usd),
             reserved_usd=est,
             now=now,
+            provider=provider,
         )
     return Reservation(call_id, None, est)
 
 
 # ----------------------------------------------------------------------------------- admin summary
+def fallback_available(conn: sqlite3.Connection) -> bool | None:
+    """``kv.ai.fallback.available`` as a bool: None when never probed / unknown (key absent), False for the sticky ``'0'``
+    mark a failed probe or a ``spawn_error`` / ``not_found:`` wrote, True otherwise (CLAUDE_INTEGRATION §10.6)."""
+    value = db.kv_get(conn, "ai.fallback.available")
+    if value is None:
+        return None
+    return value != "0"
+
+
 def spend_summary(conn: sqlite3.Connection, cfg: Settings | None = None, now: str | None = None) -> dict:
-    """The ``AdminOverview.ai`` / ``AiCallsPage`` numbers (today, month, svg today, calls today, 7-day cost per word)."""
+    """The ``AdminOverview.ai`` / ``AiCallsPage`` numbers (today, month, svg today, calls today, 7-day cost per word).
+
+    ``paused_until`` keeps its legacy meaning (the CLI's automatic pause or the admin's global pause, whichever ends
+    later — ``diag`` and the ``claude_cli``-mode overview depend on it); ``manual_paused_until`` is the admin's own
+    pause alone (``kv.ai.paused_until`` while in the future), so the AI tab can tell 「已暂停 / 恢复 AI」 from "the CLI is
+    auto-paused while the fallback serves"; ``fallback_available`` surfaces the sticky ``'0'`` mark (§10.6).
+    """
     cfg = cfg or Settings.from_env()
     now = now or now_iso()
     d0, d1 = day_window(now, cfg.tz)
     m0, m1 = month_window(now, cfg.tz)
     week_ago = to_iso(parse_iso(now) - timedelta(days=7))
+    active = db.kv_get(conn, "ai.active_provider", "claude")
     return {
         "enabled": ai_enabled(conn, cfg),
         "paused_until": paused_until(conn, now),
+        "manual_paused_until": global_paused_until(conn, now),
         "flag_tier": 1 if db.kv_get(conn, "claude.flag_tier", "0") == "1" else 0,
+        "active_provider": active if active in PROVIDERS else "claude",
+        "fallback_configured": bool(getattr(cfg, "fallback_configured", False)),
+        "fallback_available": fallback_available(conn),
+        "fallback_paused_until": provider_paused_until(conn, "fallback", now),
+        "fallback_calls_today": ledger.count_started(conn, d0, d1, provider="fallback"),
         "today_usd": round(ledger.sum_cost(conn, d0, d1), 6),
         "month_usd": round(ledger.sum_cost(conn, m0, m1), 6),
         "daily_budget_usd": cfg.ai_daily_budget_usd,
@@ -311,6 +378,11 @@ def spend_summary(conn: sqlite3.Connection, cfg: Settings | None = None, now: st
 
 __all__ = [
     "ESTIMATES",
+    "KV_CLAUDE_PAUSE",
+    "KV_FALLBACK_PAUSE",
+    "KV_GLOBAL_PAUSE",
+    "PAUSE_KEYS",
+    "PROVIDERS",
     "Reservation",
     "ai_enabled",
     "budget_for",
@@ -319,12 +391,16 @@ __all__ = [
     "day_window",
     "estimate",
     "event_once",
+    "fallback_available",
+    "global_paused_until",
+    "hourly_cap_for",
     "month_window",
     "next_day_resume",
     "next_hour_resume",
     "next_month_resume",
     "paused_until",
     "prewarm_spent_today",
+    "provider_paused_until",
     "reserve",
     "set_paused_until",
     "spend_summary",

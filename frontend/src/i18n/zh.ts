@@ -86,6 +86,8 @@ export const zh = {
               sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：中考、高考、大学英语四级与六级大纲', images: '图片来源：Wikimedia Commons、Openverse（CC 许可）、AI 生成示意图或系统生成卡片', ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考' } },
   admin: { title: '管理', tabs: { overview: '概览', users: '用户与邀请', jobs: '任务', ai: 'AI', reports: '内容反馈', events: '事件', config: '配置' },
            spendToday: '今日花费', spendMonth: '本月花费', cap: '上限', queue: '队列', paused: '已暂停', pause: '暂停 AI', resume: '恢复 AI', probe: '探测 claude', probeOk: (t: number) => `探测成功（flag tier ${t}）`,
+           activeProvider: '当前提供方', providerClaude: 'Claude', providerFallback: '备用模型', probeFallback: '探测备用', fallbackPaused: '备用模型已暂停', probeFallbackOk: (m: string) => `备用模型探测成功（${m}）`,
+           claudeAutoPaused: 'Claude 自动暂停至', fallbackAvailability: { unprobed: '未探测', available: '可用', unavailable: '不可用' },
            prewarm: '预生成', invite: '生成邀请码', inviteOnce: '邀请码只显示一次，请立即复制', disable: '禁用', enable: '启用', makeAdmin: '设为管理员', resetPassword: '重置密码',
            images: { photo: '照片', svg: 'AI 示意图', card: '仅文字卡片', svgBudget: 'AI 示意图额度' },
            retry: '重试', requeueDead: '重排所有失败任务', regenerate: '重新生成', refetchImage: '换图', dismiss: '忽略', lastTick: '上次调度', flagTier: 'CLI 加固级别',

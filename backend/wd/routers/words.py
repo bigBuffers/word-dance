@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from .. import db, images, schemas
-from ..ai import budget
+from ..ai import budget, failover
 from ..clock import Clock, to_iso
 from ..config import Settings
 from ..deps import current_user, get_clock, get_db, get_settings, visible_word_sql
@@ -321,10 +321,13 @@ def content_request(
         live = queue.live_job(conn, f"content:{wid}")
         body = schemas.ContentRequestResponse(job_id=None if live is None else live.id, state=state)
         return JSONResponse(status_code=200, content=body.model_dump())
-    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
+    if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now, cfg=cfg, kind="content") is not None:
         raise ApiError("ai_disabled")
     bank.check_daily_quota(conn, f"content_req:user:{uid}", bank.CONTENT_REQUESTS_DAILY_CAP, now=now)
-    ok, resumes_at = budget.can_spend(conn, "content", 1, CONTENT_REQUEST_PRIORITY, now)
+    provider, resumes_at = failover.choose(conn, cfg, kind="content", priority=CONTENT_REQUEST_PRIORITY, now=now)
+    ok = provider is not None
+    if ok:
+        ok, resumes_at = budget.can_spend(conn, "content", 1, CONTENT_REQUEST_PRIORITY, now, cfg=cfg, provider=provider)
     if not ok:
         raise ApiError("budget_exhausted", details={"resumes_at": resumes_at})
     with db.tx(conn):

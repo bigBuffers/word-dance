@@ -323,15 +323,15 @@ def test_content_request_flow(client: TestClient, settings, alice, monkeypatch):
     w2 = word_id(settings, "bank")
     seen: list[tuple] = []
 
-    def refuse(conn, kind, word_count, priority, now):
-        seen.append((kind, word_count, priority, now))
+    def refuse(conn, kind, word_count, priority, now, *, cfg=None, provider="claude"):
+        seen.append((kind, word_count, priority, now, provider))  # §10: the route names the provider failover chose
         return False, "2026-10-14T16:05:00Z"
 
     monkeypatch.setattr(budget, "can_spend", refuse)
     r = client.post(f"/api/words/{w2}/content/request")
     assert r.status_code == 409 and r.json()["error"]["code"] == "budget_exhausted" and r.json()["error"]["details"]["resumes_at"] == "2026-10-14T16:05:00Z"
-    assert seen == [("content", 1, 10, "2026-10-14T00:00:00Z")]  # the frozen clock as an ISO string (WP5 accepts str | datetime)
-    monkeypatch.setattr(budget, "can_spend", lambda conn, kind, word_count, priority, now: (True, None))
+    assert seen == [("content", 1, 10, "2026-10-14T00:00:00Z", "claude")]  # the frozen clock as an ISO string (WP5 accepts str | datetime); claude_cli mode → the CLI
+    monkeypatch.setattr(budget, "can_spend", lambda conn, kind, word_count, priority, now, cfg=None, provider="claude": (True, None))
     assert client.post(f"/api/words/{w2}/content/request").status_code == 202
     # kill switch → 503
     w3 = word_id(settings, "glass")

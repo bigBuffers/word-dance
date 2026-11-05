@@ -81,7 +81,7 @@ class ImageProvider(Protocol):
 
 @dataclass
 class ClaudeResult:
-    """Outcome of one ``claude -p`` spawn (CLAUDE_INTEGRATION §3 statuses)."""
+    """Outcome of one model call — a ``claude -p`` spawn or a fallback HTTP call (CLAUDE_INTEGRATION §3 / §10 statuses)."""
 
     ok: bool
     status: str  # success | error | timeout | invalid_output | budget | auth | overloaded | spawn_error
@@ -90,6 +90,7 @@ class ClaudeResult:
     call_id: int
     model_used: str | None
     error: str | None
+    provider: str = "claude"  # "claude" (the CLI) or "fallback" (ai/providers/openai_http.py); defaulted so older constructions keep working
 
 
 @runtime_checkable

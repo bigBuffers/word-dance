@@ -46,6 +46,7 @@ SuggestionStatus = Literal["open", "accepted", "rejected", "expired", "auto", "u
 ImageProviderName = Literal["wikimedia", "openverse", "pixabay", "pexels", "claude_svg", "card_svg"]
 Difficulty = Literal[1, 2, 3, 4, 5]
 FlagTier = Literal[0, 1]
+AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI or ai/providers/openai_http.py (CLAUDE_INTEGRATION §10)
 
 STAGE_ORDER: tuple[str, ...] = ("zk", "gk", "cet4", "cet6")
 STAGE_NAMES_ZH: dict[str, str] = {"zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
@@ -1109,7 +1110,8 @@ class AdminOverviewJobs(Model):
 
 class AdminOverviewAi(Model):
     enabled: bool
-    paused_until: str | None
+    paused_until: str | None  # the CLI's automatic pause or the admin's global pause, whichever ends later (CLAUDE_INTEGRATION §10.5)
+    manual_paused_until: str | None  # the admin's own pause alone (kv ai.paused_until while in the future) — what 「暂停/恢复 AI」 toggles
     flag_tier: FlagTier
     today_usd: float
     month_usd: float
@@ -1120,6 +1122,11 @@ class AdminOverviewAi(Model):
     calls_today: int
     avg_cost_per_word_7d: float | None
     last_error: str | None
+    active_provider: AiProvider  # kv ai.active_provider (CLAUDE_INTEGRATION §10)
+    fallback_configured: bool  # Settings.fallback_configured
+    fallback_paused_until: str | None  # kv ai.fallback.paused_until while it lies in the future
+    fallback_calls_today: int  # ai_calls rows with provider='fallback' started today (WD_TZ)
+    fallback_available: bool | None  # kv ai.fallback.available: None = never probed, False = marked unavailable until the next fallback success (§10.6)
 
 
 class ProviderQuota(Model):
@@ -1281,6 +1288,7 @@ class AiCall(Model):
     id: int
     kind: str
     status: str
+    provider: AiProvider  # which provider served the call (migration 0010, CLAUDE_INTEGRATION §10)
     model_requested: str
     model_used: str | None
     flag_tier: FlagTier
@@ -1306,6 +1314,12 @@ class AiPauseRequest(Model):
 class AiPauseResponse(Model):
     paused: bool
     paused_until: str | None
+
+
+class ProbeRequest(Model):
+    """Body of ``POST /api/admin/ai/probe`` (API.md 66): which provider to probe (CLAUDE_INTEGRATION §2 / §10.6)."""
+
+    provider: AiProvider = "claude"
 
 
 class ProbeResponse(Model):
@@ -1451,7 +1465,7 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     63: (None, RunOnceResponse),
     64: (PageQuery, AiCallsPage),
     65: (AiPauseRequest, AiPauseResponse),
-    66: (None, ProbeResponse),
+    66: (ProbeRequest, ProbeResponse),
     67: (PrewarmRequest, PrewarmResponse),
     68: (None, JobIdResponse),
     69: (RefetchImageRequest, JobIdResponse),

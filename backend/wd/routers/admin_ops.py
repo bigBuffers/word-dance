@@ -16,7 +16,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 
 from .. import db, images, schemas
-from ..ai import budget, ledger, prewarm, probe
+from ..ai import budget, failover, ledger, prewarm, probe
 from ..clock import Clock, local_date, parse_iso, to_iso
 from ..config import Settings
 from ..deps import get_clock, get_db, get_settings, require_admin
@@ -321,33 +321,48 @@ def ai_pause(
     now = _now(clock)
     with db.tx(conn):
         if body.paused:
-            # CLAUDE_INTEGRATION §7 "pause": only `kv.claude.paused_until` — jobs defer until then and AI resumes by itself
-            # when it elapses. The kill switch (`kv.claude.enabled='0'`, worker idles) is a separate guard and is not set here.
+            # CLAUDE_INTEGRATION §7/§10 "pause": the admin's pause is `kv.ai.paused_until` and holds EVERY provider — jobs
+            # defer until then and AI resumes by itself when it elapses. The kill switch (`kv.claude.enabled='0'`, worker
+            # idles) is a separate guard and is not set here.
             until = to_iso(parse_iso(now) + MANUAL_PAUSE)
-            db.kv_set(conn, "claude.paused_until", until, now=now)
+            failover.set_manual_pause(conn, until, now=now)
             conn.execute("INSERT INTO system_events(kind, detail_json, created_at) VALUES ('claude_paused', ?, ?)", (json.dumps({"by": admin["username"], "until": until}), now))
             return {"paused": True, "paused_until": until}
-        db.kv_set(conn, "claude.enabled", "1", now=now)  # resume also lifts a hand-set kill switch
-        db.kv_delete(conn, "claude.paused_until")
+        # resume lifts the manual pause, every automatic pause and a hand-set kill switch, and makes the CLI the active provider again
+        failover.clear_pauses(conn, now=now)
         conn.execute("INSERT INTO system_events(kind, detail_json, created_at) VALUES ('claude_resumed', ?, ?)", (json.dumps({"by": admin["username"]}), now))
     return {"paused": False, "paused_until": None}
 
 
 @router.post("/api/admin/ai/probe", response_model=schemas.ProbeResponse)
 def ai_probe(
+    body: schemas.ProbeRequest | None = None,
     admin: dict[str, Any] = Depends(require_admin),
     conn: sqlite3.Connection = Depends(get_db),
     clock: Clock = Depends(get_clock),
     cfg: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     now = _now(clock)
-    last = db.kv_get(conn, "claude.probe_started_at")
+    provider = body.provider if body is not None else "claude"
+    key = "claude.probe_started_at" if provider == "claude" else "ai.fallback.probe_started_at"
+    last = db.kv_get(conn, key)
     if last and parse_iso(last) > parse_iso(now) - PROBE_MIN_INTERVAL:
         retry = int((parse_iso(last) + PROBE_MIN_INTERVAL - parse_iso(now)).total_seconds())
         raise ApiError("rate_limited", details={"retry_after_s": max(1, retry)})
     with db.tx(conn):
-        db.kv_set(conn, "claude.probe_started_at", now, now=now)
-    return probe.check(conn, cfg, now=now).as_dict()
+        db.kv_set(conn, key, now, now=now)
+    if provider == "fallback":
+        result = probe.check_fallback(conn, cfg, now=now)
+        if result.ok:
+            # a successful probe is proof the provider works: its streaks end and its automatic pause is lifted (§10.6)
+            failover.record_success(conn, cfg, provider="fallback", kind="probe", model_used=result.model_used, now=now, probe_call_ids=result.call_ids)
+        return result.as_dict()
+    result = probe.check(conn, cfg, now=now)
+    if result.ok:
+        # a successful manual probe lifts the CLI's automatic pause in every mode and is the operator's way back from the
+        # fallback (CLAUDE_INTEGRATION §10.6 fail-back)
+        failover.record_success(conn, cfg, provider="claude", kind="probe", model_used=result.model_used, now=now, probe_call_ids=result.call_ids)
+    return result.as_dict()
 
 
 # ------------------------------------------------------------------------------- 67–69 content
@@ -360,7 +375,7 @@ def content_prewarm(
     cfg: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     now = _now(clock)
-    if not budget.ai_enabled(conn, cfg) or budget.paused_until(conn, now) is not None:
+    if not budget.ai_enabled(conn, cfg) or not failover.availability(conn, cfg, kind="content", now=now, priority=prewarm.PRIORITY).ok:
         raise ApiError("ai_disabled")
     job_id, planned, _ = prewarm.create_plan(conn, stage=body.stage, limit=body.limit, max_budget_usd=body.max_budget_usd, now=now)
     return {"job_id": job_id, "planned": planned}

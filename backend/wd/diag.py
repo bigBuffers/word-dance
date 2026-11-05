@@ -99,6 +99,19 @@ def check_claude(cfg: Settings, conn: sqlite3.Connection | None) -> CheckResult:
             lines.append("hint: run `claude` once as sqin to log in, then `wd claude-check`")
         if enabled == "0":
             lines.append("hint: AI is paused by the admin (POST /api/admin/ai/pause {paused:false} to resume)")
+        # fallback provider + failover state (CLAUDE_INTEGRATION §10) — informational, never flips `ok`
+        lines.append(f"provider mode: {cfg.ai_provider}; active: {db.kv_get(conn, 'ai.active_provider', 'claude')}; manual pause: {db.kv_get(conn, 'ai.paused_until') or '-'}")
+        if cfg.fallback_configured:
+            fb_avail = db.kv_get(conn, "ai.fallback.available")
+            lines.append(
+                f"fallback: {cfg.ai_fallback_kind} {cfg.ai_fallback_model} @ {cfg.ai_fallback_base_url} kinds={','.join(cfg.ai_fallback_kinds) or '-'} "
+                f"available={fb_avail if fb_avail is not None else 'never probed'} paused_until={db.kv_get(conn, 'ai.fallback.paused_until') or '-'} "
+                f"model_seen={db.kv_get(conn, 'ai.fallback.model_seen') or '-'}"
+            )
+            if fb_avail == "0":
+                lines.append("hint: the fallback probe failed — check WD_AI_FALLBACK_* and run `wd ai-check --provider fallback`")
+        else:
+            lines.append("fallback: not configured (WD_AI_FALLBACK_KIND=none)")
     else:
         lines.append("probe state: (no database)")
     return CheckResult("claude", ok, lines)

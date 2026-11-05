@@ -34,8 +34,12 @@ describe('endpoints.ts', () => {
     await endpoints.deleteAccount('pw');
     await endpoints.adminUpdateUser(3, { role: 'admin' });
     await endpoints.adminAiPause(true);
+    await endpoints.adminAiProbe();
+    await endpoints.adminAiProbe('fallback');
     await endpoints.importBank({ format: 'csv', data: 'word\nabandon' });
 
+    const probeBodies = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/admin/ai/probe')).map(([, init]) => init?.body);
+    expect(probeBodies).toEqual([JSON.stringify({ provider: 'claude' }), JSON.stringify({ provider: 'fallback' })]);
     const calls = fetchMock.mock.calls.map(([url, init]) => `${init?.method} ${String(url)}`);
     expect(calls).toEqual([
       'GET /api/health',
@@ -52,6 +56,8 @@ describe('endpoints.ts', () => {
       'DELETE /api/account',
       'POST /api/admin/users/3',
       'POST /api/admin/ai/pause',
+      'POST /api/admin/ai/probe',
+      'POST /api/admin/ai/probe',
       'POST /api/bank/import',
     ]);
     expect(fetchMock.mock.calls[13]?.[1]?.body).toBe(JSON.stringify({ paused: true }));

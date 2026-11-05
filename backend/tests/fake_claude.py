@@ -16,7 +16,7 @@ The kind is inferred from the schema: ``items[].examples`` → content, ``items[
      "cache_creation_input_tokens":1691},"modelUsage":{"claude-sonnet-fake":{}},"session_id":"fake","num_turns":2}
 
 ``FAKE_CLAUDE_MODE``: ok (default) · invalid_json · schema_mismatch · partial · invalid_word · budget · timeout ·
-auth · overloaded · usage_error · stdin_hang. Contract assertions (exit 3): ``--tools ""``,
+auth · managed_settings · forbidden · balance · network · rate429 · overloaded · usage_error · stdin_hang. Contract assertions (exit 3): ``--tools ""``,
 ``--no-session-persistence``, ``--output-format json``, ``--json-schema`` and ``-p`` must be present and
 ``CLAUDECODE`` must be absent from the environment (the runner's env allow-list, §1.3).
 """
@@ -336,6 +336,21 @@ def main(argv: list[str]) -> int:
         return 0
     if mode == "auth":
         print("Not logged in. Please run claude login", file=sys.stderr)
+        return 1
+    if mode == "managed_settings":  # the 2026-11 enterprise outage string (AI_FALLBACK_MODEL §1) → `auth`
+        print("Your organization requires remote managed settings to load, but they could not be fetched", file=sys.stderr)
+        return 1
+    if mode == "forbidden":  # region block → `auth`
+        print("API Error: 403 Request not allowed", file=sys.stderr)
+        return 1
+    if mode == "balance":  # → `auth` with the `balance:` prefix (failover pauses 24 h)
+        print("API Error: 402 insufficient balance", file=sys.stderr)
+        return 1
+    if mode == "network":  # → `overloaded` with the `network:` prefix
+        print("TypeError: fetch failed: connect ECONNREFUSED 127.0.0.1:8118", file=sys.stderr)
+        return 1
+    if mode == "rate429":  # → `overloaded`
+        print("API Error: 429 Too Many Requests", file=sys.stderr)
         return 1
     if mode == "overloaded":
         print("API overloaded (529)", file=sys.stderr)

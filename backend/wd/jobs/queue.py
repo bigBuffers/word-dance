@@ -308,11 +308,16 @@ def live_job(conn: sqlite3.Connection, dedupe_key: str) -> Job | None:
 
 # -------------------------------------------------------------------------------------- draining
 def run_once(ctx: "JobContext") -> int:
-    """Synchronous drain for tests/smoke/``wd worker-once``: claim and run until nothing is runnable.
+    """Synchronous drain for TESTS only: claim and run until nothing is runnable.
 
-    Loads the handlers first. Jobs of a type without a handler are failed (backoff) so the loop
-    terminates; a handler that raises, or returns while a job is still ``running``, has those jobs
-    failed with the error text. Returns the number of jobs handed to handlers (or failed).
+    The service, ``wd worker-once`` and ``POST /api/admin/jobs/run-once`` drain through ``worker.drain`` →
+    ``worker.process_next``, whose claim size is ``failover.claim_limit`` (content 5 while the fallback would take
+    the head group, CLAUDE_INTEGRATION §10.5); this loop claims with the plain :func:`limit_for`, so a content
+    group it claims while the fallback is active is regrouped by ``common.claude_call`` (``ai_failover_regroup``)
+    instead of being claimed at 5 — ``processed`` counts that regrouped claim too. Loads the handlers first. Jobs
+    of a type without a handler are failed (backoff) so the loop terminates; a handler that raises, or returns
+    while a job is still ``running``, has those jobs failed with the error text. Returns the number of jobs
+    handed to handlers (or failed).
     """
     registry.load_handlers()
     processed = 0
