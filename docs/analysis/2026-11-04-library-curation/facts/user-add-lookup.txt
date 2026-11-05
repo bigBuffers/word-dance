@@ -1,0 +1,211 @@
+# SLICE user-add-lookup  (35 findings)
+## SUMMARY
+When a learner types a string on the add page, the client first mirrors the DESIGN §5.1 normaliser and then calls GET /api/lookup?q= (debounced 300 ms, cached
+per lemma); the server normalises, looks for an exact lemma and a word_forms match under the visibility filter, probes the optional ECDICT stardict.db read-
+only, and returns a preview with up to five prefix suggestions — it inserts nothing, enqueues nothing and never calls Claude. POST /api/bank/add (and /add-word,
+/import, and suggestion-accept) then runs services.words.resolve: exact → form → ECDICT → provisional. If ECDICT is configured and knows the word, a GLOBAL
+public words row (source='ecdict', is_public=1, is_valid_english=1) is created with no AI at all; otherwise a GLOBAL provisional words row is inserted
+(source='user', is_public=0, is_valid_english=NULL, safe_for_sharing=NULL, created_by_user_id=me) and one lookup_word job is enqueued (dedupe lookup:<id>,
+priority 10, run_after now+20 s). The PER-USER user_words row (state new, origin custom, priority 100, input_text, private note) is created immediately and the
+item reports status pending_ai; no generate_content job is enqueued for a provisional word, it cannot be put in today's batch, and POST content/request returns
+409 for it. The Claude worker claims up to 20 lookup jobs, reserves budget (kill switch, pause, hourly/daily/monthly caps — refusal defers the group without
+consuming an attempt) and runs the claude CLI once with lookup_system.txt plus a JSON list of the words' display strings (no usernames, no notes), schema
+lookup_v1: is_english, kind, headword, form_note_zh, phonetic, pos, meaning_zh, definition_en, difficulty, suggested_correction, safe_for_sharing, note_zh. On a
+valid verdict the handler validates the proposed headword deterministically (charset + relatedness), merges/renames/keeps accordingly, fills only NULL
+dictionary fields, sets is_valid_english=1, source='claude', is_public = safe_for_sharing, enqueues the single generate_content job (priority 10) and clears
+pending flags; an invalid verdict sets is_valid_english=0, is_public=0, content_state='failed' and flags every holder's row 「未识别为英文单词」 with an optional never-
+auto-applied did-you-mean. Visibility of the GLOBAL row is the one rule is_public=1 OR created_by_user_id=me OR holder (admins see all): the creator and anyone
+who types the same string (UNIQUE lemma folds them onto one row and one live job) see it immediately in detail/content/image/bank/lookup, while a third user
+gets 404, an empty /api/vocab and via='none' until the word becomes public; a word judged unsafe or invalid stays private forever for holders only, and even a
+later content job can demote a public custom word back to private. If a lookup job dies after 3 attempts, or the kill switch (WD_AI_ENABLED=0 / kv
+claude.enabled='0') is off, holders' rows are flagged 「暂时无法校验」 and get 修改/重试/保留/删除; 重试 re-enqueues the lookup (only while is_valid_english IS NULL), 保留 clears
+the flag (仅收藏 for rejected words, never pushed, no content), and the nightly maintenance requeues dead lookup jobs once per day. Budget exhaustion or a pause is
+different: the group is merely deferred, no flag is written, so the row sits at 待校验 with needs_attention=0 and no actionable button until the budget window
+reopens. Adding is never blocked by AI state: there is no ai_enabled or budget check anywhere in the add/import path; the only user limits are 300
+mutations/min, 200 custom adds/day (shared by add, add-word and import, with import charging only provisional rows), 50 tokens per add call, 20 study_today
+extras/day, 2,000 rows per import; GET /api/lookup and PATCH attention:retry have no dedicated quota. Within this slice, the only code that ever sets
+is_valid_english=1 is the seed importer, the ECDICT resolver and the lookup handler — there is no user, admin or CLI path to validate or publish a provisional
+word by hand. Consequently, with Claude permanently off, every user-added word not covered by the seed or ECDICT is stuck private and unstudiable, which is the
+central constraint for an admin-curated, no-end-user-AI deployment.
+## FINDINGS
+1. [high] POST /api/bank/add consumes the 200/day custom-add quota up front by token count (even for tokens that turn out invalid/exists), caps a call at 50 tokens and 4000 chars, and splits only on newline/comma/semicolon/tab, never on spaces.
+     ev: backend/wd/routers/bank.py:102-106; backend/wd/services/bank.py:57-59; backend/wd/services/bank.py:888-890
+     q: bank.check_daily_quota(conn, f"custom:user:{uid}", bank.CUSTOM_DAILY_CAP, now=to_iso(now), amount=max(1, len(tokens)))
+     why: These are the only per-user brakes on how many provisional (AI-triggering) words a learner can create per day.
+2. [high] resolve() tries exact lemma → word_forms → ECDICT → provisional, and an unknown string creates a GLOBAL words row with source='user', is_public=0, is_valid_english=NULL, safe_for_sharing=NULL, created_by_user_id=<user>, stage_min NULL, keeping the typed casing and derived kind.
+     ev: backend/wd/services/words.py:724-747; backend/wd/services/words.py:688-708; backend/tests/unit/test_words_resolve.py:131-138
+     q: return _create_provisional(conn, key, display, kind, user_id, now)
+     why: User input writes into the shared words table immediately (not a per-user staging table); only the flags keep it private.
+3. [high] Each provisional word enqueues exactly one lookup_word job: dedupe key lookup:<word_id>, priority 10, run_after = now + 20 s; repeated enqueues fold into the live job via an UPSERT that keeps the lower priority and earlier run_after.
+     ev: backend/wd/services/words.py:51; backend/wd/services/words.py:599-604; backend/wd/jobs/queue.py:100-103
+     q: LOOKUP_DEBOUNCE_S = 20  # DESIGN §5.2 step 4: run_after = now + 20 s so pasted words share one lookup call
+     why: Every end-user add of an unknown word schedules a Claude call; this is the end-user-triggered AI path the owner must eliminate.
+4. [high] No generate_content job is enqueued when a provisional word is added; enqueue_content_if_needed refuses any word whose is_valid_english != 1, so lookup_word is the single content trigger for custom words.
+     ev: backend/wd/services/bank.py:465-474; backend/tests/unit/test_words_resolve.py:147; docs/DESIGN.md:294
+     q: if word.get("is_valid_english") != 1 or word.get("merged_into_word_id") is not None:
+     why: Without a successful lookup, a custom word never gets examples/images either — two AI dependencies chained behind one gate.
+5. [high] The per-user bank row is created immediately (state new, origin custom, priority 100, input_text = typed string, private note) and the AddResult status is pending_ai whenever the resolved word's is_valid_english is NULL.
+     ev: backend/wd/services/bank.py:955-960; backend/wd/services/bank.py:609-614; backend/tests/integration/test_bank.py:153-158
+     q: elif word.get("is_valid_english") is None:  # 待校验 until lookup_word clears it (DESIGN §5.3 pending_ai)
+     why: Per-user state (user_words) and global state (words) diverge: the learner's bank shows the word at once, but the shared row is unvalidated.
+6. [high] The lookup prompt asks Claude to validate English-ness and produce dictionary data: is_english, kind, headword (lemma), form_note_zh, phonetic, pos, meaning_zh, definition_en, difficulty, suggested_correction, safe_for_sharing, note_zh; the user prompt carries only the words' display strings, never user ids or notes.
+     ev: backend/wd/ai/prompts/lookup_system.txt:2; backend/wd/ai/prompts/lookup_system.txt:6; backend/wd/ai/schemas/lookup_v1.json:1
+     q: - is_english: whether it is a real English word, fixed phrase or widely used abbreviation (proper nouns and brand names count only if they appear in general dic
+     why: This is what an offline/admin replacement would have to supply for each new word: validity, lemma, phonetic, pos, zh meaning, en definition, difficulty.
+7. [high] lookup_word is a background job handled by the Claude worker in groups of up to 20 words per CLI call (budget 0.15 USD/call, 120 s timeout); no router calls Claude synchronously.
+     ev: backend/wd/ai/lookup.py:522-549; docs/CLAUDE_INTEGRATION.md:292; backend/wd/routers/words.py:1-7
+     q: @register("lookup_word")
+     why: Searched with `grep -rn "run_claude\|claude_call\|runner\." backend/wd/routers | wc -l` → 0: every AI invocation is asynchronous and queue-driven, so it can be stopped by the kill switch without breaking requests.
+8. [high] On a valid verdict fill_fields sets is_valid_english=1, safe_for_sharing from Claude, is_public = safe_for_sharing, source='claude', and fills only NULL/empty phonetic/translation/definition/pos/difficulty (kind only on the word's own row); a merge into an already-public headword never changes its is_public.
+     ev: backend/wd/ai/lookup.py:354-361; backend/wd/ai/lookup.py:355; backend/wd/ai/lookup.py:359
+     q: safe = 1 if item.get("safe_for_sharing") is True else 0
+     why: Publication of a user-added word to all users is decided entirely by Claude's safe_for_sharing flag; no human review step exists.
+9. [high] After validation the handler enqueues generate_content at priority 10 for the final (possibly merged) word and clears needs_attention on holders without a did-you-mean target.
+     ev: backend/wd/ai/lookup.py:487-490; backend/tests/unit/test_lookup_apply.py:175-179
+     q: job_id = bank.enqueue_content_if_needed(conn, final, priority=CONTENT_PRIORITY, now=now)
+     why: A user add cascades into a second Claude call (content) once validated — both would need admin-side replacement.
+10. [high] An is_english=false / kind='invalid' verdict sets words.is_valid_english=0, is_public=0, content_state='failed' (GLOBAL) and flags every holder's bank row (PER-USER) 「未识别为英文单词：<note>」, optionally with suggested_word_id resolved through exact→form→ECDICT; corrections are never auto-applied.
+     ev: backend/wd/ai/lookup.py:367-389; backend/wd/ai/lookup.py:386; backend/tests/unit/test_lookup_apply.py:182-191
+     q: "UPDATE words SET is_valid_english = 0, is_public = 0, safe_for_sharing = ?, content_state = 'failed', updated_at = ? WHERE id = ?",
+     why: Rejected strings remain in the shared words table (private) forever; an admin curating the library must know they exist.
+11. [high] A Claude-proposed headword mutates shared rows only if it passes the deterministic validator (same charset/length/token rules as user input plus relatedness: equal, known form, suffix rule, or same first three letters); otherwise the word is kept as typed with an open fix_spelling suggestion.
+     ev: backend/wd/ai/lookup.py:458-466; backend/wd/services/words.py:779-800; backend/wd/ai/common.py:93-111
+     q: norm = common.validate_target(conn, headword, str(fresh["lemma"]))
+     why: Shows the existing guardrails around AI writes to global data — the same guard would apply to any admin-supplied headword mapping.
+12. [high] When the validated headword is an existing word, the provisional row is merged: holders' user_words are repointed (duplicates parked as removed, never deleted), word_forms(alt) added, and the source words row gets merged_into_word_id set with is_public=0, is_valid_english=1; its content job is cancelled.
+     ev: backend/wd/ai/lookup.py:265-272; backend/wd/ai/lookup.py:219; backend/tests/unit/test_lookup_apply.py:82
+     q: "UPDATE words SET merged_into_word_id = ?, is_public = 0, is_valid_english = 1, updated_at = ? WHERE id = ?",
+     why: Dedupe/merge of user-added strings onto canonical headwords is performed by the AI job, not at add time — an admin workflow would need an equivalent merge tool.
+13. [high] The single visibility rule for GLOBAL words rows is is_public=1 OR created_by_user_id=me OR an own user_words row exists; admins see every row. A private word becomes public only when lookup_word returns is_english=true AND safe_for_sharing=true.
+     ev: backend/wd/deps.py:201-216; backend/wd/services/words.py:245-255; docs/DESIGN.md:296
+     q: f"({alias}.is_public = 1 OR {alias}.created_by_user_id = {p} "
+     why: This is the DESIGN §5 privacy rule: the shared library every client reads is exactly the set of is_public=1 rows, and only the AI job promotes user words into it.
+14. [high] Two users adding the same unknown string share one words row and one live lookup job (UNIQUE lemma + ON CONFLICT DO NOTHING); the second add resolves via='exact', status pending_ai, created=false, and created_by_user_id stays the first user's.
+     ev: backend/wd/services/words.py:578-586; backend/wd/migrations/0001_init.sql:205; backend/wd/services/words.py:704
+     q: "ON CONFLICT(lemma) DO NOTHING"
+     why: Dedupe is by normalised lemma at insert time, so one Claude call serves all holders — and one admin decision per lemma would too.
+15. [high] An exact hit on a still-unvalidated word with no live lookup job (the first job died) makes the new holder enqueue a fresh lookup_word job; a hit on an already validated word never enqueues one.
+     ev: backend/wd/services/words.py:711-721; backend/tests/unit/test_words_resolve.py:192-206
+     q: if queue.live_job(conn, f"lookup:{wid}") is not None:
+     why: Any later user touching a pending word re-triggers AI; with AI off these jobs accumulate harmlessly but keep the word pending.
+16. [high] A third user who did not add the string cannot see a provisional word anywhere: GET /api/words/{id} and /content and /image return 404 word_not_found, /api/vocab returns 0 rows, /api/lookup returns via='none', and mark/content-request/refresh on the id are 404; adding the same string grants visibility via the new holder row.
+     ev: backend/tests/integration/test_words.py:379-391; backend/tests/integration/test_words.py:383-384; backend/wd/routers/vocab.py:50
+     q: assert r.status_code == 404 and r.json()["error"]["code"] == "word_not_found", path
+     why: Provisional words never leak to the shared library before validation; after validation with safe_for_sharing=true they appear in /api/vocab for everyone (test_worker.py:333).
+17. [high] GET /api/lookup never creates rows, never enqueues jobs and never calls AI: it only reads words/word_forms under the visibility filter and probes ECDICT read-only (via='ecdict' when found).
+     ev: backend/wd/routers/words.py:101-102; docs/API.md:172; backend/tests/integration/test_words.py:95
+     q: elif ecdict.lookup(norm.lemma) is not None:
+     why: The preview path is already AI-free and read-only, so a read-only client against an admin-curated library keeps working unchanged.
+18. [high] The add page calls GET /api/lookup once per distinct lemma, debounced 300 ms and cached for the page lifetime; GETs are never throttled server-side.
+     ev: frontend/src/pages/AddWordsPage.tsx:1-3; frontend/src/pages/AddWordsPage.tsx:138; docs/API.md:14
+     q: // line (client-side DESIGN §5.1 mirror first, then GET /api/lookup?q= debounced 300 ms, cached by lemma),
+     why: Searched `grep -rn check_daily_quota backend/wd/routers` — no lookup entry: preview load is bounded only by client debounce, which is fine since it costs no AI.
+19. [high] With the kill switch off (WD_AI_ENABLED=0 or kv claude.enabled='0') users can still add words and get pending_ai; the Claude worker's gate flags every bank row behind a queued lookup_word job 「暂时无法校验，请稍后重试或检查拼写」 while leaving the jobs queued and untouched; a 重试 while disabled gets re-flagged on the next sweep.
+     ev: backend/wd/config.py:332; backend/wd/ai/budget.py:114-119; backend/wd/jobs/worker.py:254-258
+     q: ai_enabled=flag("WD_AI_ENABLED", True),
+     why: In a no-AI deployment every non-seed/non-ECDICT add lands in 待处理 with the 修改/重试/保留/删除 buttons; the queue of lookup jobs grows indefinitely until the switch is turned back on.
+20. [high] The add/import path contains no ai_enabled, pause or budget check at all; only consolidate (bank.py:150) and content/request (words.py:324-329) refuse with ai_disabled/budget_exhausted.
+     ev: backend/wd/routers/bank.py:150; backend/wd/routers/words.py:324-329; backend/tests/integration/test_worker.py:156-158
+     q: if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
+     why: Searched `grep -n "budget\|can_spend\|ai_enabled" backend/wd/routers/bank.py backend/wd/services/words.py` → only the consolidate line and a docstring: adds succeed regardless of AI state, so a public server could disable Claude without 5xx on the add path.
+21. [medium] When the daily/monthly/hourly budget is exhausted or AI is paused (not disabled), the lookup group is deferred to resumes_at without consuming an attempt and no attention flag is written, so holders' rows stay at 待校验 (needs_attention=0, no message) with 保留 being a no-op; only the kill switch and dead jobs produce 「暂时无法校验」.
+     ev: backend/wd/ai/common.py:154-155; backend/wd/ai/common.py:166-170; backend/wd/ai/budget.py:219-222
+     q: if on_disabled is not None and not budget.ai_enabled(conn, cfg):
+     why: Inferred from code (no test covers it): a budget-starved public server shows learners a silent 待校验 badge with no actionable button, which is a worse UX than the kill switch's explicit flag.
+22. [high] A lookup job goes dead after 3 failed attempts (backoff 2/10/60 min); the on_dead hook flags holders' rows 「暂时无法校验」 while the word stays is_valid_english IS NULL; the nightly maintenance requeues up to 50 dead content/lookup jobs older than 24 h once.
+     ev: backend/wd/jobs/queue.py:83; backend/wd/ai/lookup.py:495-501; backend/tests/unit/test_lookup_apply.py:330-337
+     q: max_attempts: int = 3,
+     why: Failure handling retries AI automatically; it never falls back to a non-AI validation source.
+23. [high] PATCH /api/bank/{id} {attention:'retry'} is allowed only while words.is_valid_english IS NULL (409 invalid_transition otherwise), re-enqueues lookup_word with run_after=now via the UPSERT (one live job however many holders retry), sets attention_msg NULL and keeps needs_attention=1 (badge 重新校验中); it has no dedicated daily quota, only the 300/min mutation throttle.
+     ev: backend/wd/services/bank.py:842-846; backend/wd/services/bank.py:843-844; backend/wd/routers/bank.py:191-212
+     q: words.enqueue_lookup(conn, int(word["id"]), now_s, delay_s=0)
+     why: 重试 is a second end-user AI trigger; searched `grep -rn check_daily_quota backend/wd/routers` — bank_patch is not among the call sites.
+24. [high] PATCH {attention:'keep'} clears needs_attention/attention_msg/suggested_word_id; for an is_valid_english=0 word this is 仅收藏: the row stays in the active bank list but batch selection requires is_valid_english=1 and no content is ever generated.
+     ev: backend/wd/services/bank.py:850-853; backend/wd/services/batches.py:262; backend/tests/integration/test_bank.py:263-278
+     q: "UPDATE user_words SET needs_attention = 0, attention_msg = NULL, suggested_word_id = NULL, updated_at = ? WHERE id = ?",
+     why: Even a kept word is excluded from study until the GLOBAL flag says valid; per-user 'keep' cannot override the global verdict.
+25. [high] An exact hit on a word Claude already rejected (is_valid_english=0) creates the new holder's row immediately with needs_attention=1 「未识别为英文单词」, status added (not pending_ai), and enqueues no lookup job.
+     ev: backend/wd/services/bank.py:612-614; backend/wd/services/bank.py:83; backend/tests/unit/test_words_resolve.py:209-214
+     q: if word.get("is_valid_english") == 0:  # a string someone added and Claude rejected (DESIGN §5.2 step 4)
+     why: A rejection is cached globally and reused for every later user without further AI — the same caching pattern could serve admin verdicts.
+26. [high] Provisional words cannot be studied: study_today appends only when is_valid_english == 1, batch builders require is_valid_english = 1, and POST /api/words/{id}/content/request returns 409 invalid_transition for them.
+     ev: backend/wd/services/bank.py:966; backend/wd/routers/words.py:317-318; backend/tests/integration/test_bank.py:187-195
+     q: if study_today and status in ("added", "readded") and word.get("is_valid_english") == 1:
+     why: With AI permanently off, every word outside seed/ECDICT is unusable for learning, not merely unlabeled.
+27. [high] If WD_ECDICT_DB_PATH points at stardict.db, resolve() creates GLOBAL words rows from ECDICT with is_public=1, is_valid_english=1, safe_for_sharing=1, source='ecdict', created_by_user_id=NULL and enqueues nothing — except rows whose translation is only [网络] lines, which become private provisional words with a lookup job; without the variable every unknown string is provisional.
+     ev: backend/wd/services/words.py:669-677; backend/wd/services/words.py:671-672; backend/wd/config.py:109
+     q: cols.update(is_public=1, is_valid_english=1, safe_for_sharing=1, created_by_user_id=None)
+     why: This is the one existing no-AI path that grows the shared library on a user add; it is a user-triggered GLOBAL write but needs no Claude, and it covers most real English words if ECDICT is shipped.
+28. [high] POST /api/bank/import accepts only the app's own export: format csv (the GET /api/account/export CSV verbatim, must have a `word` column) or json ({version, words:[...]}, review_logs ignored), ≤ 2,000 rows; each row is resolved exactly like a custom add (so it can create provisional words and lookup jobs), inserted with origin='import', existing rows never overwritten, and no generate_content is enqueued.
+     ev: backend/wd/schemas.py:844-846; backend/wd/services/bank.py:1017; backend/wd/services/bank.py:1036
+     q: format: Literal["csv", "json"]
+     why: Import is a PER-USER bank restore, not a library import: it cannot carry phonetics/meanings into words, and it is another end-user path that spawns lookup jobs.
+29. [high] The import quota check is coarse: the request is refused only when 200 units are already used, and afterwards it consumes max(1, pending_ai_created) — a 2,000-row import of known words costs one unit, while only rows that created provisional words count individually.
+     ev: backend/wd/routers/bank.py:181-186; backend/wd/routers/bank.py:186; backend/tests/integration/test_bank.py:418-421
+     q: if bank.quota_used(conn, key, to_iso(now)) >= bank.CUSTOM_DAILY_CAP:
+     why: A single import can enqueue up to ~2,000 lookup jobs in one request when the quota counter is at 199 — a cost spike unless AI is off.
+30. [high] POST /api/bank/add-word accepts only a word_id visible to the caller (404 otherwise) and shares the 200/day custom quota; a third user therefore cannot attach to another user's private provisional word by id, only by typing the same string.
+     ev: backend/wd/routers/bank.py:122-123; backend/wd/services/bank.py:193-208
+     q: word = bank.visible_word(conn, me, body.word_id)
+     why: Confirms private rows cannot be enumerated or claimed by id; visibility, not ownership, governs every word-reading and word-adding route.
+31. [high] Within the searched code the only writers of is_valid_english=1 are the seed importer, the ECDICT resolver and the lookup handler (fill_fields and merge_into); there is no admin endpoint, CLI command or user action that validates or publishes a provisional word without Claude.
+     ev: backend/wd/seed.py:77; backend/wd/services/words.py:674; backend/wd/ai/lookup.py:355
+     q: + ", source = 'seed', is_public = 1, is_valid_english = 1, safe_for_sharing = 1, merged_into_word_id = NULL, updated_at = excluded.updated_at "
+     why: Searched `grep -rn "is_valid_english *= *1\|is_valid_english=1" backend/wd` (writers only in seed.py:77, words.py:674, lookup.py:267/355) and `grep -n is_valid_english` in admin_ops.py/admin_reports.py/admin_users.py/cli.py (reads only): an admin-curated library needs a new validate/publish path; the admin regenerate endpoint itself refuses provisional words.
+32. [high] Claude output is post-validated before touching global rows: items must match the strict LookupItem mirror model (invalid items dropped), text with URLs or <script is rejected, fields are capped, and only NULL/empty dictionary fields are filled — Claude never overwrites seed/ECDICT data.
+     ev: backend/wd/ai/models.py:113-126; backend/wd/ai/common.py:42; backend/wd/ai/lookup.py:556
+     q: """The ``items`` of a response that validate against ``model``, as plain dicts; invalid or non-dict items are dropped."""
+     why: Defines the data contract (and sanitisation) an admin-side bulk writer of words rows should reuse.
+33. [high] The private per-user note and the typed input_text are never sent to the lookup prompt; only the GLOBAL words.display strings are, so a Claude verdict is a property of the lemma, not of the user.
+     ev: backend/wd/ai/lookup.py:63-64; docs/DESIGN.md:300; docs/CLAUDE_INTEGRATION.md:424
+     q: """CLAUDE_INTEGRATION §5.3 user prompt: raw strings only, no user identifiers."""
+     why: Lookup results are reusable across users by construction, which is what makes server-side (admin) pre-validation of lemmas semantically equivalent.
+34. [medium] A later generate_content job can demote an already-public custom/ECDICT/Claude word back to is_valid_english=0, is_public=0, content_state='failed' and flag all holders, removing it from third users' /api/vocab again (cross-slice observation).
+     ev: backend/wd/ai/content.py:256-262; backend/tests/integration/test_worker.py:334-344
+     q: "UPDATE words SET content_state = 'failed', is_valid_english = 0, is_public = 0, updated_at = ? WHERE id = ?",
+     why: Public membership of user-added words is not final after lookup; an admin-curated library would need to pin or review such demotions (content slice owns the details).
+35. [high] Provisional rows are reachable to other users through later merges and suggestions: an unknown Claude-proposed correction accepted via POST /api/suggestions/{id}/accept resolves through the same resolve() and can itself create a provisional word plus lookup job.
+     ev: backend/wd/services/suggestions.py:339; docs/API.md:204
+     q: res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id, now=now)
+     why: Lists a third end-user entry point (besides add/import) that can enqueue lookup_word; found via `grep -n "resolve(" backend/wd/services/suggestions.py backend/wd/ai/consolidate.py`.
+## GLOSSARY
+- Personal word bank (user_words new/learning) = 生词库
+- Vocabulary browse page (/api/vocab) = 词库
+- Custom word (origin custom) = 自添生词
+- Add words page (GET /api/lookup live preview) = 添加生词
+- Pending AI validation (needs_attention=0, is_valid_english IS NULL) = 待校验 / status badge 待 AI 校验
+- Not recognised (is_english=false) = 未识别 / attention_msg 「未识别为英文单词」
+- Could not validate (dead job / AI off) = 暂时无法校验，请稍后重试或检查拼写
+- Re-validation in progress (after retry; needs_attention=1, attention_msg NULL) = 重新校验中
+- Kept although not recognised (keep on is_valid_english=0) = 仅收藏 / 已保留，仅收藏不推送
+- Attention tab in the bank = 待处理
+- Attention buttons = 修改 · 保留 · 删除 · 重试 · 替换
+- Did-you-mean message = 是否改为 “…”？
+- Lemma note (form resolved to headword) = 已归为原形 go（过去式）
+- Ambiguous form status = 需选择原形 / 多个可能的原形，请选择
+- Lookup preview when not in dictionary = 词典中未找到，将由 AI 校验补全
+- Already in bank = 已在生词库
+- Validated (pending row resolved) = 已校验
+- Consolidation / suggestions inbox = 整理 / 整理建议
+- Import (Settings → account) = 导入数据
+- Mark as unfamiliar = 不熟悉 / 标为不熟悉
+- Mastered = 已掌握
+- Removed = 移除 / 已移除
+- Known = 认识 / 已认识
+- Added to bank, study tomorrow (provisional cannot be studied today) = 已加入生词库，明天开始学
+- Admin overview: user-added / pending validation = 用户添加 / 待校验
+- Seed version (admin) = 词库版本
+## UNKNOWNS
+- Whether any admin API (admin_ops/admin_reports slice) or `wd` CLI subcommand toggles kv claude.enabled or paused_until; I only confirmed the add/lookup code reads those keys (budget.py:114-125) and found no is_valid_english writers in admin_ops.py, admin_reports.py, admin_users.py or cli.py by grep — the admin slice reader should confirm no manual publish/validate action exists.
+- Exact polling cadence and stop conditions of the frontend AttentionBadge for pending_ai rows (AddWordsPage.tsx:4 says rows 'poll through AttentionBadge until validated'; I did not read that component), so the client-side load while a word is stuck pending is unquantified.
+- Behaviour of consolidate_bank (ai/consolidate.py:221 also calls words.resolve and can mark provisional rows invalid per its docstring line 18) — out of slice; it is another writer of is_valid_english=0 and another creator of provisional words.
+- Whether the nightly requeue_dead_once (scheduler.py:297) is itself skipped while AI is disabled; I read only the function, not its caller's gating at scheduler.py:366.
+- How ECDICT lookups behave under concurrent load on the public server: ecdict.py opens the 851 MB stardict.db read-only per call (ecdict.py:205) from GET /api/lookup synchronously; latency/IO cost not measured.
+- The exact UI copy for `zh.bank.add` (page title) was not located in zh.ts; 添加生词 is taken from API.md:83.
+## SUGGESTED VERIFICATIONS
+- Budget-exhausted lookups leave rows silently at 待校验 with no flag (finding marked medium): set WD_AI_DAILY_BUDGET_USD=0 in a test, add an unknown word, run ClaudeWorker.step(), then assert the job is 'queued' with a next-day run_after and user_words.needs_attention == 0; cross-check with `grep -rn "set_dead_attention\|flag_queued_lookups" backend/wd` (should show only the on_dead hook, the on_disabled hook and the worker gate).
+- Retry on a budget-deferred job pulls run_after back to now via the UPSERT (queue.py:103 `run_after = min(...)`), causing claim→reserve-fail→defer churn: verify by enqueueing a deferred lookup, calling bank.set_attention(..., 'retry'), and checking run_after; confirm no attempt is consumed.
+- Third-user preview inconsistency when ECDICT is configured: for a string that exists in stardict AND already has a private provisional row, GET /api/lookup returns via='ecdict' (routers/words.py:101, visibility-filtered exact miss) but POST /api/bank/add resolves via='exact' onto the private row (words.py:737-740 has no visibility filter) and returns pending_ai; reproduce with a monkeypatched ecdict.lookup.
+- Confirm there is truly no admin/CLI path that sets is_valid_english=1 or is_public=1 outside seed/ECDICT/lookup: `grep -rn "is_public *= *1\|is_public=1" backend/wd --include='*.py'` and read every hit (expected: seed.py:77, words.py:674, lookup.py fill_fields, prewarm/screen/batches read-only predicates, consolidate.py).
+- Verify that with WD_AI_ENABLED=0 the import of 2,000 rows containing many unknown words enqueues one lookup job per new lemma (routers/bank.py:185, services/bank.py:1079) and that the worker gate flags all of them in one sweep (lookup.py:194-198) — i.e. that the 待处理 count can jump by thousands for one user.
+- Check that content.py's valid=false demotion (content.py:262) is restricted to non-seed words so an admin-curated public library cannot be shrunk by a content job: read the guard around content.py:256-262 and test_content_apply.py.

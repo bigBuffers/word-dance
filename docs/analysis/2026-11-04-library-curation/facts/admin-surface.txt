@@ -1,0 +1,217 @@
+# SLICE admin-surface  (35 findings)
+## SUMMARY
+The admin surface is exactly 21 HTTP routes (API.md endpoints 54–74) in three routers (backend/wd/routers/admin_ops.py, admin_reports.py, admin_users.py), every
+one gated by deps.require_admin, which only checks users.role == 'admin'; the schema and Pydantic models allow just two roles ('user','admin'), and no
+curator/moderator/editor concept exists anywhere in code, schema or design docs. Someone becomes admin by being the first account ever registered (auth.py
+bootstrap), by `wd create-admin`, by `wd promote <username>`, or by another admin posting role:'admin' (UI button 设为管理员); demotion/deactivation of the last
+active admin is refused (409 last_admin). The UI (/admin, 管理, AdminPage.tsx) has seven tabs: 概览 (counts, spend, image mix, queue, provider quotas, health incl.
+seed_version/last_backup), 用户与邀请 (disable/enable, make admin, reset password, create invite), 任务 (filter, 重试, 重排所有失败任务, dev-only run-once), AI (pause/resume,
+probe, 预生成 prewarm form, call ledger), 内容反馈 (reports: 重新生成 / 换图 / 忽略), 事件 and 配置 (read-only, secrets masked). The CLI adds import-seed, create-admin/set-
+password/promote/demote/invite, backup/restore, claude-check, worker-once, tick, build-batch/push-now, consolidate, fetch-image/images-prune, stats/check/logs.
+On GLOBAL data (words, word_contents, word_images) an admin can only (a) ask Claude to regenerate content for a validated word (endpoint 68 or the report-
+resolve regenerate flag), (b) enqueue a new image fetch optionally pinned to a provider including claude_svg (endpoint 69 / report refetch_image / `wd fetch-
+image`), (c) run a budgeted prewarm over public validated words of a stage (endpoint 67, Claude), (d) re-import the seed file (`wd import-seed --file`,
+dictionary columns only, forces is_public/is_valid_english/safe_for_sharing=1), (e) prune cached images, and (f) back up / restore the whole SQLite database.
+Everything else an admin can change is PER-USER (user rows, invites, a user's batch via push/run, consolidate <user>) or operational (jobs, pause, events).
+There is no endpoint, UI control or CLI command to create a word, edit lemma/phonetic/translation/definition, write or edit content by hand,
+hide/unpublish/delete a word, flip is_public/is_valid_english/safe_for_sharing, promote a user's provisional word to public, list words by creator, see
+needs_attention across users, export/import words or content, or publish a library version; the only version signal is kv.seed_version (sha256 of the seed
+file). Report moderation never alters the word's text or visibility: it either enqueues a forced generate_content job (validated words only), rejects the active
+image and enqueues fetch_image excluding it, or just marks the report resolved/dismissed. Every admin content lever therefore routes back into the same Claude
+job pipeline, and the AI gate (WD_AI_ENABLED plus kv.claude.enabled, plus kv.claude.paused_until) is shared by admin-triggered and end-user-triggered calls:
+prewarm answers 503 ai_disabled, regenerate/refetch 202 but their jobs idle in the queue while the ClaudeWorker gate is closed, and the user-facing
+content/request endpoint uses the identical gate, so there is no 'AI for admins only' mode today. Admins do see every word (visibility predicate becomes 1=1),
+so they can open any private/provisional word by id, but there is no admin listing to discover such words beyond the overview counts and the reports table.
+## FINDINGS
+1. [high] The role model has exactly two values, 'user' and 'admin', enforced by a CHECK constraint, the Pydantic Role literal and create_user; no intermediate role (curator/moderator/editor/librarian/maintainer/staff) exists in backend, frontend or docs (grep -rn -i -E 'curator|moderator|editor|librarian|maintainer|superuser|staff' backend/wd frontend/src docs --include='*.py' --include='*.ts' --include='*.tsx' --include='*.md' --include='*.sql' hits only prose in docs/analysis and 'README.md' lines).
+     ev: backend/wd/migrations/0001_init.sql:77; backend/wd/schemas.py:39; backend/wd/security.py:651-652
+     q: role              TEXT NOT NULL DEFAULT 'user'    CHECK (role IN ('user','admin')),
+     why: A curation workflow with a non-admin editor role would require a schema migration and new guards; today anyone who curates must be a full admin.
+2. [high] All admin routes are gated by deps.require_admin (role != 'admin' -> 403 forbidden); the SPA mirrors this with RequireAdmin (redirect to /today) and shows the 管理 nav entry only to admins.
+     ev: backend/wd/deps.py:190-193; frontend/src/auth/AuthContext.tsx:227-232; frontend/src/components/layout/TopNav.tsx:18
+     q: def require_admin(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:     if user["role"] != "admin":         raise ApiError("forbidden")
+     why: Any server-side curation feature added later can reuse this single gate; there is no finer-grained permission layer to extend.
+3. [high] Four paths make someone admin: the first account ever registered (bootstrap, any registration mode, no invite), `wd create-admin [--if-none]` (run by install.sh), `wd promote <username>`, and POST /api/admin/users/{id} {role:'admin'} (UI button 设为管理员); demoting or disabling the last active admin is refused with 409 last_admin, and the UI offers no demote button (it only renders 设为管理员 for non-admins).
+     ev: backend/wd/routers/auth.py:89-91; backend/wd/security.py:802; backend/wd/routers/admin_users.py:98-100
+     q: bootstrap = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]) == 0         if bootstrap:             role = "admin"  # the first user ever is always
+     why: On a public server the owner must register first (or run create-admin) before opening registration, otherwise the first stranger becomes admin.
+4. [high] The complete admin HTTP surface is 21 routes, API.md endpoints 54–74, split across admin_ops.py (54–55, 60–69, 72–74), admin_users.py (56–59) and admin_reports.py (70–71); the SPA exposes them through seven tabs: overview, users, jobs, ai, reports, events, config (grep -rn -E '@router\.(get|post|put|patch|delete)\(' backend/wd/routers/*.py lists no other /api/admin route).
+     ev: docs/API.md:115-135; backend/wd/routers/admin_ops.py:1; frontend/src/pages/AdminPage.tsx:32
+     q: | 54 | GET | `/api/admin/overview` | A | counts, spend, queue, quotas |
+     why: This is the exhaustive list of what an admin can do over HTTP; nothing in it edits the shared word library directly.
+5. [high] GET /api/admin/overview (and `wd stats`) report GLOBAL library numbers only as counts: words.total/with_content/with_photo/with_claude_svg/card_only/user_added/pending_validation; user_added is SUM(source='user' OR created_by_user_id IS NOT NULL) and pending_validation is SUM(is_valid_english IS NULL), with no list or drill-down behind them.
+     ev: backend/wd/routers/admin_ops.py:119-122; backend/wd/diag.py:180-182; frontend/src/i18n/zh.ts:92-96
+     q: "SELECT COUNT(*), SUM(content_state = 'ready'), SUM(source = 'user' OR created_by_user_id IS NOT NULL), SUM(is_valid_english IS NULL) "
+     why: An admin can see how many user-added or unvalidated words exist but cannot open that set to curate it.
+6. [high] The only 'library version' concept is kv.seed_version, the sha256 of the seed file, surfaced in GET /api/admin/health (UI label 词库版本) and `wd check db`; the lifespan re-imports automatically when the file's hash changes (grep -rn -i -E 'library_version|library version|catalog_version|catalogue_version|seed_version' backend/wd --include='*.py' finds only seed_version).
+     ev: backend/wd/routers/admin_ops.py:200; backend/wd/seed.py:16; backend/wd/main.py:310-313
+     q: "seed_version": db.kv_get(conn, "seed_version"),
+     why: There is no publish/snapshot step for content; a 'library version' that clients read would have to be invented, though the seed-hash mechanism is a template for dictionary data.
+7. [high] Jobs admin: GET /api/admin/jobs filters by status/type; POST /jobs/{id}/retry resets attempts=0, run_after=now (refused for running jobs or a live dedupe collision); POST /jobs/requeue-dead requeues every dead job; POST /jobs/run-once drains the queue synchronously but answers 403 unless WD_DEV=1, and the UI shows that button only when ServerFlags.dev.
+     ev: backend/wd/routers/admin_ops.py:265-266; backend/wd/routers/admin_ops.py:238-240; backend/wd/jobs/worker.py:120-121
+     q: if not cfg.dev:         raise ApiError("forbidden", details={"reason": "run-once is available only with WD_DEV=1"})
+     why: In production an admin can only requeue; they cannot force Claude jobs to run inline, so all content work stays asynchronous through the worker.
+8. [high] POST /api/admin/ai/pause {paused:true} only writes kv.claude.paused_until = now + 24 h (MANUAL_PAUSE) and auto-expires; {paused:false} deletes it and also sets kv.claude.enabled='1'. No admin endpoint or CLI command writes kv.claude.enabled='0' (within the slice the only write of claude.enabled is the value "1" at admin_ops.py:330); the permanent off switch is WD_AI_ENABLED=0 in .env plus restart.
+     ev: backend/wd/routers/admin_ops.py:35; backend/wd/routers/admin_ops.py:326-327; backend/wd/routers/admin_ops.py:330-331
+     q: MANUAL_PAUSE = timedelta(hours=24)
+     why: To guarantee no end-user-triggered Claude call on a mainland-facing server the operator must set WD_AI_ENABLED=0 (a 24-hour pause is not a policy control), which also disables every admin AI lever.
+9. [high] POST /api/admin/ai/probe (UI 探测 claude) and `wd claude-check` run a live Claude call (tier 1 then tier 0) and spend up to $0.05; the router applies only a 1-per-minute rate limit and neither the router nor probe.py/runner.py consults ai_enabled or paused_until (grep -n 'ai_enabled\|paused' backend/wd/ai/probe.py backend/wd/ai/runner.py returns nothing).
+     ev: backend/wd/routers/admin_ops.py:344-350; backend/wd/ai/probe.py:115-118; backend/wd/ai/probe.py:207
+     q: if last and parse_iso(last) > parse_iso(now) - PROBE_MIN_INTERVAL:
+     why: This is an admin-only, operator-initiated Claude call (not on behalf of an end user) and the one AI action that ignores the kill switch.
+10. [high] POST /api/admin/content/prewarm (UI 预生成, stage zk/gk/cet4/cet6/all, limit 1–2000, budget 0.1–50 USD) is the only bulk, server-side, admin-initiated content generation; it is refused with 503 ai_disabled when WD_AI_ENABLED/kv.claude.enabled is off or a pause is active, and its candidate set is GLOBAL public validated words without content (is_public=1 AND is_valid_english=1 AND content_state IN ('none','failed')).
+     ev: backend/wd/routers/admin_ops.py:363-365; backend/wd/ai/prewarm.py:48; backend/wd/schemas.py:1320-1323
+     q: if not budget.ai_enabled(conn, cfg) or budget.paused_until(conn, now) is not None:         raise ApiError("ai_disabled")
+     why: Prewarm is the existing mechanism by which an admin can pre-fill the shared library from a non-mainland machine before users read it; it is the closest thing to 'admin curates server-side'.
+11. [high] POST /api/admin/words/{id}/regenerate enqueues a forced generate_content job (content:<id>:r<n>, priority 10), refuses provisional/invalid words with 409 invalid_transition, keeps a ready word's current version visible until the new one lands, and does NOT check the AI gate itself; the job then idles because ClaudeWorker.gate sleeps while AI is disabled and budget.can_spend defers while paused. No UI control calls this endpoint (grep -rn -E 'adminRegenerateWord|adminRefetchImage|adminPushRun' frontend/src --include='*.tsx' --include='*.ts' | grep -v api/endpoints.ts returns nothing).
+     ev: backend/wd/routers/admin_ops.py:385-386; backend/wd/routers/admin_ops.py:390; backend/wd/jobs/worker.py:254-258
+     q: if word.get("is_valid_english") != 1:         raise ApiError("invalid_transition", details={"from": "provisional" if word.get("is_valid_english") is None else "
+     why: Per-word regeneration is API-only (curl) and always means another Claude call; there is no way to supply replacement content without AI.
+12. [high] POST /api/admin/words/{id}/refetch-image (API-only, no UI control) and `wd fetch-image <word> [--provider P] [--query Q] [--priority N] [--no-svg]` enqueue/run a photo fetch; provider 'claude_svg' is an explicit Claude drawing request that is skipped when cfg.ai_enabled is false, and the whole fetch is skipped when WD_IMAGES_ENABLED=0; the CLI form runs fetch_for_word synchronously in the CLI process.
+     ev: backend/wd/routers/admin_ops.py:409; backend/wd/schemas.py:1336; backend/wd/images/handler.py:139-141
+     q: job_id = images.admin_refetch(conn, wid, provider=body.provider, query=body.query, priority=REFETCH_PRIORITY, now=now)
+     why: Image curation is limited to 're-run the provider chain'; an admin cannot upload or pin a specific image file.
+13. [high] Report moderation (POST /api/admin/reports/{id}) can change a word in exactly two ways: regenerate -> forced generate_content job (validated words only, otherwise silently nothing and resolution='resolved'), refetch_image -> active word_images row set status='rejected', words.active_image_id=NULL, system_events('image_rejected'), fetch_image enqueued excluding it; status 'dismissed' never enqueues anything. It never hides/deletes the word, edits its text, or changes is_public, and it acts on the word's current state, not the content_id/image_id snapshot stored on the report.
+     ev: backend/wd/routers/admin_reports.py:84-92; backend/wd/routers/admin_reports.py:50-52; backend/wd/images/service.py:195-196
+     q: if body.regenerate and _enqueue_regenerate(conn, int(row["word_id"]), now) is not None:                 actions.append("regenerated")
+     why: The report queue is the only moderation tool and its two actions both route to AI or provider re-fetch; a mainland deployment with AI off leaves 'regenerate' as a no-op that still marks the report resolved.
+14. [medium] The reports UI (内容反馈 tab) offers 重新生成 (hidden for target='image'), 换图 (hidden for target='content') and 忽略 only on open reports; user-side, a report with target='image' already rejects the active image and enqueues a refetch before any admin acts.
+     ev: docs/FRONTEND.md:157; frontend/src/i18n/zh.ts:91; backend/wd/routers/words.py:278-280
+     q: 内容反馈 (reports → 重新生成 / 换图 / 忽略), 事件, 配置 (masked). Admin copy may show error codes.
+     why: Image moderation is partly automatic and user-driven (one report pulls an image for everyone), which matters for a public audience; the admin's 换图 on such a report just enqueues another fetch.
+15. [high] Users/invites admin (PER-USER data): GET /api/admin/users?q lists users with derived bank_size and streak_days; POST /api/admin/users/{id} accepts only is_active, role, new_password (disabling or resetting revokes sessions); invites are created hashed and shown once via POST /api/admin/invites or `wd invite`. There is no admin endpoint to delete a user or to view a user's words.
+     ev: backend/wd/schemas.py:1210-1213; backend/wd/security.py:558-569; backend/wd/security.py:423
+     q: class AdminUserUpdateRequest(Model):     is_active: bool | None = None     role: Role | None = None     new_password: str | None = Field(default=None, min_lengt
+     why: Account control (block a user) exists, but the admin cannot trace a user's contributions to the shared library from this surface.
+16. [high] The CLI command set is fixed by cli.COMMAND_OWNERS: import-seed; create-admin, set-password, promote, demote, invite; backup, restore; claude-check; worker-once; tick; build-batch, push-now; consolidate; fetch-image, images-prune; stats, check, logs; plus serve, migrate, version. None of these creates, edits, hides or deletes a word; the only words writer among them is import-seed.
+     ev: backend/wd/cli.py:45-56; backend/wd/cli.py:54-55; docs/DEPLOY.md:408
+     q: "wd.security": ("create-admin", "set-password", "promote", "demote", "invite"),
+     why: Server-side curation today means editing the seed file or the SQLite database by hand; no supported tool edits individual words.
+17. [high] `wd import-seed --file PATH [--force]` is the only bulk import path: an upsert keyed by lemma that rewrites dictionary columns (SEED_COLUMNS) and forces source='seed', is_public=1, is_valid_english=1, safe_for_sharing=1, merged_into_word_id=NULL; it never writes word_contents or word_images (the sole INSERT INTO word_contents is in the Claude handler) and never deletes lemmas absent from the file.
+     ev: backend/wd/seed.py:357-359; backend/wd/seed.py:73-81; backend/wd/ai/content.py:216
+     q: p = sub.add_parser("import-seed", help="import or refresh the vocabulary seed (idempotent upsert keyed by lemma)")
+     why: An admin can bulk-publish headwords and dictionary fields through the seed file, but examples/collocations (word_contents) have no import route at all.
+18. [high] There is no admin export or import of words or content: the only export/import routes are per-user bank data (GET /api/account/export, POST /api/bank/import), and the only whole-library copy is `wd backup`/`wd restore`, which snapshot and replace the entire SQLite database (service must be stopped to restore; images excluded unless --with-images). grep -rn -i -E 'admin.*(export|import)|(export|import).*admin' backend/wd docs/API.md docs/ops.md docs/DEPLOY.md matches only the DEPLOY §9 CLI line.
+     ev: backend/wd/routers/account.py:174; backend/wd/routers/bank.py:172; backend/wd/backup.py:3
+     q: @router.get("/api/account/export")
+     why: Moving curated content from a staging machine to the public server would mean restoring a whole database (clobbering per-user data), not merging a content export.
+19. [high] No endpoint creates a word for an admin: the only /api/admin/words/ routes are regenerate and refetch-image (grep -rn -E 'api/admin/words' backend/wd frontend/src docs/API.md | grep -v -E 'regenerate|refetch-image' returns nothing), and INSERT INTO words exists only in the seed upsert and the user add path (ON CONFLICT DO NOTHING).
+     ev: backend/wd/routers/admin_ops.py:376; backend/wd/routers/admin_ops.py:398; backend/wd/services/words.py:579-585
+     q: @router.post("/api/admin/words/{word_id}/regenerate", status_code=202, response_model=schemas.JobIdResponse)
+     why: Adding a headword server-side requires the seed file or a direct SQL insert; the admin UI cannot do it.
+20. [high] No admin endpoint edits dictionary fields (lemma, display, phonetic, translation, definition, meanings): the only UPDATE words in the admin routers sets content_state='queued' (grep -n 'UPDATE words' backend/wd/routers/admin_*.py -> one hit); dictionary columns are rewritten only by the seed upsert and by the lookup_word Claude handler.
+     ev: backend/wd/routers/admin_ops.py:394; backend/wd/seed.py:76; backend/wd/ai/lookup.py:267
+     q: conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ? AND content_state IN ('none','failed')", (now, wid))
+     why: Fixing a wrong phonetic or translation that a user reports is impossible from the admin surface without AI or raw SQL.
+21. [high] Content cannot be hand-written or edited: the only writer of word_contents is the generate_content Claude handler, the schema requires prompt_version and model (NOT NULL, AI provenance), ReportResolveRequest has no text field, and grep -rn -i -E 'manual|hand-written|handwritten|authored|curat' backend/wd --include='*.py' finds no content-authoring code (only 'curated timezones' and job trigger names).
+     ev: docs/SCHEMA.sql:234-235; backend/wd/ai/content.py:216; backend/wd/schemas.py:1364-1367
+     q: prompt_version TEXT    NOT NULL,                      -- 'content-v1'   model          TEXT    NOT NULL,                      -- canonical model from modelUsage
+     why: A 'curated shared library with no end-user AI' needs an authoring or import path for content that does not exist; the schema would accept a synthetic model/prompt_version but no code writes one.
+22. [high] No hide/unpublish/delete capability for a word: grep -rn -i -E '\bhide\b|\bhidden\b|unpublish|blocklist|banned|takedown|blacklist' backend/wd --include='*.py' matches only the image blocklist and batch-item hiding; DELETE FROM words occurs only in the account-deletion cascade; and is_public is written only by AI handlers (lookup, content, consolidate) and the seed upsert, never by an admin route.
+     ev: backend/wd/routers/account.py:110; backend/wd/ai/content.py:262; backend/wd/ai/consolidate.py:418
+     q: conn.execute(f"DELETE FROM words WHERE id IN ({','.join('?' * len(orphaned))})", orphaned)
+     why: If an offensive or wrong headword reaches the public list, the admin has no takedown control short of editing the database.
+23. [high] An admin cannot promote a user-created provisional word to the public list: is_public flips to 1 only when the lookup_word Claude job returns is_english and safe_for_sharing (or the lemma is in the seed file); regenerate refuses words with is_valid_english != 1 and the report regenerate helper returns None for them.
+     ev: docs/DESIGN.md:296; docs/SCHEMA.sql:193; backend/wd/routers/admin_reports.py:49
+     q: A private word becomes public only when `lookup_word` returns `is_english=true` **and** `safe_for_sharing=true` (CLAUDE_INTEGRATION §5).
+     why: With AI off, every user-added word stays provisional forever and the admin has no manual validation step to release it into the shared library.
+24. [high] There is no 'which user added which word' view and no admin word list/search: created_by_user_id appears in the admin routers only inside the overview count, the AdminUser DTO carries bank_size/streak_days but no words, and the route listing has no GET /api/admin/words (grep -rn -E 'admin/(words|vocab|library|content)\b' backend/wd frontend/src docs finds only prewarm/regenerate/refetch-image).
+     ev: backend/wd/routers/admin_ops.py:120; backend/wd/schemas.py:1197-1201; backend/wd/routers/admin_users.py:133
+     q: SUM(source = 'user' OR created_by_user_id IS NOT NULL)
+     why: Provenance exists in the schema (words.created_by_user_id) but is not exposed, so a curation queue of user contributions would be new work.
+25. [high] needs_attention and open bank_suggestions are PER-USER (user_words / bank_suggestions) and have no cross-user admin view: grep -n needs_attention backend/wd/routers/admin_*.py returns nothing; the field lives on the per-user BankEntry schema, and `wd stats` exposes only an aggregate suggestions_open count.
+     ev: backend/wd/schemas.py:532; backend/wd/diag.py:200; docs/DESIGN.md:74-76
+     q: needs_attention: bool
+     why: An admin cannot find the learners whose words are stuck 待校验/暂时无法校验 when AI is off, which is exactly the state a no-AI public deployment would produce.
+26. [medium] Admins see every word: the visibility predicate collapses to 1=1 for an admin and services.bank.visible_word returns any word by id for role admin, so an admin can open another user's private/provisional word detail (GET /api/words/{id}) and the admin's own 词库 list/search includes such rows; there is, however, no admin-specific list to discover them.
+     ev: backend/wd/deps.py:208-209; backend/wd/services/bank.py:200-202; backend/wd/routers/vocab.py:50
+     q: if isinstance(me, Mapping) and is_admin(me):         return "1=1"
+     why: Read access for review already exists; only the write/curation side and a discovery list are missing.
+27. [high] GET /api/admin/config is read-only (no POST/PUT route exists; route listing shows only the GET at admin_ops.py:427), masks the six SECRET_KEYS as '***', and changing any WD_* value (WD_AI_ENABLED, WD_REGISTRATION_MODE, budgets) requires editing $WD_DATA_DIR/.env and restarting the service.
+     ev: backend/wd/routers/admin_ops.py:427-429; backend/wd/config.py:44-52; docs/ops.md:146
+     q: @router.get("/api/admin/config", response_model=schemas.ConfigResponse)
+     why: Turning AI off for a public launch is an operator (.env) action, not something an admin can do from the UI.
+28. [high] Admin-triggered and end-user-triggered AI share one gate: budget.ai_enabled and services.bank.ai_enabled both return False when WD_AI_ENABLED=0 or kv.claude.enabled='0', the user-facing POST /api/words/{id}/content/request and the admin prewarm endpoint both check that gate (503 ai_disabled), and the ClaudeWorker idles all Claude job types when it is closed. There is no configuration that allows admin-initiated Claude calls while blocking user-initiated ones.
+     ev: backend/wd/ai/budget.py:114-119; backend/wd/services/bank.py:219-223; backend/wd/routers/words.py:325-326
+     q: """The kill switch: ``WD_AI_ENABLED`` and ``kv.claude.enabled`` (``'0'`` = off). ``cfg`` defaults to the environment."""
+     why: The feasibility question hinges on this: 'admin-only AI, users read-only' is not a supported mode; the owner would need a new per-trigger policy or an offline generation step followed by data import.
+29. [high] `wd images-prune --unused-days N` is a GLOBAL destructive maintenance action: it deletes word_images rows (and files) of words in no bank and no recent batch, resets words.active_image_id=NULL and image_state='none', and runs with no worker-lease refusal.
+     ev: backend/wd/images/handler.py:326-327; docs/ops.md:278
+     q: conn.execute("DELETE FROM word_images WHERE word_id = ?", (wid,))                 conn.execute("UPDATE words SET active_image_id = NULL, image_state = 'none', u
+     why: On a server where images are part of the curated library, pruning silently removes shared assets that will only be re-fetched by a later job.
+30. [high] Three CLI commands run Claude handlers from the operator's shell: `wd consolidate <username> --now` (per-user 整理, synchronous), `wd worker-once` (drains the whole queue incl. generate_content) and `wd claude-check`; worker-once, tick and restore refuse with exit 2 while the service holds kv.worker_lease, so in production the service's own worker is the only executor of admin-enqueued jobs.
+     ev: backend/wd/ai/consolidate.py:582-584; backend/wd/jobs/worker.py:310; backend/wd/cli.py:11-12
+     q: p = sub.add_parser("consolidate", help="enqueue a bank consolidation (整理) for one user; --now runs it here while the service is stopped")
+     why: An 'offline curation box' workflow could use worker-once/prewarm against a stopped or separate instance, but the resulting data still has to reach the public server through a database restore.
+31. [high] POST /api/admin/push/run {user_id} and the CLI build-batch/push-now act on PER-USER data only (build and publish one user's batch with trigger 'admin', enqueue deliveries); they do not touch the shared library.
+     ev: backend/wd/routers/admin_ops.py:445; backend/wd/services/batches.py:1107-1112
+     q: batch_id, status = batches.push_now(conn, int(body.user_id), now_dt, trigger="admin")
+     why: Keeps the GLOBAL/PER-USER boundary clear: the admin's per-user levers are delivery and account controls, not content.
+32. [high] `wd check claude` never spends money (it inspects the binary and recorded probe state) and prints the resume hint when kv.claude.enabled='0'; `wd stats` is the CLI mirror of the overview counts (incl. user_added, pending_validation, suggestions_open).
+     ev: backend/wd/diag.py:4-5; backend/wd/diag.py:100-101
+     q: ``check`` exits 1 when any selected check fails (0 otherwise); it never spends money (the claude check inspects the binary and the recorded probe state — ``wd c
+     why: These are the safe, no-AI diagnostics an operator can run on a mainland-facing box.
+33. [high] Backend integration tests pin the admin behaviours described here (403 for ordinary users, r-suffix regenerate keys, invalid_transition for provisional words, ready content kept visible during regenerate, image_replaced/regenerated resolutions, dismiss never enqueues), but the AdminPage has no frontend test file (ls frontend/src/pages | grep -i admin -> AdminPage.css, AdminPage.tsx only).
+     ev: backend/tests/integration/test_admin_ops.py:66; backend/tests/integration/test_admin_ops.py:349-351; backend/tests/integration/test_reports.py:99
+     q: def test_admin_endpoints_refuse_ordinary_users(client: TestClient, seeded):
+     why: UI claims in this slice rest on reading AdminPage.tsx, while the API semantics are test-backed.
+34. [high] DESIGN.md states that content is generated only by a fixed set of triggers, one of which is 'an admin action', and that browsing never spends money; the admin triggers are thus designed as Claude triggers, not as a manual authoring path.
+     ev: docs/DESIGN.md:519
+     q: Content triggers only: a validated word enters a bank, a word is selected for a batch/prefetch, an explicit per-user request (60/day), `lookup_word` validating 
+     why: The design intent confirms the gap: there was never a non-AI route for an admin to supply content.
+35. [low] A prior in-repo analysis (untracked docs/analysis, 2026-11-03) already records the missing moderation tools ('unpublish/merge/delete') and a staffed curation queue as open items, corroborating the absence list above.
+     ev: docs/analysis/2026-11-03-public-launch/design-panel.md:139
+     q: add published contact information, a response SLA, a profanity blocklist for public headwords and the unpublish/merge/delete tools; keep the queue staffed
+     why: It is corroboration, not proof (the document is untracked analysis, not code), but it shows the gap was already identified.
+## GLOSSARY
+- admin nav / page = 管理
+- overview tab = 概览
+- users & invites tab = 用户与邀请
+- jobs tab = 任务
+- AI tab = AI
+- content reports tab (content_reports) = 内容反馈
+- events tab = 事件
+- config tab = 配置
+- pause AI / resume AI = 暂停 AI / 恢复 AI
+- probe claude (POST /api/admin/ai/probe) = 探测 claude
+- prewarm (POST /api/admin/content/prewarm) = 预生成
+- create invite code = 生成邀请码
+- disable / enable user = 禁用 / 启用
+- make admin (role:'admin') = 设为管理员
+- reset password = 重置密码
+- retry job = 重试
+- requeue all dead jobs = 重排所有失败任务
+- regenerate content (admin) = 重新生成
+- refetch image (admin) = 换图
+- user image refresh (POST /api/words/{id}/image/refresh) = 换一张
+- dismiss report = 忽略
+- seed_version label = 词库版本
+- user_added count = 用户添加
+- pending_validation / is_valid_english IS NULL = 待校验
+- image mix photo / claude svg / card only = 照片 / AI 示意图 / 仅文字卡片
+- flag tier = CLI 加固级别
+- AI call ledger = AI 调用记录
+- role column = 角色
+- personal word bank (user_words) = 生词库
+- public vocabulary / library = 词库
+- custom word = 自添生词
+- consolidation / suggestions inbox (bank_suggestions) = 整理 / 整理建议
+- kept although not recognised = 仅收藏
+- re-validation in progress = 重新校验中
+- report sheet on word detail = 反馈问题 (例句有误 / 释义有误 / 配图不合适)
+- example sentence / image / pronunciation = 例句 / 配图 / 发音
+## UNKNOWNS
+- No writer of kv.claude.enabled='0' was found in this slice (admin resume writes '1'; the comment calls it a 'hand-set kill switch'); whether the scheduler/worker or any other module ever sets '0' is outside this slice.
+- Whether the forced generate_content job (payload force:true) re-checks is_valid_english or budget inside the content handler is covered by the AI slice, not verified here.
+- AdminPage.tsx line numbers for the Jobs/AI/Reports tab controls were not captured precisely (the file was read without line numbers in those ranges); the controls' existence is confirmed by the TSX and by docs/FRONTEND.md:157 and zh.ts, but exact anchors beyond lines 32, 467 and 1031 are approximate.
+- Whether an admin's 词库 list actually surfaces other users' provisional words in practice depends on the stage filter (user-added words have stage flags 0, so they would appear only under stage 'all' or via search); not executed.
+- docs/analysis/ is untracked in git (status '??'), so its statements are not authoritative project documentation.
+- Whether probe.check spends money even when WD_AI_ENABLED=0 was inferred from the absence of an ai_enabled check in admin_ops.ai_probe and probe.py/runner.py; the runner itself was not read in full.
+## SUGGESTED VERIFICATIONS
+- Re-run the exhaustive route scan to confirm no other admin-gated routes exist outside /api/admin: grep -rn 'require_admin' backend/wd (expect only the three admin routers and deps.py), and grep -rn -E '@router\.(get|post|put|patch|delete)\("/api/admin' backend/wd/routers | wc -l (expect 21).
+- Boot a dev instance with WD_AI_ENABLED=0 and fake claude: assert POST /api/admin/content/prewarm -> 503 ai_disabled while POST /api/admin/words/{id}/regenerate -> 202 and the job remains status='queued' indefinitely (ClaudeWorker.gate), i.e. the admin can enqueue but nothing runs.
+- Confirm the shared gate claim by diffing budget.ai_enabled (backend/wd/ai/budget.py:114-119) and services.bank.ai_enabled (backend/wd/services/bank.py:219-223) semantics and by grepping every call site: grep -rn 'ai_enabled(' backend/wd --include='*.py' and checking none distinguishes caller role.
+- Verify there is truly no UI entry for endpoints 68/69: grep -rn -i 'regenerate\|refetch' frontend/src --include='*.tsx' and confirm the only hits are the reports tab (endpoint 71 flags) and endpoints.ts.
+- Check that kv.claude.enabled='0' has no writer anywhere: grep -rn 'claude.enabled' backend/wd (expect reads in budget.py/bank.py/diag.py and the single write of '1' in admin_ops.py:330).
+- Confirm import-seed never removes or demotes lemmas missing from a custom --file: grep -n 'DELETE FROM words\|is_public = 0' backend/wd/seed.py (expect none), then run wd import-seed --file on a 2-line .jsonl against a scratch DB and count words before/after.
+- Confirm admin read access to private words end-to-end in the test harness: create a provisional word for user A (is_public=0, is_valid_english NULL), then GET /api/words/{id} and GET /api/vocab?stage=all&q=<lemma> as an admin (expect 200 and the row listed) and as user B (expect 404 / absent).

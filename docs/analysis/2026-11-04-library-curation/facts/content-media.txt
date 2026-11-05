@@ -1,0 +1,224 @@
+# SLICE content-media  (37 findings)
+## SUMMARY
+The shared "content" layer is two GLOBAL, versioned tables keyed by word: `word_contents` (one `active` row per word holding a validated JSON object with
+meaning_zh, meaning_en, 3-4 bilingual examples, collocations, mnemonic_zh, image_keywords, image_alt_zh, difficulty, plus
+version/prompt_version/model/created_at) and `word_images` (one `active` photo or Claude SVG per word with provider, licence, attribution and a content-
+addressed file under WD_DATA_DIR/images). Nothing in this layer is per user: the prompt is built from dictionary columns only,
+`words.active_content_id`/`active_image_id` point at the shared rows, and every reader (word detail, study item, screen card, template card) calls the same
+`words.active_content` lookup. Content is produced exclusively by the `generate_content` job handler, which runs on the server's ClaudeWorker and spawns the
+local `claude` CLI (OAuth-authenticated as the service user) in batches of up to 10 words; the only INSERT into `word_contents` in the codebase is that handler,
+and the only INSERT into `word_images` is `images.store.activate` fed by the `fetch_image`/`generate_svg` handlers. Jobs are enqueued by nine sites: marking a
+validated word unfamiliar (priority 10/20), batch build and study_today (20), the 03:30 prefetch (30, ≤50/user, skipped at ≥50% daily spend), `POST
+/api/words/{id}/content/request` (10, 60/day/user), `lookup_word` validating a custom word (10), consolidation/suggestion merges (20), admin regenerate and
+report-resolve (10, `force`), and the admin-only `prewarm_plan` (90); bulk import and browsing never enqueue. All of them funnel through one dedupe key
+`content:<word_id>` and the global guards in `budget.can_spend` (kill switch WD_AI_ENABLED + kv.claude.enabled, pause, 60 calls/hour, $3/day, $40/month, prewarm
+sub-cap $1/day plus "spent_today < 50% of daily", SVG sub-cap $0.50/day); refusals defer jobs rather than failing them. Prewarm covers public, valid, unmerged
+words of a stage (or every word with a stage for `all`, which is the whole 9,162-word seed) that still have `content_state IN ('none','failed')`, fans out
+5×batch (50) words every 2 minutes, is capped at 2,000 words per plan and 503s when AI is off; at default budgets it yields roughly 250 words/day (≈37 days for
+the seed), and with caps raised the 60-calls/hour cap bounds it to ~600 words/hour (~15 h of calls). When content is missing the API returns `{state, content:
+null, eta_s, deferred_until}` and the UI falls back to the ECDICT translation with a 「生成例句」 button or the 「明天补齐」 copy; study never waits for content and
+`finalize_building` flips batches to ready immediately when AI is off, and the image is never null because the deterministic template card is rendered from DB
+data. Images come from Wikimedia then Openverse (keyed Pixabay/Pexels appended), are SSRF-checked, re-encoded to ≤800px JPEG, stored as
+`images/<2hex>/<sha256>.jpg|svg` with licence/attribution columns, and served only at cookie-gated `/media/...` URLs; a Claude SVG is drawn only when no photo
+exists, the word is actually studied, priority < 90, `WD_SVG_VIA_CLAUDE=1` and the SVG budget allows. Users can report content/image/dictionary problems
+(20/day), which snapshot the active content/image ids; the admin can only resolve a report by re-running AI (`regenerate` → forced content job, `refetch_image`
+→ reject the shared image and re-fetch) or dismiss it. What is ABSENT for server-side curation: there is no PUT/PATCH/POST endpoint that writes content text, no
+CLI or seed path that imports/exports `word_contents` or `word_images`, no admin word browser (regenerate/refetch exist only as API calls and are reachable in
+the UI only from the reports tab), no reviewed/approved state (word_contents' `rejected` status is never written), and bumping `PROMPT_VERSION` re-enqueues
+nothing because every enqueue site requires `content_state IN ('none','failed')`. The data model itself is curation-friendly (global rows, logical pointers,
+template card and all readers driven by `active_content_id`), so an operator could in principle insert rows and flip pointers by hand or with a new importer,
+but today that path exists only as raw SQLite.
+## FINDINGS
+1. [high] A content record is one `word_contents` row whose `content_json` is the post-validated Claude item (word, valid, meaning_zh, meaning_en, examples[{en,zh}], collocations, mnemonic_zh, image_keywords, image_alt_zh, difficulty) plus version, prompt_version, model and created_at.
+     ev: backend/wd/ai/content.py:213; backend/wd/ai/schemas/content_v1.json:12; backend/wd/schemas.py:548-562
+     q: content = {**cleaned, "version": version, "prompt_version": PROMPT_VERSION, "model": model, "created_at": now}
+     why: Defines exactly what a curated or imported content pack would have to contain for the existing readers and UI to work unchanged.
+2. [high] Content and images are GLOBAL per word, never per user: exactly one active `word_contents` and one active `word_images` row per word, pointed at by `words.active_content_id/active_image_id`, and the generation prompt carries no per-user data.
+     ev: backend/wd/migrations/0001_init.sql:243; docs/DESIGN.md:187; docs/CLAUDE_INTEGRATION.md:234
+     q: CREATE UNIQUE INDEX ux_word_contents_active  ON word_contents(word_id) WHERE status = 'active';
+     why: An admin-curated library is structurally possible: every client reads the same row, so server-side generation or import serves all learners without any per-user AI.
+3. [high] Versioning: each store inserts version = MAX+1, marks the previous active row `superseded`, records prompt_version 'content-v1', the model actually used (falling back to the requested model), a cost share and the ai_calls id; `force` jobs also overwrite `words.difficulty`.
+     ev: backend/wd/ai/content.py:37; backend/wd/ai/content.py:212-218; backend/wd/ai/content.py:214
+     q: PROMPT_VERSION = "content-v1"
+     why: History is kept per word, so a curated replacement can be stored as a new version without losing the AI original, and provenance (model/prompt) is auditable.
+4. [high] The handler skips a word that is already `ready` under the current PROMPT_VERSION unless the job carries `force`; but bumping PROMPT_VERSION alone re-enqueues nothing because every enqueue site (bank, batches, prefetch, prewarm candidates) only fires for `content_state IN ('none','failed')`.
+     ev: backend/wd/ai/content.py:364-366; backend/wd/services/bank.py:473-474; backend/wd/ai/prewarm.py:48
+     q: if not job.payload.get("force") and word.get("content_state") == "ready" and _active_prompt_version(conn, word) == PROMPT_VERSION:             _skip(conn, job, 
+     why: A library-wide refresh after a prompt change cannot be driven by prewarm today; only per-word admin regenerate (force) re-generates existing content.
+5. [high] Marking a validated word unfamiliar (from any context) enqueues `generate_content` at priority 10 when the user is looking at the word (detail/today/extra) else 20, via `enqueue_content_if_needed`; there is no per-user cap on this trigger beyond the global AI budget (only custom adds are capped at 200/day).
+     ev: backend/wd/services/bank.py:618; backend/wd/services/bank.py:45-55; backend/wd/services/bank.py:59
+     q: job_id = enqueue_content_if_needed(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now)
+     why: This is the main end-user-triggered AI path on a public server: ordinary studying spends Claude budget unless the library is pre-filled.
+6. [high] Batch build (step 9) and `study_today` enqueue content at priority 20 for selected validated words; the 03:30 maintenance prefetch enqueues ≤50 priority-30 jobs per push-enabled user for tomorrow's words and is skipped entirely when AI is off/paused or today's spend is ≥50% of the daily cap; bulk import never enqueues content.
+     ev: backend/wd/services/batches.py:351-352; backend/wd/jobs/scheduler.py:252-258; backend/wd/services/bank.py:1128
+     q: def _enqueue_content_for(conn: sqlite3.Connection, word_ids: Sequence[int], now_s: str, *, priority: int = CONTENT_PRIORITY_BATCH) -> int:     """Step 9: ``gene
+     why: Scheduled generation is tied to individual users' upcoming batches, not to the library; a server-side curation plan must replace these per-user lookahead jobs.
+7. [high] Explicit per-user request `POST /api/words/{id}/content/request` is capped at 60/day/user, refuses provisional words, returns 503 `ai_disabled` when the kill switch or pause is on, 409 `budget_exhausted` when `can_spend` says no, and otherwise enqueues at priority 10; image refresh and reports are capped at 20/day/user.
+     ev: backend/wd/services/bank.py:63-65; backend/wd/routers/words.py:324-329; backend/wd/routers/words.py:331
+     q: CONTENT_REQUESTS_DAILY_CAP = 60 IMAGE_REFRESH_DAILY_CAP = 20 REPORTS_DAILY_CAP = 20
+     why: These are the only per-user quotas in the content layer; disabling AI makes this endpoint fail cleanly (503) rather than silently.
+8. [high] Other enqueue sites: `lookup_word` enqueues content (priority 10) once it validates a custom word; suggestion accepts and consolidation merges re-enqueue at priority 20; admin regenerate and report-resolve enqueue `{word_id, force:true}` on key `content:<id>:r<n>` at priority 10; prewarm enqueues `{word_id, plan_id}` at 90.
+     ev: backend/wd/ai/lookup.py:487; backend/wd/routers/admin_ops.py:389-390; backend/wd/ai/prewarm.py:163
+     q: job_id = bank.enqueue_content_if_needed(conn, final, priority=CONTENT_PRIORITY, now=now)
+     why: Completes the inventory of every place that can start a live Claude content call; all but prewarm/admin are end-user-driven.
+9. [high] All content jobs share the dedupe key `content:<word_id>`; a later enqueue folds into the live job keeping the lower priority and earlier run_after, so a learner marking a word that prewarm queued at 90 promotes it to 10/20 instead of creating a second call.
+     ev: backend/wd/jobs/queue.py:102-103; backend/wd/migrations/0001_init.sql:503
+     q: "ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('queued','running') "             "DO UPDATE SET priority = min(priority, excluded.priority
+     why: Explains why a bulk prewarm and live user activity cannot double-spend on the same word, and why global and user triggers interact.
+10. [high] Every Claude call is gated by `budget.can_spend`: kill switch (WD_AI_ENABLED and kv.claude.enabled), kv.claude.paused_until, 60 calls/hour, $40/month, $3/day, and for priority ≥ 90 jobs additionally prewarm_spent_today < $1.00 and spent_today < 50% of the daily cap; a refusal defers the group (no attempt consumed) instead of failing.
+     ev: backend/wd/config.py:103-107; backend/wd/ai/budget.py:223-228; backend/wd/ai/common.py:166-170
+     q: ai_daily_budget_usd: float = 3.00     ai_monthly_budget_usd: float = 40.00     ai_prewarm_daily_budget_usd: float = 1.00     ai_hourly_call_cap: int = 60     ai
+     why: These are the levers an operator must raise (temporarily) to prewarm the library in bulk, and the mechanism that keeps a disabled/paused deployment from erroring.
+11. [high] With AI disabled (WD_AI_ENABLED=0 or kv.claude.enabled='0') the ClaudeWorker idles and leaves all Claude-type jobs queued and untouched; the app continues on dictionary data and template cards.
+     ev: backend/wd/jobs/worker.py:254-258; backend/wd/services/bank.py:221-225; docs/CLAUDE_INTEGRATION.md:399
+     q: if not budget.ai_enabled(conn, self.ctx.cfg):                 flagged = lookup.flag_queued_lookups(conn, now=self.ctx.now())
+     why: A mainland deployment with AI switched off is a supported, tested mode: nothing crashes, but content never appears unless pre-filled.
+12. [high] The degraded content response is `{state, content: null, eta_s, deferred_until}`; `eta_s` is queue position × 30 s only while AI is enabled, `deferred_until` is the job's far-future run_after or kv.claude.paused_until, and with the kill switch off both are null while state stays `queued`; StudyItem/WordDetail carry the same `content_state`/`content_deferred_until` and `image` is never null (template card).
+     ev: backend/wd/routers/words.py:219-223; backend/wd/services/screen.py:110-114; backend/wd/services/words.py:459-461
+     q: if state == "queued":         deferred = bank.content_deferred_until(conn, wid, now=now, cfg=cfg)         if deferred is None and bank.ai_enabled(conn, cfg):   
+     why: Clients already handle a permanently-missing content object, so a read-only library with partial coverage degrades predictably.
+13. [high] Study works without content: the card shows the ECDICT translation when `meaning_zh` is absent, `none/failed` shows 「今天的例句暂时生成不了，先用词典释义学习」 plus a 生成例句 button, and `finalize_building` flips a batch to ready immediately when AI is off (it never waits for content).
+     ev: frontend/src/components/study/StudyCard.tsx:141; frontend/src/components/study/StudyCard.tsx:84-89; backend/wd/services/batches.py:390
+     q: const meaning = content?.meaning_zh?.trim() || word.translation?.trim() || word.translation_short;
+     why: Confirms the product remains usable for learners if the shared library is only partly filled or AI is off.
+14. [medium] The 生成例句 button's visibility depends only on content_state/deferral/validity, not on whether AI is enabled; in an AI-off deployment it is shown and every click yields 503 `ai_disabled` (toast errors.aiDisabled).
+     ev: frontend/src/pages/WordDetailPage.tsx:350; backend/wd/routers/words.py:324-325; docs/FRONTEND.md:123
+     q: const canRequestContent = (data.content_state === 'none' || data.content_state === 'failed') && !deferred && word.is_valid_english !== null;
+     why: For a no-end-user-AI launch the UI would still advertise an action that always fails; a small frontend change (hide on a server flag) is needed.
+15. [high] Prewarm candidates are public, valid, unmerged words of the stage with `content_state IN ('none','failed')` and no live content job, ordered by frequency; `stage='all'` means `stage_min IS NOT NULL`, which covers every seed word (first_stage counts sum to 9,162) but never user-added words.
+     ev: backend/wd/ai/prewarm.py:36-39; backend/wd/ai/prewarm.py:46-50; data/seed/stats.json:2-21
+     q: def _stage_sql(stage: str) -> str:     if stage == "all":         return "w.stage_min IS NOT NULL"     return f"w.{STAGE_COLUMNS[stage]} = 1"
+     why: Prewarm is the existing server-side bulk-generation tool; it can fill the whole seed library but not the long tail of user-added words.
+16. [high] Prewarm mechanics: admin-only (`POST /api/admin/content/prewarm {stage, limit ≤ 2000, max_budget_usd ≤ 50}`, 503 when AI off), priority 90, each pass enqueues 5 × WD_AI_BATCH_SIZE (50) words then defers 2 minutes, stops at its own budget (cancelling queued leftovers), at `limit`, or when no candidates remain; spend is credited per item to kv `prewarm:<plan_id>:spent`.
+     ev: backend/wd/ai/prewarm.py:29-31; backend/wd/ai/prewarm.py:151-156; backend/wd/schemas.py:1320-1323
+     q: PRIORITY = 90 PASS_MULTIPLIER = 5 PASS_INTERVAL = timedelta(minutes=2)
+     why: Filling 9,162 words needs at least five plans and raised caps; the plan itself never runs automatically.
+17. [medium] At default budgets a full prewarm takes roughly 37 days: the measured cost is $0.040 per 10-word call ($0.004/word, ~24 s/call), the prewarm sub-cap is $1.00/day (≈250 words/day) and also requires spent_today < $1.50; with caps lifted the 60-calls/hour cap bounds throughput to ~600 words/hour (≈15 h of calls for the seed, ≈$37), while the 50-words-per-2-minutes pass cadence (1,500 words/h) is not the bottleneck.
+     ev: docs/CLAUDE_INTEGRATION.md:375; backend/wd/config.py:93; backend/wd/ai/budget.py:211-212
+     q: a 10-word content call = **$0.040 = $0.004/word** (3,302 output tokens, 24 s); a 1-word call $0.0168; an SVG card $0.028; whole 9,162-word seed ≈ **$37**
+     why: Quantifies whether the shared library can be fully generated server-side before launch (yes, in about a day of calls once caps are raised).
+18. [high] Prewarm never spends Openverse quota or Claude SVG budget: `fetch_image` skips Openverse at priority ≥ 90 and `_svg_allowed` requires priority < 90, so prewarmed words get Wikimedia photos or the template card only.
+     ev: backend/wd/images/handler.py:158-159; backend/wd/images/handler.py:102-103
+     q: if int(priority) >= 90 and p.name == "openverse":                 continue  # prewarm never spends Openverse quota
+     why: A bulk pre-fill yields a lower photo hit rate than organic study; the operator may want a separate image pass with Openverse/keyed providers.
+19. [high] Image provider order is WD_IMAGE_PROVIDERS (default wikimedia, openverse) with Pixabay/Pexels appended only when keys exist; keywords are `query` or the content's image_keywords[:3] (blocklist-filtered) or the lemma; the first ranked candidate that downloads (https only, SSRF-pinned DNS, ≤8 MB, re-encoded to ≤800 px progressive JPEG) is activated.
+     ev: backend/wd/config.py:112; backend/wd/config.py:299-302; backend/wd/images/handler.py:134-137
+     q: image_providers: tuple[str, ...] = ("wikimedia", "openverse")
+     why: Image acquisition is independent of Claude (except SVG) and can run server-side for the whole library; it depends on outbound reachability of Wikimedia/Openverse from the server.
+20. [high] Licences are recorded per image row (license, license_url, creator, landing_url, attribution_text) and filtered by an allow-list of CC0/Public domain/PD/CC BY/CC BY-SA plus Pixabay/Pexels licences (NC/ND rejected); Claude SVGs are stored with license='generated'.
+     ev: backend/wd/images/providers/base.py:203-205; backend/wd/migrations/0001_init.sql:255-257; backend/wd/images/store.py:164-165
+     q: def license_allowed(name: str | None) -> bool:     """DESIGN §9 allow-list: CC0 / Public domain / PD / CC BY / CC BY-SA (never NC or ND) + the keyed providers' 
+     why: Shipping images as part of a curated library carries the attribution obligations already captured in these columns; the UI renders them under every photo.
+21. [high] The Claude SVG is a strict last resort: enqueued only when no photo is active, `WD_SVG_VIA_CLAUDE=1`, priority < 90, AI enabled, SVG sub-cap > 0 and the word is in a bank or open batch; the handler re-checks for a photo before and after the call, sanitises with defusedxml + allow-lists, and a rejected SVG leaves `image_state='failed'` so the deterministic template card is served.
+     ev: backend/wd/images/handler.py:201-205; backend/wd/ai/svg.py:96-99; backend/wd/ai/svg.py:138-140
+     q: has_active = service.active_image_row(conn, word_id) is not None     svg_job_id = None     if not has_active and _svg_allowed(cfg, int(priority), allow_svg) and
+     why: Setting WD_SVG_VIA_CLAUDE=0 (or the sub-cap to 0) removes the only AI call in the image path; the card fallback guarantees every word still has an image.
+22. [high] Files live at WD_DATA_DIR/images/<2hex>/<sha256>.jpg|svg (0600, atomic write, content-addressed so one file may serve several words); `word_images.file_path` stores that relative path.
+     ev: backend/wd/config.py:176-178; backend/wd/images/store.py:37-38; backend/wd/images/store.py:1-3
+     q: @property     def images_dir(self) -> Path:         return self.data_dir / "images"
+     why: Pre-generated images could be shipped as a directory tree plus matching `word_images` rows, because paths are deterministic from the file bytes.
+23. [high] Images are served only through the app at `/media/images/{path}` and `/media/card/{id}.svg`, both requiring the session cookie (`current_user`) and the word-visibility rule for cards, with `Cache-Control: private, max-age=31536000, immutable` and a sandboxing CSP for SVG; the frontend embeds them with a plain same-origin `<img src>`.
+     ev: backend/wd/routers/media.py:40-43; backend/wd/routers/media.py:27-28; backend/wd/deps.py:146-148
+     q: if not IMAGE_PATH_RE.match(path):         raise ApiError("not_found")  # shape first: a malformed/traversal path is 404 whoever asks (API.md 52)     current_use
+     why: A static CDN or pre-shipped bundle cannot serve these URLs as-is; images stay behind the authenticated app (cookie-only, no token for binary clients).
+24. [medium] `wd backup --with-images` tars the images directory, but `wd restore` has no image handling and there is no importer for `word_images` rows (the only INSERT is `store.activate`), so moving pre-generated images between servers means copying the directory and the DB rows by hand.
+     ev: backend/wd/backup.py:25; backend/wd/backup.py:234-240; backend/wd/images/store.py:106
+     q: ``--with-images`` adds ``images-YYYYMMDD.tar``. Pre-migrate snapshots are never pruned by the retention rule.
+     why: Image pre-generation on a staging box and shipping to the public server is feasible only via a DB snapshot plus the images tar, not via any import command (grep 'INSERT INTO word_images' → store.py only; grep 'images' in backup.py shows no use after run_backup).
+25. [high] 换一张 (image refresh) and `report {target:'image'}` are per-user rate-limited but mutate the GLOBAL image: a single report marks the shared active image `rejected` for everyone (threshold 1) and enqueues a re-fetch excluding it.
+     ev: backend/wd/images/service.py:194-196; backend/wd/routers/words.py:278-280; docs/DESIGN.md:553
+     q: if row is not None:             conn.execute("UPDATE word_images SET status = 'rejected' WHERE id = ?", (int(row["id"]),))             conn.execute("UPDATE word
+     why: On a public server any single learner can churn the shared image of a word (and, if SVG is on, trigger a Claude SVG for others); curation would need a review threshold.
+26. [high] A user report records target ∈ {content, image, dictionary}, reason ∈ {wrong_meaning, unnatural_example, bad_translation, irrelevant_image, inappropriate_image, other}, an optional ≤300-char note, and snapshots the active content_id/image_id at report time; 20/day/user.
+     ev: backend/wd/migrations/0001_init.sql:555-558; backend/wd/routers/words.py:273-275
+     q: target      TEXT NOT NULL CHECK (target IN ('content','image','dictionary')),   reason      TEXT NOT NULL CHECK (reason IN ('wrong_meaning','unnatural_example',
+     why: Reports are the only user-to-curator feedback channel for the shared library and already carry the version they refer to.
+27. [high] An admin can only list reports by status and resolve/dismiss them; `regenerate` enqueues a forced Claude content job (validated words only) and `refetch_image` rejects the shared image and re-fetches; there is no way to edit the reported text itself.
+     ev: backend/wd/routers/admin_reports.py:48-49; backend/wd/routers/admin_reports.py:85-92; frontend/src/pages/AdminPage.tsx:943-949
+     q: def _enqueue_regenerate(conn: sqlite3.Connection, word_id: int, now: str) -> int | None:     """``generate_content {word_id, force:true}`` on ``content:<id>:r<n
+     why: Every admin remedy for bad content re-invokes Claude; with AI off, a report can only be dismissed.
+28. [high] Admin regenerate (`POST /api/admin/words/{id}/regenerate`) and refetch-image (`POST /api/admin/words/{id}/refetch-image {provider?, query?}`) exist as API calls, but no frontend page calls them outside the reports tab and there is no admin word list/search endpoint (admin endpoints are 54-74: overview, health, users, invites, jobs, ai, prewarm, per-id regenerate/refetch, reports, events, config, push/run).
+     ev: frontend/src/api/endpoints.ts:535-539; docs/API.md:230-233; backend/wd/routers/admin_ops.py:376
+     q: // #68 POST /api/admin/words/{id}/regenerate export const adminRegenerateWord = (wordId: number) => api.post<JobQueuedResponse>(`/api/admin/words/${seg(wordId)}
+     why: An operator curating the library today has no UI to find words lacking/bad content; the only word-level admin actions are AI re-runs (grep for adminRegenerateWord/adminRefetchImage in frontend/src/**/*.tsx returns no callers).
+29. [high] ABSENT: there is no endpoint that writes content text. The only PUT/PATCH routes in the backend are `PUT /api/settings`, `PUT /api/account` and `PATCH /api/bank/{word_id}`; no route accepts a Content body.
+     ev: backend/wd/routers/settings.py:80; backend/wd/routers/account.py:58; backend/wd/routers/bank.py:191
+     q: @router.put("/api/settings", response_model=SettingsDTO)
+     why: Hand-editing or uploading curated content via the API is impossible today (grep -rn '@router.put|@router.patch|.put(|.patch(' backend/wd/routers/ → only these three).
+30. [high] ABSENT: no import/export of content or images exists anywhere. The sole `INSERT INTO word_contents` is the Claude handler, the sole `INSERT INTO word_images` is `store.activate`, `wd import-seed` explicitly never touches content/image columns, the CLI has no content subcommand, and no 'content pack'/'import content'/'export content' strings occur in backend, docs, scripts, deploy or frontend.
+     ev: backend/wd/ai/content.py:216; backend/wd/seed.py:10-11; backend/wd/cli.py:161-166
+     q: "INSERT INTO word_contents(word_id, version, prompt_version, model, content_json, status, cost_usd, ai_call_id, created_at) "
+     why: A curated library cannot be generated on one machine and loaded on another without new code (greps: 'INSERT INTO word_contents' → content.py:216 only; 'INSERT INTO word_images' → store.py:106 only; 'content[ _-]?pack|import[ _-]?content|export[ _-]?content|bulk[ _-]?import' → no hits; add_parser list has no content/export command).
+31. [medium] ABSENT: no review/approval state for content. `word_contents.status` allows 'rejected' but nothing writes it; the only status transitions are insert as 'active' and 'active' → 'superseded'.
+     ev: backend/wd/migrations/0001_init.sql:236; backend/wd/ai/content.py:214-217
+     q: status         TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded','rejected')),
+     why: Curation needs a 'reviewed' or 'rejected' marker; the column exists but no code path sets or reads it (grep -rn word_contents backend/wd → content.py, words.py, card_svg.py, images/handler.py only; none writes 'rejected').
+32. [high] Post-validation enforces the Chinese learner shape server-side: meaning_zh must contain CJK, each kept example needs an English sentence of 15-240 chars (≥70% ASCII) containing the headword or a known form plus a CJK translation of 2-200 chars, and ≥3 examples are required (≥2 on the last attempt); image_keywords are blocklist-filtered and fall back to the lemma.
+     ev: backend/wd/ai/content.py:130-131; backend/wd/ai/content.py:144-148; backend/wd/ai/content.py:153-155
+     q: meaning_zh = common.clean_text(item.get("meaning_zh"), max_len=MEANING_ZH_MAX)     if meaning_zh is None or not meaning_zh or not common.has_cjk(meaning_zh):
+     why: Any hand-written or imported content should satisfy the same invariants the UI assumes (`validate_item` could be reused by an importer).
+33. [high] The content prompt uses dictionary data only (display, first translation line ≤60 chars, pos, stage labels, kind), so content could be generated offline from the seed alone, on any machine, with identical inputs.
+     ev: backend/wd/ai/content.py:75-80; backend/wd/ai/content.py:64-65
+     q: entry: dict[str, Any] = {         "word": str(word["display"]),         "dictionary_hint": dictionary_hint(word.get("translation")),         "pos_hint": " ".joi
+     why: Supports an operator-side pipeline (generate on a non-mainland box or by the admin's own account) that produces the same content the live handler would.
+34. [high] Content generation has a GLOBAL side effect beyond content: it fills `words.difficulty` for seed words (NULL until then, which the vocab `sort=difficulty` works around), and `valid=false` on a user/ECDICT word makes that word `is_valid_english=0, is_public=0`, expires its open suggestions and flags every holder's bank row.
+     ev: backend/wd/ai/content.py:221-224; backend/wd/ai/content.py:261-263; docs/API.md:167
+     q: if force or word.get("difficulty") is None:             conn.execute(                 "UPDATE words SET active_content_id = ?, content_state = 'ready', difficul
+     why: A curated import must also set `words.difficulty` (or accept the stage fallback), and the current validity-rejection path is an AI-driven moderation step that disappears when AI is off.
+35. [high] The admin overview exposes library-wide coverage: words.total/with_content (`content_state='ready'`), with_photo/with_claude_svg/card_only, provider quota status and AI spend — a read-only view of how complete the shared library is.
+     ev: backend/wd/routers/admin_ops.py:120; backend/wd/images/service.py:240-243
+     q: "SELECT COUNT(*), SUM(content_state = 'ready'), SUM(source = 'user' OR created_by_user_id IS NOT NULL), SUM(is_valid_english IS NULL) "
+     why: Gives the operator the numbers to track a pre-launch fill, though not the per-word list behind them.
+36. [medium] Image pre-generation throughput is bounded by provider politeness/quotas and a single IoWorker: Wikimedia ≥1 s between requests and a 2,000/day soft limit, Openverse 15/min and 160/day; so a Wikimedia-only pass over 9,162 words needs at least ~5 days at defaults.
+     ev: backend/wd/config.py:116-119; backend/wd/images/handler.py:160-163; backend/wd/jobs/worker.py:9
+     q: wikimedia_min_interval_ms: int = 1000     wikimedia_daily_limit: int = 2000     openverse_minute_limit: int = 15     openverse_daily_limit: int = 160
+     why: Pre-shipping images (rather than fetching live from a mainland server, where Wikimedia reachability is doubtful) has a multi-day lead time at default limits.
+37. [high] All content generation today is a live Claude call made by the server process through the locally installed `claude` CLI (OAuth login of the service user, tier-0 flags `-p … --output-format json --json-schema … --tools "" --model sonnet --max-budget-usd …`); clients never call Claude, but the calls are made on behalf of whichever learner's action enqueued the job.
+     ev: backend/wd/ai/runner.py:3-4; backend/wd/config.py:85; docs/CLAUDE_INTEGRATION.md:3
+     q: * :func:`build_argv` — tier 0 is the verified invocation (``-p <prompt> --output-format json --json-schema <schema>   --tools "" --no-session-persistence --mode
+     why: Frames the policy question: the AI call is server-side, but its trigger (and the job's user-facing priority) is an end-user action unless the library is pre-filled and triggers are disabled.
+## GLOSSARY
+- example sentence = 例句
+- image / picture = 配图
+- collocations = 搭配
+- mnemonic (UI label) = 记忆 (prompt term: 记忆提示 / 助记)
+- dictionary definition (ECDICT fallback) = 词典释义
+- meaning / gloss = 释义
+- refresh image (user) = 换一张
+- flag image as inappropriate (user) = 不合适
+- report a problem = 反馈问题
+- report reasons = 释义有误 / 例句不地道 / 翻译有误 / 配图无关 / 配图不合适 / 其他
+- request content button = 生成例句
+- content pending = 例句生成中…
+- content deferred (budget) = 今日 AI 额度已用完，例句将在明天补齐
+- content failed/none = 今天的例句暂时生成不了，先用词典释义学习
+- prewarm (admin) = 预生成
+- regenerate (admin) = 重新生成
+- refetch image (admin) = 换图
+- dismiss report (admin) = 忽略
+- admin reports tab = 内容反馈
+- words with content (admin tile) = 有内容
+- template card caption = 系统生成卡片
+- Claude SVG caption = AI 生成示意图
+- image source caption = 图片
+- confusable words = 易混
+- stages = 初中 / 高中 / 四级 / 六级
+- personal word bank = 生词库
+- AI notice in settings = 例句、搭配与记忆提示由 AI 生成，仅供学习参考
+## UNKNOWNS
+- Whether every seed word really has stage_min NOT NULL at runtime (stats.json first_stage sums to 9,162, but I did not query a live DB), which determines whether prewarm stage='all' covers the entire seed.
+- The real wall-clock duration of a bulk prewarm: the 24 s/call figure is the documented measurement (CLAUDE_INTEGRATION §7), not something I reproduced; ClaudeWorker loop sleeps and bisection retries could stretch it.
+- Whether any frontend code hides image/AI actions based on ServerFlags (auth.py exposes images_enabled; I did not check for an ai_enabled flag in the client), so the '生成例句 button shown while AI is off' finding is medium confidence.
+- Whether `wd restore` or ops.md documents a manual step for restoring the images tar (restore code has no images handling; ops.md was only partially read).
+- Whether word_contents.status='rejected' is written by any test fixture or migration (my grep covered backend/wd only, not backend/tests or migrations 0008/0009).
+- Reachability of Wikimedia Commons / Openverse / the claude CLI from a mainland server: ops.md §10 notes a persistent HTTP 503 from Commons for the current box's egress IP, which is environment-specific.
+- Whether the owner's intended curation path is hand-editing JSON via SQLite or a new importer; the data model supports both but neither is documented.
+## SUGGESTED VERIFICATIONS
+- Confirm 'bumping PROMPT_VERSION re-enqueues nothing': on a dev DB set one word ready, change PROMPT_VERSION to 'content-v2', run prewarm.count_candidates(conn,'all') and bank.enqueue_content_if_needed on that word — both should ignore it; only a force job (admin regenerate) should regenerate.
+- Confirm 'no writer of word_contents.status=rejected' with: grep -rn "rejected" backend/wd backend/tests backend/wd/migrations | grep -i content — expect only CHECK constraints and image rejections.
+- Verify the degraded read path for hand-inserted content: INSERT a word_contents row (status 'active', valid content_json) and UPDATE words SET active_content_id, content_state='ready'; then GET /api/words/{id}/content, /api/words/{id} and /media/card/{id}.svg should all reflect it without any job (words.active_content reads only status='active'; card_svg LRU keys on active_content_id).
+- Re-check the prewarm throughput arithmetic against the budget tests: backend/tests/unit/test_budget.py (prewarm sub-cap, 50% share) and backend/tests/integration/test_admin_ops.py::test_prewarm_fans_out_in_passes_and_stops_at_the_limit; then compute words/day = min(sub-cap/0.004, 0.5×daily/0.004) with WD_AI_PREWARM_DAILY_BUDGET_USD and WD_AI_DAILY_BUDGET_USD at defaults (expect ≈250).
+- Verify media cookie gating blocks static pre-serving: backend/tests/integration/test_media.py::test_image_requires_a_session_and_serves_immutable_files asserts 401 without a cookie; also confirm no Caddy/static rule serves /media in deploy/.
+- Verify the single-report image churn claim end to end: backend/tests/integration/test_images.py::test_report_rejects_active_image_and_refetch_excludes_it and test_reports.py::test_resolve_with_refetch_image_rejects_the_active_image_and_enqueues_excluding_it — confirm no threshold/count check exists in images/service.reject_active_image.
+- Check whether the 生成例句 button should be hidden when AI is off: grep frontend/src for 'ai_enabled' / ServerFlags usage; if absent, the UI offers a guaranteed-503 action in an AI-off deployment.
+- Confirm that `wd import-seed --force` on an existing DB preserves content (seed.py docstring says active_content_id etc. are never touched): read the UPDATE statement in backend/wd/seed.py and run the import twice on a DB with a ready word.

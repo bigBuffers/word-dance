@@ -1,0 +1,191 @@
+# SLICE seed-pipeline  (32 findings)
+## SUMMARY
+The shared word library is a 9,162-record JSONL seed (data/seed/vocab.jsonl.gz, sha256 a68127…, record count verified by decompressing it) that was built once
+in the P0 commit by scripts/build_seed.py from two external inputs that are NOT in the repo: ECDICT release 1.0.28 stardict.db (MIT; licence text in
+data/licenses/ECDICT-LICENSE) and six mahavivo/english-wordlists syllabus files (no licence published; only head-word membership is used). The seed set is the
+union of every ECDICT row tagged zk/gk/cet4/cet6 and every syllabus head word found in ECDICT; each record carries 15 fields (word, phonetic, translation[],
+definition[], pos, collins, oxford, stages[], exam_tags[], bnc, frq, exchange{}, sources[], ecdict_id, cet6_star), and the only stage axes are 初中/高中/四级/六级 —
+考研/TOEFL/IELTS/GRE exist solely as display-only exam_tags copied from ECDICT's tag column. Rebuilding requires `make seed ECDICT_DB=… WORDLISTS_DIR=…` plus
+`scripts/pack_seed.sh` (gzip -9 -n for a reproducible hash); the intermediate vocab.jsonl is gitignored. Import into SQLite is backend/wd/seed.py: `wd import-
+seed [--file] [--force]` from the CLI, step 6 of deploy/install.sh right after `wd migrate`, and automatically inside `wd serve` startup (`main.seed_check`)
+whenever kv.seed_version differs from sha256(WD_SEED_PATH); there is no HTTP/admin endpoint that imports or edits the seed (grep of backend/wd/routers for
+import_seed/seed finds only admin_ops.py:200 reading kv.seed_version for the 词库版本 display). The import is one BEGIN IMMEDIATE transaction doing an INSERT … ON
+CONFLICT(lemma) DO UPDATE over the GLOBAL tables words and word_forms only; it never deletes words, never duplicates (UNIQUE ux_words_lemma), updates only rows
+whose seed-managed columns actually changed, and never references user_words, word_contents, word_images, active_content_id, content_state, difficulty or
+created_by_user_id (PER-USER and generated data survive untouched). Consequently an operator CAN fix a definition or add a word by editing the JSONL and re-
+importing: the changed lemma is updated in place, new lemmas are inserted (source='seed', is_public=1, is_valid_english=1), and no AI call is involved — but
+existing AI-generated word_contents for a corrected word are not invalidated or regenerated, and records removed from the file stay in the database. The most
+important trap is that kv stores only the hash, not the path: after `wd import-seed --file custom.jsonl`, the next service restart sees kv.seed_version ≠
+sha256(repo seed) and re-imports the repo seed, reverting every shared lemma, so curated content must replace data/seed/vocab.jsonl.gz or WD_SEED_PATH must
+point at the curated file. The ECDICT stardict.db is a separate, optional runtime artefact (deploy/fetch_ecdict.sh, WD_ECDICT_DB_PATH): services/ecdict.lookup
+is step 3 of lemma resolution (exact → form → ecdict → provisional) and in GET /api/lookup; it is never used for seed phonetics; when configured it turns an
+off-seed dictionary word into a new global words row with no Claude job, while without it the same word becomes a private provisional row plus an end-user-
+triggered lookup_word Claude job. Seed words are never AI-validated or AI-filled (is_valid_english=1 short-circuits lookup; content apply treats valid=false on
+a seed word as an anomaly; fill_data refuses seed words), so the seed pipeline is the sole author of dictionary columns for the 9,162 core words. Today's
+production sequence to change library content is: rebuild or hand-edit the JSONL → update stats.json total_words → scripts/pack_seed.sh → commit → `git pull &&
+deploy/install.sh` (stops the unit, migrates, imports, restarts) or simply restart the service.
+## FINDINGS
+1. [high] The seed vocabulary is derived from ECDICT release 1.0.28 under the MIT licence (full text shipped in data/licenses/ECDICT-LICENSE) plus six mahavivo/english-wordlists syllabus files whose repository publishes no licence; only head-word membership facts from the lists are used and no list file is redistributed.
+     ev: data/seed/ATTRIBUTION.md:5-8; ATTRIBUTION.md:32; ATTRIBUTION.md:17
+     q: 1. **ECDICT** — Free English to Chinese Dictionary Database by skywind3000    https://github.com/skywind3000/ECDICT — MIT License.
+     why: A public launch redistributing the words table must keep the ECDICT MIT notice; the syllabus-list provenance rests on a membership-facts-only argument rather than an explicit licence.
+2. [high] Every one of the 9,162 seed records carries exactly these 15 fields: word, phonetic, translation[], definition[], pos, collins, oxford, stages[], exam_tags[], bnc, frq, exchange{}, sources[], ecdict_id, cet6_star (verified by decompressing the shipped archive and counting keys).
+     ev: scripts/build_seed.py:183-198; scripts/build_seed.py:191-197; data/seed/stats.json:2-8
+     q: "word": word,         "phonetic": norm_phonetic(phonetic),         "translation": [s.strip() for s in (translation or "").replace("\r", "").split("\n") if s.str
+     why: Defines what an admin can author per word through the seed: pronunciation, zh/en meanings, POS distribution, frequency ranks, inflections and stage membership — but no example sentences, mnemonics or images.
+3. [high] Stage membership has only four axes (zk 初中, gk 高中, cet4 四级, cet6 六级); each stage set is the union of ECDICT's tag column and the corresponding mahavivo list (中考英语词汇表.txt, Highschool_edited.txt, CET4_edited.txt, CET6_edited.txt, CET_4+6_edited.txt, 英语六级词汇（星标，1726）.txt), and words in the combined CET_4+6 list that are not in the CET4 list are assigned cet6.
+     ev: scripts/build_seed.py:10-11; scripts/build_seed.py:82-87; scripts/build_seed.py:128-140
+     q: Stage codes: zk = 初中(中考), gk = 高中(高考), cet4 = 大学英语四级, cet6 = 大学英语六级 Each stage set = ECDICT tag ∪ official syllabus list.
+     why: The shared library's browse/filter structure (and 仅本阶段新增) is fixed to these four Chinese exam stages; adding a new stage (e.g. 考研) would need builder, schema and UI changes, not just data.
+4. [high] 考研 (ky), TOEFL, IELTS and GRE are not stages: they are copied from ECDICT's tag column into exam_tags, stored space-joined, and only displayed under 考试标签 on the word detail page; no backend route filters on exam_tags, and a word carrying only such tags (no zk/gk/cet4/cet6 tag and not in a syllabus list) is excluded from the seed.
+     ev: scripts/build_seed.py:105-106; frontend/src/pages/WordDetailPage.tsx:430-434; backend/wd/services/words.py:502
+     q: q = ("select " + cols + " from stardict where ' '||tag||' ' like '% zk %' or ' '||tag||' ' like '% gk %' "          "or ' '||tag||' ' like '% cet4 %' or ' '||ta
+     why: Learners preparing for 考研/TOEFL/IELTS get no dedicated list; the grep `grep -rn exam_tags backend/wd/routers backend/wd/services backend/wd/ai` shows only DTO serialisation, no filtering.
+5. [high] The seed set is the closure of all ECDICT rows tagged with any of the four stage tags plus syllabus head words that can be found in ECDICT (exact or space→hyphen); a syllabus word missing from ECDICT is dropped and listed in stats.json (one case: 'instalation').
+     ev: scripts/build_seed.py:117-124; data/seed/stats.json:35-39
+     q: rec = words.get(key)             if rec is None:                 r = lookup(w)                 if r is None:                     missing[lst].append(w)         
+     why: Dictionary content for every seed word is ECDICT's; the builder cannot author a word that ECDICT lacks, so adding such a word today means hand-editing the JSONL.
+6. [high] data/seed/vocab.jsonl.gz was committed once (P0 commit 99a26e3) and has never changed since; the intermediate vocab.jsonl is gitignored; the archive is built with gzip -9 -n so a rebuild from identical input gives a byte-identical file and a stable sha256 (a68127812a43c47ff011828b7894b789ba0fcf69cc8e76f1ec6c2356e81a3336), which is what the server stores as kv.seed_version.
+     ev: .gitignore:31-32; scripts/pack_seed.sh:6-7; docs/P0_STATUS.md:202-204
+     q: # Seed build intermediate — only data/seed/vocab.jsonl.gz is tracked (make seed) data/seed/vocab.jsonl
+     why: The library has had zero content updates since creation (`git log --follow -- data/seed/vocab.jsonl.gz` shows one commit); the hash-as-version scheme means any byte change is a new library version.
+7. [high] Rebuilding the seed needs two inputs absent from the repository and from a deployment: the 851 MB ECDICT stardict.db and a directory of mahavivo .txt files; `make seed ECDICT_DB=… WORDLISTS_DIR=…` runs build_seed.py and gzips the result, and the Makefile explicitly notes these inputs are not needed at deploy time.
+     ev: Makefile:37-40; Makefile:93-97
+     q: # make seed: the inputs (ECDICT stardict.db, mahavivo word lists) are NOT needed # at deploy time — data/seed/vocab.jsonl.gz is tracked. Set them only to rebuil
+     why: A full regeneration is an offline, operator-only workflow with GitHub downloads; it cannot be triggered from the running server or the admin UI.
+8. [high] The import runs through exactly three entry points — the CLI `wd import-seed [--file PATH] [--force]`, step 6 of deploy/install.sh immediately after `wd migrate`, and automatically at every `wd serve` startup via main.seed_check when kv.seed_version ≠ sha256(WD_SEED_PATH) — and there is no HTTP/admin endpoint that imports, re-imports or edits the seed (grep -rn "seed\|import_seed" backend/wd/routers/*.py matches only admin_ops.py:200, which reads kv.seed_version).
+     ev: backend/wd/seed.py:356-359; backend/wd/main.py:303-313; deploy/install.sh:140-141
+     q: p = sub.add_parser("import-seed", help="import or refresh the vocabulary seed (idempotent upsert keyed by lemma)")     p.add_argument("--file", default=None, me
+     why: Server-side curation today is shell/CLI only; an admin-UI library editor would be new code, but the import primitive it would need already exists and is idempotent.
+9. [high] `wd migrate` does not import the seed; `wd import-seed` refuses with exit 1 on an unmigrated database and tells the operator to run `wd migrate` first.
+     ev: backend/wd/seed.py:346-348; backend/tests/unit/test_seed.py:322-324
+     q: if db.current_version(conn) == 0:             print("wd import-seed: the database has no schema yet — run `wd migrate` first", file=sys.stderr)             retu
+     why: Fixes the operator ordering: migrate, then import (install.sh and serve startup already do this in order).
+10. [high] Import is idempotent by file hash: a second run with the same file returns up_to_date without writing anything, and `--force` re-runs the UPSERT whose WHERE clause fires only when a seed-managed column or trust flag differs, so unchanged rows keep their updated_at.
+     ev: backend/wd/seed.py:260-263; backend/wd/seed.py:70-71; backend/tests/unit/test_seed.py:161-165
+     q: if not force and db.kv_get(conn, "seed_version") == digest:         stats.up_to_date = True         stats.seconds = time.monotonic() - t0         return stats
+     why: Re-running the import on every deploy or restart is safe and cheap; only a genuinely changed seed file causes writes.
+11. [high] When the seed file changes, re-import is an UPSERT keyed by words.lemma (UNIQUE index ux_words_lemma): changed records update only that row's seed-managed columns, unchanged rows are not rewritten, new lemmas are inserted, and rows are never duplicated.
+     ev: backend/wd/seed.py:72-79; backend/wd/migrations/0001_init.sql:205; backend/tests/unit/test_seed.py:195-205
+     q: f"INSERT INTO words(lemma, {', '.join(SEED_COLUMNS)}, source, is_public, is_valid_english, safe_for_sharing, created_at, updated_at) " …     "ON CONFLICT(lemma)
+     why: Directly answers the curation question: an admin can fix a definition or add a word by editing the JSONL and re-importing, with surgical per-row effect and no AI.
+12. [high] The importer writes only the GLOBAL tables words, word_forms, kv and system_events; it never references user_words, word_contents, word_images, active_content_id, active_image_id, content_state, image_state, difficulty or created_by_user_id (grep -n "DELETE FROM words\|word_contents\|word_images\|user_words" backend/wd/seed.py returns nothing), so per-user learning data and AI-generated content survive any re-import.
+     ev: backend/wd/seed.py:10-12; backend/tests/unit/test_seed.py:179-185
+     q: * ``active_content_id``, ``active_image_id``, ``content_state``, ``image_state``, ``difficulty``, ``created_by_user_id``   and every per-user table are never to
+     why: A server-side library refresh cannot damage learners' SRS state or existing shared content; but it also means a corrected definition does not invalidate or regenerate stale AI content (word_contents) attached to that word.
+13. [high] Re-import never deletes words: the only DELETE in seed.py removes non-'alt' word_forms of lemmas present in the new file, so a record removed from the seed leaves its words row (source='seed', is_public=1) in the database indefinitely.
+     ev: backend/wd/seed.py:221-224; backend/wd/seed.py:284
+     q: conn.executemany(         "DELETE FROM word_forms WHERE word_id = ? AND kind != 'alt'",         [(ids[lemma],) for lemma in rows if lemma in ids],     )
+     why: Curating the library by removal (e.g. dropping an offensive or wrong headword) is not supported by the seed pipeline; it would need manual SQL or new code.
+14. [high] Re-import force-resets the trust flags of every lemma in the file — source='seed', is_public=1, is_valid_english=1, safe_for_sharing=1, merged_into_word_id=NULL — so a private user-created provisional row with the same lemma is promoted to a public seed word (keeping created_by_user_id) and a seed headword merged away by consolidation is restored.
+     ev: backend/wd/seed.py:77-81; backend/tests/unit/test_seed.py:211-216; backend/tests/unit/test_seed.py:223-225
+     q: ", source = 'seed', is_public = 1, is_valid_english = 1, safe_for_sharing = 1, merged_into_word_id = NULL, updated_at = excluded.updated_at "     "WHERE " …    
+     why: Adding a word to the curated seed is the server-side way to make an existing user-added word public and trusted without any Claude validation.
+15. [high] word_forms for imported lemmas are rebuilt from exchange codes p d i 3 s r t only (codes 0/1/f/b/z ignored) with three guards — empty forms skipped, a form equal to any words.lemma never inserted, one row per (form, word_id) — while 'alt' rows written by lookup/consolidation are preserved.
+     ev: backend/wd/seed.py:45; backend/wd/seed.py:235-242; backend/wd/migrations/0001_init.sql:212-216
+     q: FORM_CODES: tuple[str, ...] = ("p", "d", "i", "3", "s", "r", "t")  # priority order when one (form, word) carries several codes
+     why: The inflection index that makes 'went'→'go' resolve without AI is fully derived from the seed; editing exchange in a record and re-importing updates it.
+16. [high] The whole import is one BEGIN IMMEDIATE transaction (joins a caller's open transaction via db.maybe_tx): on any failure nothing is written, and on success it sets kv.seed_version (sha256) and kv.seed_imported_at and appends a system_events('seed_imported') row with file name, sha256 and counts; admins see the hash as 词库版本 on the admin page.
+     ev: backend/wd/seed.py:280-290; backend/tests/unit/test_seed.py:271-275; frontend/src/pages/AdminPage.tsx:179-181
+     q: with db.maybe_tx(conn):         existing = {str(r[0]) for r in conn.execute("SELECT lemma FROM words")} …         db.kv_set(conn, "seed_version", digest, now=no
+     why: A library update is all-or-nothing and auditable (system_events), which is what an admin-curated shared library needs; there is no finer-grained changelog than the hash + counts.
+17. [high] CRITICAL trap: kv records only the hash, never the path. After `wd import-seed --file /path/custom.jsonl`, the next `wd serve` start compares kv.seed_version with sha256(cfg.seed_path = WD_SEED_PATH, default <repo>/data/seed/vocab.jsonl.gz), finds a mismatch and re-imports the repo seed, reverting every edited lemma that also exists in the repo seed (lemmas only in the custom file survive because nothing is deleted). Curated content must therefore replace data/seed/vocab.jsonl.gz or WD_SEED_PATH must point at the curated file.
+     ev: backend/wd/main.py:305-313; backend/wd/seed.py:340; backend/wd/seed.py:287-288
+     q: path = cfg.seed_path …     digest = sha256_file(path)     if db.kv_get(conn, "seed_version") == digest:         return     log.info("seed version changed; impor
+     why: An admin who curates with --file and does not change WD_SEED_PATH silently loses the curation at the next restart/deploy; this is the single most likely operational mistake in a server-side curation workflow.
+18. [medium] Startup seed_check handles only a missing file (warn and continue); any other failure inside import_seed (e.g. a truncated gzip, a schema/DB error) propagates out of startup() because the call sits in a try/finally with no except, so a corrupt seed file would abort `wd serve` and systemd (Restart=on-failure, StartLimitBurst=10) would restart-loop.
+     ev: backend/wd/main.py:306-308; backend/wd/main.py:476-490; deploy/word-dance.service:6-7
+     q: if not path.is_file():         log.warning("seed file %s does not exist; skipping the seed check (set WD_SEED_PATH or run `wd import-seed --file`)", path)      
+     why: A hand-edited seed with a bad gzip or a record that violates a CHECK constraint can take the public service down at restart; the import is atomic but the startup path is not defensive.
+19. [high] A seed record needs only a non-empty string `word`; every other field is optional, and a record without `stages` is imported with stage_min NULL ('outside the 4 lists', shown only under stage=all), still as source='seed', is_public=1, is_valid_english=1 — so operators can add arbitrary new headwords by appending JSONL lines.
+     ev: backend/wd/seed.py:174-183; backend/wd/seed.py:208; backend/wd/migrations/0001_init.sql:185
+     q: word = rec.get("word")     if not isinstance(word, str):         return None     display = " ".join(word.split())     if not display:         return None
+     why: Server-side addition of words is possible today without AI, but words added without a stage are invisible to stage-filtered browsing and 筛词 unless the admin assigns stages.
+20. [high] Within one file, duplicate lemmas keep the first record and skip the rest with a warning; the lemma key is normalised (NFKC, lower-case, single spaces), so 'Apple' and 'apple' collide and only the first survives.
+     ev: backend/wd/seed.py:274-278; backend/tests/unit/test_seed.py:254-259
+     q: if row["lemma"] in rows:             stats.duplicate_lemmas += 1             log.warning("duplicate lemma %r in the seed; keeping the first record", row["lemma"
+     why: An admin appending a corrected record at the end of the file will have it ignored; corrections must edit the original line.
+21. [high] scripts/pack_seed.sh refuses to pack (exit 1) when the non-empty line count of vocab.jsonl differs from stats.json total_words, so an operator who adds or removes records must also update stats.json; it verifies the archive by a zcat|cmp round trip before replacing the old .gz and supports --check for verify-only.
+     ev: scripts/pack_seed.sh:52-57; scripts/pack_seed.sh:78-82
+     q: records="$(count_lines "$jsonl")"   echo "vocab.jsonl: $records records"   if [ -n "$expected" ] && [ "$records" != "$expected" ]; then     echo "pack_seed.sh: 
+     why: Part of the exact hand-curation command sequence; forgetting stats.json is a guaranteed packing failure.
+22. [high] The full ECDICT stardict.db is an optional runtime artefact: services/ecdict.lookup returns None whenever WD_ECDICT_DB_PATH is unset, the file is missing, or the query fails; it opens the SQLite file read-only per call and is never used for seed phonetics or any seed processing.
+     ev: backend/wd/services/ecdict.py:3-6; backend/wd/services/ecdict.py:199-205; deploy/env.example:86-87
+     q: :func:`lookup` queries the ``stardict`` table of the ECDICT ``stardict.db`` named by ``WD_ECDICT_DB_PATH`` (``SELECT … WHERE word = :key COLLATE NOCASE``). It r
+     why: The ECDICT file is the only non-AI source of dictionary data for words outside the 9,162 seed; the shipped seed itself does not depend on it.
+23. [high] At runtime ECDICT is consulted in exactly three places: step 3 of words.resolve (exact → form → ecdict → provisional), the GET /api/lookup preview (via='ecdict', nothing created), and ai/lookup.resolve_existing for Claude-proposed corrections. When it hits, resolve inserts a new GLOBAL words row with source='ecdict', is_public=1, is_valid_english=1 and no Claude job — unless every translation line starts with [网络], in which case the row is private and a lookup_word Claude job is enqueued.
+     ev: backend/wd/services/words.py:744-748; backend/wd/services/words.py:670-676; backend/wd/routers/words.py:101-102
+     q: res = _resolve_forms(conn, key, user_id)     if res is not None:         return res     res = _resolve_ecdict(conn, key, user_id, now)     if res is not None:  
+     why: With ECDICT installed, an end user adding an off-seed dictionary word grows the shared library server-side with zero AI; without it the same action creates an end-user-triggered Claude lookup_word job.
+24. [high] Without ECDICT, every unknown word a user adds becomes a private provisional words row plus a debounced lookup_word Claude job (end-user-triggered AI); the ops runbook states this explicitly, and the documented degraded mode when WD_AI_ENABLED=0 is that the worker idles, queued lookups' bank rows are flagged 「暂时无法校验」, and the app runs on ECDICT data + template cards.
+     ev: docs/ops.md:217-218; backend/wd/services/words.py:726-729; docs/CLAUDE_INTEGRATION.md:410
+     q: Without it, words outside the seed are validated by Claude (`lookup_word`, ≈ 20 s debounce) instead of instantly.
+     why: For a no-end-user-AI deployment, installing ECDICT is the lever that keeps custom-word addition useful; with AI off and no ECDICT, custom words stay permanently 暂时无法校验.
+25. [high] Seed words are never AI-validated or AI-filled: resolve's _ensure_lookup returns None for any row whose is_valid_english is not NULL (seed rows are 1), content apply treats valid=false on a seed word as an anomaly that stores nothing, and consolidation's _fill_data refuses seed words — so the seed pipeline is the sole author of the dictionary columns of the 9,162 core words.
+     ev: backend/wd/services/words.py:715-716; backend/wd/ai/content.py:314-316; backend/wd/ai/consolidate.py:264-266
+     q: if row.get("is_valid_english") is not None or row.get("merged_into_word_id") is not None:         return None
+     why: Re-importing the seed cannot clobber AI-authored dictionary fields on core words because none exist; dictionary corrections for core words must come through the seed.
+26. [high] deploy/fetch_ecdict.sh downloads the pinned 216 MB release zip from github.com, verifies a pinned sha256, extracts the 851 MB stardict.db with the stdlib zipfile module into <DATA>/stardict.db (0600), writes WD_ECDICT_DB_PATH into <DATA>/.env and is idempotent (exits 0 when the file exists); it needs ≈1.1 GB free and a restart afterwards.
+     ev: deploy/fetch_ecdict.sh:12-13; deploy/fetch_ecdict.sh:17-20; deploy/fetch_ecdict.sh:61-63
+     q: ECDICT_URL=${ECDICT_URL:-https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip} ECDICT_SHA256=${ECDICT_SHA256:-ea01f76a3b3351021ce
+     why: Enabling the no-AI lookup path is a one-command, ~1 GB disk decision; the download source is GitHub, which may need a mirror (ECDICT_URL/ECDICT_SHA256 are overridable) from a mainland server.
+27. [high] The shipped seed contains 4 records whose only translation lines start with [网络] (celcius, honourary, microwavable, sobre) and 165 records with an empty phonetic; the importer applies no network-only or quality check and marks all 9,162 as is_valid_english=1 and safe_for_sharing=1 (the [网络] check exists only on the runtime ECDICT path).
+     ev: backend/wd/seed.py:73-74; backend/wd/services/ecdict.py:138-141; data/seed/stats.json:21
+     q: f"INSERT INTO words(lemma, {', '.join(SEED_COLUMNS)}, source, is_public, is_valid_english, safe_for_sharing, created_at, updated_at) "     f"VALUES (:lemma, {',
+     why: Quality of the public library is entirely the seed author's responsibility; a few dubious ECDICT entries (misspellings tagged by syllabus lists) ship as trusted words and would be candidates for an admin curation pass.
+28. [high] The exact production sequence today to change library content is: (rebuild) obtain stardict.db (deploy/fetch_ecdict.sh <DATA>) and the mahavivo .txt files → `make seed ECDICT_DB=<DATA>/stardict.db WORDLISTS_DIR=<dir>` → `scripts/pack_seed.sh` → commit; (hand-edit) `gzip -dc data/seed/vocab.jsonl.gz > data/seed/vocab.jsonl` → edit records → update stats.json total_words → `scripts/pack_seed.sh` → commit; then on the server `git pull && deploy/install.sh` (stops the unit, `wd migrate`, `wd import-seed`, restart) or simply `sudo systemctl restart word-dance` (seed_check re-imports because the hash changed).
+     ev: scripts/pack_seed.sh:12-13; docs/ops.md:95-100; deploy/install.sh:122
+     q: # Rebuilding vocab.jsonl itself needs the ECDICT database and the syllabus lists: `make seed ECDICT_DB=… WORDLISTS_DIR=…` # (scripts/build_seed.py, kept verbati
+     why: This is the full answer to 'how is the library updated today': a git-tracked data file plus a deploy, with no UI and no AI anywhere in the path.
+29. [medium] `wd import-seed` has no worker-lease guard (unlike `restore`, `worker-once` and `tick`), so it can be run against a live service; it then holds a BEGIN IMMEDIATE write lock for the whole import (TASKS acceptance budget < 20 s) while request writers wait on busy_timeout=5000 ms; install.sh avoids contention by stopping the unit first unless --no-restart or no passwordless sudo.
+     ev: backend/wd/seed.py:344-351; backend/wd/cli.py:58; backend/wd/db.py:48
+     q: conn = db.connect(cfg.db_path)     try:         if db.current_version(conn) == 0: …         stats = import_seed(conn, str(path), force=bool(args.force))     fin
+     why: A hot library refresh without downtime is technically possible from the shell today, but a long import on slow disks could surface SQLITE_BUSY errors to concurrent learners.
+30. [medium] pack_seed.sh and fetch_ecdict.sh rely on GNU-only tools (sha256sum, stat -c %s, df --output=avail, GNU sed -i), so the seed curation tooling is meant to run on the Linux server, not on a stock macOS development machine.
+     ev: scripts/pack_seed.sh:90; deploy/fetch_ecdict.sh:23; deploy/fetch_ecdict.sh:59
+     q: echo "wrote $gz: $(zcat "$gz" | grep -c . || true) records, $(stat -c %s "$gz") bytes, sha256 $(sha256sum "$gz" | cut -d' ' -f1)"
+     why: Affects where an admin can realistically perform curation; the Python importer itself is portable.
+31. [high] The import accepts either .jsonl.gz or plain .jsonl by file suffix, and the stored version is the sha256 of the file bytes, so the same content in gzip and plain form has different versions and switching formats triggers a (no-op) re-import.
+     ev: backend/wd/seed.py:117-119; backend/tests/unit/test_seed.py:236-238
+     q: p = Path(path)     opener = gzip.open if p.suffix == ".gz" else io.open     with opener(p, "rt", encoding="utf-8") as f:
+     why: An admin-curation workflow can keep an uncompressed, diff-friendly JSONL as WD_SEED_PATH without changing the importer.
+32. [high] The UI credits the data sources in 设置 → 关于与数据来源 as '词典数据：ECDICT（MIT 许可）' and '词表范围：中考、高考、大学英语四级与六级大纲', with ATTRIBUTION.md as the authoritative notice.
+     ev: frontend/src/i18n/zh.ts:86; ATTRIBUTION.md:3
+     q: sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：中考、高考、大学英语四级与六级大纲'
+     why: The MIT attribution obligation for a public deployment is already satisfied in-product, as long as curated additions keep the notice accurate.
+## GLOSSARY
+- stages zk/gk/cet4/cet6 = 初中 / 高中 / 四级 / 六级
+- zk = 中考 (初中), gk = 高考 (高中)
+- ky exam tag = 考研
+- stage_min filter (new_only) = 仅本阶段新增
+- kv.seed_version (admin page) = 词库版本
+- migrations_version (admin page) = 迁移版本
+- settings about section = 关于与数据来源
+- dictionary source credit = 词典数据：ECDICT（MIT 许可）
+- word-list scope credit = 词表范围：中考、高考、大学英语四级与六级大纲
+- exam_tags = 考试标签
+- word_forms = 词形
+- personal word bank (user_words) = 生词库
+- custom word = 自添生词
+- pending AI validation (is_valid_english IS NULL) = 待校验
+- could not validate (dead lookup) = 暂时无法校验
+- not recognised as English = 未识别为英文单词
+- screening page = 筛词
+- cet6_star = 六级星标词 (英语六级词汇（星标，1726）)
+- exchange codes = p 过去式 / d 过去分词 / i 现在分词 / 3 第三人称单数 / r 比较级 / t 最高级 / s 复数 / 0 原型 / 1 原型的变换形式
+## UNKNOWNS
+- Whether the production .env sets WD_ECDICT_DB_PATH (i.e. whether the no-AI ECDICT path is live today); the server .env is not in the repo.
+- The current kv.seed_version on the production database (expected a68127812a43… since the archive never changed, but not verifiable without DB access).
+- Actual wall-clock duration of the full 9,162-record import on the production hardware (TASKS budgets < 20 s; not measured here).
+- Whether github.com release downloads (fetch_ecdict.sh) are reachable from a mainland-China server without a mirror; ECDICT_URL/ECDICT_SHA256 are overridable but no mirror is documented.
+- Legal weight of the 'membership facts only' rationale for the unlicensed mahavivo lists for a public commercial-looking deployment; code cannot answer this.
+- Whether a seed record that violates a words CHECK constraint (e.g. collins outside 0–5 is unconstrained, but kind/stage flags are) could be produced by hand editing and crash startup — seed_row coerces most values, but this was not exercised.
+- Whether the 4 [网络]-only seed entries (celcius, honourary, microwavable, sobre) being public trusted words is intentional.
+## SUGGESTED VERIFICATIONS
+- Custom-file revert trap: on a scratch data dir run `wd migrate && wd import-seed --file custom.jsonl` (custom = repo seed with one translation edited), then start `wd serve` with WD_SEED_PATH left at the repo default and query the edited lemma — expect it reverted to the repo value and a second system_events('seed_imported') row.
+- Absence of any HTTP import/edit route: `grep -rn "import_seed\|seed_version\|/seed" backend/wd/routers frontend/src/api/endpoints.ts scripts/smoke.py` should show only the admin status read (admin_ops.py:200) and the AdminPage display.
+- No-delete semantics: import mini_seed.jsonl, then import a copy with one record removed (different sha) and assert `SELECT COUNT(*) FROM words` is still 60 and the removed lemma still has source='seed'.
+- Startup fragility: truncate a copy of vocab.jsonl.gz to half its bytes, point WD_SEED_PATH at it, run `wd serve` and confirm the process exits with an EOFError/BadGzipFile traceback rather than warn-and-continue.
+- Live import contention: start `wd serve`, run `wd import-seed --force` concurrently with a loop of POST /api/bank/add requests and check for 5xx/SQLITE_BUSY in the JSON logs on the target disk.
+- Stage-less additions: append `{"word":"serendipity","translation":["n. 机缘巧合"]}` to a seed copy, import, and confirm GET /api/vocab?stage=cet6 omits it while stage=all lists it (touches the vocab slice).
+- ECDICT path behaviour with AI off: with WD_AI_ENABLED=0 and WD_ECDICT_DB_PATH set to a stardict.db containing an ordinary row, add that word via POST /api/bank/add and confirm status 'added' with no lookup_word job; repeat without WD_ECDICT_DB_PATH and confirm a provisional row plus a queued lookup_word job that never runs.

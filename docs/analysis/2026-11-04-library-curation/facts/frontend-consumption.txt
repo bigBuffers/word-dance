@@ -1,0 +1,235 @@
+# SLICE frontend-consumption  (36 findings)
+## SUMMARY
+The web client is a React SPA that talks only to the JSON API over same-origin cookie fetches: it has no service worker, no IndexedDB, no data-fetching cache
+library, the HTTP client sends `cache: 'no-store'`, and the server stamps `Cache-Control: no-store` on every /api response, so every page mount re-reads the
+server and a server-side library change is visible to every client on its next request. The 词库 page browses the GLOBAL `words` table through exactly two
+endpoints, GET /api/vocab (offset-paged, 50 per page, max 100; filters stage/new_only/status/sort/letter/q) and GET /api/vocab/letters; an ASCII query is a
+prefix match on lemma plus word_forms, a CJK query is a substring match on the ECDICT translation, and browsing never enqueues jobs. "Stages" are four boolean
+columns on each global word (stage_zk/gk/cet4/cet6 plus stage_min) surfaced as the tabs 初中/高中/四级/六级 and by GET /api/stages, while the PER-USER setting is
+`stages` (目标阶段, non-empty subset, default cet4+cet6) plus `current_stage` (主攻阶段). The daily batch (每日推送 / 今日词汇) is composed per user from three sources: due
+reviews and 新词 come only from the user's own bank (user_words), and 推荐词 (daily_screen_count, default 15) are drawn from the global library: public, validated
+(is_valid_english=1), unmerged words carrying any of the user's stage flags that the user has no user_words row for, ordered by stage distance from the 主攻阶段,
+then frequency (NULL/0 frq last), then lemma. Consequently a word inserted server-side with is_public=1, is_valid_english=1, stage flags and a frq value becomes
+a 筛词/推荐词 candidate for every matching user immediately, whereas the 词库 list and /api/stages do not require is_valid_english at all. Batch items are fixed
+push_items rows with a frozen settings snapshot, but each item's content and image are read live at response time, so content generated later appears on the
+card without rebuilding the batch, and with AI disabled finalize_building flips batches to ready immediately so pushes still go out dictionary-only. For a word
+without content the UI always shows the dictionary data (translation lines / definition / forms) and a template SVG card captioned 系统生成卡片, plus a status line:
+「例句生成中…」 while queued, 「今日 AI 额度已用完，例句将在明天补齐」 when deferred (which is also what the client shows once AI is disabled, because it treats queued+eta_s null as a
+deferral), or 「今天的例句暂时生成不了，先用词典释义学习」 with a 「生成例句」 button for none/failed. AI is reached from this slice through five user-facing paths: the 生成例句 button (POST
+content/request, 503 ai_disabled when off), 立即整理 (POST bank/consolidate, 503 when off), 添加生词/导入 (an unknown string creates a private provisional global `words`
+row and enqueues lookup_word), marking 不熟悉 anywhere (bank.apply_action enqueues generate_content for a validated word lacking content), and 立即生成/再来一组/scheduled
+builds (build_batch enqueues content for batch words lacking it). None of these entry points is hidden by the `ai_enabled` server flag, which the frontend
+receives in ServerFlags but never reads; the user only sees the error toast 「AI 功能暂时关闭」 after clicking. Entry points that touch only per-user data (词库 row
+buttons and bulk mark, 筛词 verdicts, bank state actions, screening) never create global rows and could stay unchanged in an admin-curated mode; the add/import
+paths and the AI buttons would have to be restricted or re-copied. There is no admin endpoint in the 75-entry catalogue to create or edit a word, set stage
+flags, or upload content; the admin UI's only content tools are prewarm/regenerate/refetch-image (all AI/IO jobs), and the only `INSERT INTO words` sites in the
+backend are the seed importer and the user-add resolver.
+## FINDINGS
+1. [high] The 词库 (VocabPage) reads the global library through exactly two endpoints, GET /api/vocab and GET /api/vocab/letters, with query params stage/new_only/q/status/sort/letter/page/page_size (page_size fixed at 50 in the UI).
+     ev: frontend/src/pages/VocabPage.tsx:92-96; frontend/src/api/endpoints.ts:421-424; backend/wd/schemas.py:484-494
+     q: (page, signal) => endpoints.getVocab({ ...baseQuery, ...(q ? { q } : {}), ...(letter ? { letter } : {}), page, page_size: PAGE_SIZE }, signal),
+     why: These two read-only endpoints are the whole surface an admin-curated library must satisfy for browsing; nothing else feeds the 词库 page.
+2. [high] Search semantics: an ASCII query is a prefix match on `lemma` OR on any `word_forms.form` (so `abandoned` finds `abandon`); any non-ASCII query is a `translation LIKE '%q%'` substring match on the ECDICT translation; `q` is capped at 64 chars.
+     ev: backend/wd/routers/vocab.py:31; backend/wd/routers/vocab.py:41-45; backend/tests/integration/test_vocab.py:117-129
+     q: """ASCII → prefix on ``lemma`` plus ``word_forms.form``; anything else → ``translation LIKE``."""
+     why: Chinese search depends on the `translation` column being populated server-side; a curated word with no translation is unfindable by Chinese query.
+3. [high] Paging is plain OFFSET paging (page >= 1, page_size 1..100, default 50) with a separate COUNT(*) for `total`; sort orders are freq (frq NULL/0 last), alpha, and difficulty (COALESCE(difficulty, stage_min, 5)).
+     ev: backend/wd/routers/vocab.py:75-79; backend/wd/routers/vocab.py:114-117; backend/tests/integration/test_vocab.py:180-185
+     q: "freq": "(w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
+     why: A curated word without `frq` sorts to the very end of the default 词频 order, so admins must fill frq for new words to be discoverable.
+4. [high] The 词库 list and /api/stages do NOT filter on is_valid_english (only visibility + merged_into_word_id IS NULL + stage flag), whereas 筛词 (/api/screen/next) and the daily 推荐词 selection require is_valid_english = 1; a server-inserted public word with is_valid_english NULL therefore appears in 词库 tabs but never as a 推荐词.
+     ev: backend/wd/routers/vocab.py:50-53; backend/wd/services/screen.py:54; backend/wd/services/batches.py:269
+     q: where = [visible_word_sql(me, alias="w"), "w.merged_into_word_id IS NULL"]
+     why: An admin adding words server-side must set is_valid_english=1 (not just is_public=1) or the words will be browsable but never pushed or screened.
+5. [high] Browsing (vocab, letters, lookup preview) never creates rows or enqueues jobs; this is asserted by a docstring, API.md, and an integration test.
+     ev: backend/wd/routers/vocab.py:4; docs/API.md:169; backend/tests/integration/test_vocab.py:188
+     q: browsing never enqueues anything.
+     why: Pure browsing is already AI-free, so a read-only client mode needs no change to these endpoints.
+6. [high] Stages are a fixed enum of four (zk/gk/cet4/cet6 = 初中/高中/四级/六级) stored as boolean columns stage_zk/gk/cet4/cet6 plus stage_min on each GLOBAL word; /api/stages counts words per stage where is_public=1 and joins the caller's user_words for progress.
+     ev: backend/wd/schemas.py:50-51; backend/wd/routers/vocab.py:91; docs/DESIGN.md:186
+     q: STAGE_NAMES_ZH: dict[str, str] = {"zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
+     why: Adding a new stage/list is a schema change; adding words to an existing stage is just setting a flag column, which all clients pick up on next request.
+7. [high] The PER-USER stage setting is Settings.stages (目标阶段, non-empty subset) plus current_stage (主攻阶段); defaults are cet4+cet6 with current_stage index 3; both are editable on /welcome (role presets) and /settings (chip toggles).
+     ev: frontend/src/api/types.ts:36; backend/wd/services/bank.py:85-86; frontend/src/pages/WelcomePage.tsx:33-37
+     q: stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–4 index (§9.1)
+     why: Which curated words a user is offered as 推荐词 is decided by this per-user setting intersected with the global stage flags.
+8. [high] There is no service worker, PWA manifest, workbox, or offline store in the frontend: grep for serviceWorker|workbox|navigator.serviceWorker|sw.js|manifest.webmanifest|registerSW|vite-plugin-pwa over frontend/src, index.html, vite.config.* and package.json returned nothing; index.html links only a favicon; runtime deps are react, react-dom, react-router only.
+     ev: frontend/index.html:11-14; docs/FRONTEND.md:3
+     q: <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+     why: No client can serve stale library data from an offline cache; a server-side update reaches every client on its next navigation.
+9. [high] There is no client-side data cache or revalidation layer: no react-query/swr/redux/zustand/IndexedDB (grep over package.json and src hit nothing), `useApi` holds data only in component state and re-runs the fetcher on every mount/deps change, every fetch is sent with `cache: 'no-store'`, the server adds `Cache-Control: no-store` to all /api responses, and no ETag/If-None-Match/Last-Modified handling exists in frontend or backend (grep -i over both trees).
+     ev: frontend/src/api/client.ts:103; backend/wd/main.py:173-174; frontend/src/hooks/useApi.ts:2
+     q: const init: RequestInit = { method, headers, credentials: 'same-origin', cache: 'no-store' };
+     why: Every 词库/今日/详情 view is a fresh server read, so admin edits to words/word_contents/word_images are visible immediately without a client release or version bump.
+10. [high] localStorage is used only for per-viewer UI conveniences (wd.vocabTab, wd.bankTab, wd.screenStage) and the mirror of unacknowledged grade events (wd.pendingGrades); it never stores word, content or batch data.
+     ev: frontend/src/hooks/useLocalPref.ts:1; frontend/src/pages/StudyPage.tsx:53-54; docs/FRONTEND.md:69
+     q: // useLocalPref — per-viewer conveniences in localStorage (FRONTEND.md §3): never authoritative,
+     why: Confirms there is no client-held copy of the library that could diverge from the server.
+11. [high] Media are the only browser-cacheable library bytes: /media/images/{sha}.jpg|svg is content-addressed and served `private, max-age=31536000, immutable` (a replaced image is a new URL), while the on-the-fly template card /media/card/{id}.svg is served `private, max-age=86400`, so a card re-rendered from edited dictionary data can be stale in a browser for up to 24 h; SPA /assets are immutable and index.html is no-cache.
+     ev: backend/wd/routers/media.py:28-29; backend/wd/main.py:254-260
+     q: CARD_CACHE = "private, max-age=86400"
+     why: Admin edits to translation/phonetic will show in JSON immediately but the SVG card image may lag a day on devices that already loaded it.
+12. [high] WordDetail always carries an ImageMeta (never null): when no active photo/SVG exists the server returns the template card {kind:'card', provider:'card_svg', url:'/media/card/{id}.svg'}, and the UI captions it 「系统生成卡片」.
+     ev: backend/wd/services/words.py:446-450; backend/wd/services/words.py:468; frontend/src/components/study/WordImage.tsx:27
+     q: "url": f"/media/card/{int(word_id)}.svg",
+     why: A curated library without images degrades gracefully to text cards; no client change is needed for image-less words.
+13. [high] For a word without Claude content the detail page and study card always render the dictionary block (translation lines or translation_short, definition, forms) and then one of three notices: queued → 「例句生成中…」 + skeleton; deferred → 「今日 AI 额度已用完，例句将在明天补齐」; none/failed → 「今天的例句暂时生成不了，先用词典释义学习」 plus a 「生成例句」 button (hidden for 待校验 words); the card's headline meaning falls back from content.meaning_zh to word.translation to translation_short.
+     ev: frontend/src/pages/WordDetailPage.tsx:350; frontend/src/pages/WordDetailPage.tsx:486-498; frontend/src/components/study/StudyCard.tsx:141
+     q: const canRequestContent = (data.content_state === 'none' || data.content_state === 'failed') && !deferred && word.is_valid_english !== null;
+     why: In a no-AI deployment every word without pre-generated content will permanently show the 'temporarily cannot generate today' copy and an AI button, which needs re-wording/hiding.
+14. [high] With WD_AI_ENABLED=0 a word whose content_state is 'queued' is shown as budget-deferred: GET /api/words/{id}/content returns eta_s null only when AI is enabled, and the client treats {state:'queued', eta_s:null, deferred_until:null} as a deferral, switching to the misleading 「今日 AI 额度已用完，例句将在明天补齐」 copy (documented in API.md).
+     ev: backend/wd/routers/words.py:219-223; frontend/src/pages/WordDetailPage.tsx:90-93; backend/wd/services/bank.py:236-238
+     q: if deferred is None and bank.ai_enabled(conn, cfg):
+     why: Launching with AI off will leave users reading 'quota used up, back tomorrow' forever unless queued states are cleared or the copy is changed.
+15. [high] Clients poll, never subscribe: the detail page and the visible study card poll GET /api/words/{id}/content every 5 s (max 24) only while queued and not deferred; the 今日 page re-fetches GET /api/today every 30 s while counts.pending_content > 0; 待校验 custom words poll GET /api/words/{id} every 3 s (max 30).
+     ev: frontend/src/pages/WordDetailPage.tsx:32-33; frontend/src/pages/TodayPage.tsx:27; frontend/src/components/bank/AttentionBadge.tsx:4
+     q: const CONTENT_POLL_MAX = 24;
+     why: Server-side content written by an admin surfaces on an open card within one poll tick; there is no push channel to design around.
+16. [high] The 「生成例句」 button calls POST /api/words/{id}/content/request, which 409s for unvalidated words, 503s `ai_disabled` when the kill switch/pause is on, enforces a per-user daily cap, checks the Claude budget (409 budget_exhausted) and otherwise enqueues a generate_content job and sets content_state='queued'.
+     ev: backend/wd/routers/words.py:317-318; backend/wd/routers/words.py:324-325; backend/wd/routers/words.py:331
+     q: if word.get("is_valid_english") != 1:
+     why: This is a direct end-user-triggered Claude call and must be hidden or disabled for mainland users; WD_AI_ENABLED=0 already makes it fail with a toast.
+17. [high] The frontend never reads ServerFlags.ai_enabled (the only occurrence in src is the type declaration; pages read only server.email_configured, server.version and server.dev), so AI entry points (生成例句, 立即整理, 添加生词) stay visible when AI is disabled and users only see the error toast 「AI 功能暂时关闭」 after clicking.
+     ev: frontend/src/api/types.ts:29; frontend/src/api/client.ts:211-212; frontend/src/i18n/zh.ts:19
+     q: ai_enabled: boolean; images_enabled: boolean; dev: boolean;
+     why: An admin-curated/no-AI mode needs new frontend gating on this flag (or server-side removal of the buttons' copy), not just a config change.
+18. [high] Marking a word 不熟悉 from any surface (词库 row, bulk, detail, 筛词 verdict, bank re-add) runs bank.apply_action, which enqueues a generate_content Claude job whenever the word is validated and has content_state none/failed; the enqueue itself is not gated by ai_enabled, so with AI off the row flips to content_state='queued' and the job waits.
+     ev: backend/wd/services/bank.py:618; backend/wd/services/bank.py:471-477; frontend/src/pages/VocabPage.tsx:162
+     q: job_id = enqueue_content_if_needed(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now)
+     why: A seemingly non-AI click is an AI trigger unless the library is fully pre-generated; in curated mode the library must have content for every pushable word or the enqueue must be suppressed.
+19. [high] The daily batch is composed per user from three sources: reviews (PER-USER user_words state='learning' due before day end, capped by max_reviews), 新词 (PER-USER user_words state='new', needs_attention=0, word validated, ordered by times_added>=3, priority, added_at; capped by daily_new_count) and 推荐词 (GLOBAL words: is_public=1, is_valid_english=1, unmerged, any of the user's stage flags, no user_words row; ordered by stage distance from current_stage, then frq with NULL/0 last, then lemma; capped by daily_screen_count, default 15).
+     ev: backend/wd/services/batches.py:254-256; backend/wd/services/batches.py:261-263; backend/wd/services/batches.py:269-271
+     q: "WHERE uw.user_id = ? AND uw.state = 'learning' AND uw.due_at IS NOT NULL AND uw.due_at < ? "
+     why: Only the 推荐词 slot reads the shared library directly; a server-side add with the right flags and frq changes what every matching user is offered the next day, while 新词 are always the user's own picks.
+20. [high] Stage distance ordering: 0 for the 主攻阶段, then higher stages (2*(s-cur)-1), then lower stages (2*(cur-s)); the 筛词 'auto' scope is the user's stages with current_stage as the anchor, and an explicit stage param screens only that stage.
+     ev: backend/wd/services/screen.py:35; backend/wd/services/screen.py:42-48
+     q: "CASE WHEN w.stage_min = :cur THEN 0 WHEN w.stage_min > :cur THEN 2 * (w.stage_min - :cur) - 1 ELSE 2 * (:cur - w.stage_min) END"
+     why: Explains which curated words surface first: lowest-stage index equal to the user's main stage and highest frequency win.
+21. [high] The global library never pushes 新词 directly: with an empty bank the batch contains only 推荐词 (cold start puts them first), and the 今日 page probes GET /api/bank?state=active&page_size=1 to show 「生词库还是空的——去词库里挑几个不熟悉的词，或者直接筛词」.
+     ev: backend/wd/services/batches.py:293-294; frontend/src/pages/TodayPage.tsx:54-55; frontend/src/i18n/zh.ts:34
+     q: ordered = screens + core if cold_start else core + screens
+     why: Even with a perfectly curated library, learning content enters a user's queue only via their own 不熟悉 marks; the admin controls the candidate pool, not the bank.
+22. [high] build_batch (scheduled push, 立即生成, admin push) and append paths (再来一组, 今天就学, in-batch 不熟悉) enqueue generate_content for every batch word lacking content, so a push over an un-prewarmed library is itself an AI trigger; conversely enqueue_content_if_needed returns None when content already exists, so a fully pre-generated library produces no Claude calls from pushes.
+     ev: backend/wd/services/batches.py:341; backend/wd/services/batches.py:352; backend/wd/services/batches.py:639
+     q: _enqueue_content_for(conn, selection.word_ids(), now_s)
+     why: Admin-side prewarming of the whole pushable set is the precondition for AI-free pushes; otherwise every scheduled build enqueues Claude work on behalf of end users.
+23. [high] Batch items are frozen rows (push_items with a settings_json snapshot taken at build time), but each StudyItem's content, content_state and image are read live from the global tables at response time, so content/images written server-side after the build appear on the card without rebuilding.
+     ev: backend/wd/services/batches.py:314; backend/wd/services/screen.py:110-113; backend/wd/services/words.py:512-515
+     q: settings_snapshot = {k: s.get(k) for k in ("timezone", "push_time", "daily_new_count", "daily_screen_count", "max_reviews", "stages", "current_stage")}
+     why: An admin can backfill content for today's words and users see it on their next poll; only the word selection itself is fixed per day.
+24. [high] With AI disabled or paused, finalize_building flips a batch to 'ready' immediately (`or not ai_on`), so scheduled pushes still publish with dictionary-only cards rather than waiting for content.
+     ev: backend/wd/services/batches.py:384; backend/wd/services/batches.py:388
+     q: ai_on = bank.ai_enabled(conn, cfg) and bank.ai_paused_until(conn, now_s) is None
+     why: The push pipeline already has an explicit no-AI path; nothing blocks 每日推送 when Claude is off.
+25. [medium] Items whose word has been merged server-side (merged_into_word_id set) are treated as stale and hidden from the batch; an ungraded 推荐词 whose word gained a user_words row is also hidden.
+     ev: backend/wd/services/batches.py:811-812; backend/wd/services/batches.py:815
+     q: if word is None or word.get("merged_into_word_id") is not None:
+     why: Admin merges/dedups of library rows silently drop cards from already-built batches, which is safe but changes counts users see.
+26. [high] The 筛词 flow needs no AI content: ScreenPage reads GET /api/stages, ScreenRunPage fetches GET /api/screen/next?stage=X&count=30 (GLOBAL unseen words for the user), and ScreenCard shows only headword, phonetic and translation_short (dictionary data).
+     ev: frontend/src/pages/ScreenPage.tsx:29; frontend/src/pages/ScreenRunPage.tsx:30; frontend/src/components/study/ScreenCard.tsx:93-94
+     q: const { data, error, loading, reload } = useApi((signal) => getStages(signal), []);
+     why: Screening is a read-only consumer of the curated library and works unchanged without Claude.
+27. [high] 添加生词 (POST /api/bank/add, /add-word, /import from AddWordsPage and the 导入数据 setting) can CREATE GLOBAL `words` rows: an unknown string becomes a private provisional row (is_public=0, is_valid_english NULL, created_by_user_id=me) and enqueues a Claude lookup_word job; an ECDICT hit (when WD_ECDICT_DB_PATH is set) inserts a public validated row without AI unless it is a [网络]-only entry.
+     ev: backend/wd/services/words.py:696-697; backend/wd/services/words.py:707; backend/wd/services/words.py:674-677
+     q: "is_valid_english": None,
+     why: This is the one end-user path that writes to the shared library and depends on Claude validation; in an admin-curated mode it must be removed or limited to seed/ECDICT matches.
+28. [medium] When AI is disabled the Claude worker's gate flags queued lookups as 「暂时无法校验」 and idles, so users who added unknown words get the 修改 / 重试 / 保留 / 删除 buttons (保留 → 仅收藏, never pushed) instead of validation.
+     ev: backend/wd/jobs/worker.py:255-258; frontend/src/i18n/zh.ts:65
+     q: flagged = lookup.flag_queued_lookups(conn, now=self.ctx.now())
+     why: Documents the degraded UX for custom words without Claude; the user flow does not break but every custom word is stuck as collect-only.
+29. [high] GET /api/lookup (the live preview on 添加生词) is read-only: it only SELECTs against words/word_forms/ECDICT and never inserts rows or enqueues jobs.
+     ev: docs/API.md:172; backend/wd/routers/words.py:70; frontend/src/pages/AddWordsPage.tsx:154
+     q: No rows are created.
+     why: The preview step could remain in a curated mode as a safe search box even if the submit step is restricted.
+30. [high] 立即整理 (BankPage and SuggestionsPage) calls POST /api/bank/consolidate, which returns 503 ai_disabled when AI is off and otherwise enqueues a PER-USER consolidate_bank Claude job whose results land in the per-user 整理建议 inbox; the inbox copy promises a nightly AI run.
+     ev: backend/wd/routers/bank.py:150-151; frontend/src/pages/BankPage.tsx:286; frontend/src/i18n/zh.ts:68
+     q: raise ApiError("ai_disabled")
+     why: Another end-user-triggered Claude path; its button and the nightly-run copy need removal/re-wording in a no-AI deployment.
+31. [medium] 换一张 / 不合适 on a word image call POST /api/words/{id}/image/refresh or report {target:'image'}, which enqueue fetch_image through the photo providers (IO worker, gated by WD_IMAGES_ENABLED); API.md states a user refresh has no Claude-SVG fallback, and the claude_svg provider is reachable only via the admin refetch-image endpoint.
+     ev: backend/wd/routers/words.py:298; docs/API.md:184; backend/wd/images/handler.py:127
+     q: job_id = images.request_refresh(conn, wid, priority=FETCH_IMAGE_PRIORITY_USER, now=now)
+     why: Image refresh is network-bound but not Claude-bound, so it may remain; the images slice should confirm no SVG fallback on the initial fetch path.
+32. [high] Per-user-only entry points never create global rows: POST /api/words/{id}/mark, batch-mark, screen verdicts and bank PATCH all resolve an existing visible word (bank.visible_word) and write only user_words/review_logs/push_items; they would remain valid in an admin-curated mode.
+     ev: backend/wd/routers/words.py:242; backend/wd/routers/words.py:128; frontend/src/components/list/WordRow.tsx:54-55
+     q: word = bank.visible_word(conn, me, word_id)
+     why: Separates the UI actions that can stay (marking/screening) from those that must go (adding/importing/AI buttons).
+33. [high] UI navigation paths into 添加生词 (/bank/add) that would need removal or restriction in curated mode: the 生词库 FAB, the 词库 「没有找到…想把它加入生词库？」 empty state, the detail-page 404 empty state, and the 待处理 row's 修改 button (all via routePaths.bankAdd / bankAddPrefill), plus 导入数据 in settings (POST /api/bank/import).
+     ev: frontend/src/pages/BankPage.tsx:390; frontend/src/pages/VocabPage.tsx:278; frontend/src/pages/WordDetailPage.tsx:332
+     q: <Link className="btn btn--primary btn--lg bank__fab" to={routePaths.bankAdd}>
+     why: Lists every place a mainland user could reach the Claude-backed add path, so the product change is bounded.
+34. [high] There is no API endpoint, admin or otherwise, to create or edit a global word (lemma, translation, stage flags, frq) or to upload/edit content: the only admin word routes are prewarm, regenerate and refetch-image (grep of @router.post/put/patch/delete for /api/admin/(words|vocab|content|seed|library) in backend/wd/routers), and the only `INSERT INTO words` sites are the seed importer and the user-add resolver.
+     ev: backend/wd/routers/admin_ops.py:354; backend/wd/routers/admin_ops.py:376; backend/wd/seed.py:73
+     q: @router.post("/api/admin/content/prewarm", status_code=202, response_model=schemas.PrewarmResponse)
+     why: Admin curation today means re-seeding or direct DB/CLI edits plus AI prewarm; a true admin-curated workflow (hand-written content, manual word adds) has no API or UI yet.
+35. [high] The admin UI's existing 'curate content server-side' lever is prewarm: POST /api/admin/content/prewarm {stage: Stage|'all', limit 1..2000, max_budget_usd} (label 预生成 on the AI tab), which pre-generates Claude content per stage so that later user pushes find content already present.
+     ev: frontend/src/api/endpoints.ts:327-338; frontend/src/i18n/zh.ts:89
+     q: export type PrewarmStage = Stage | 'all';
+     why: This is the mechanism by which an admin (outside the restricted region) can fill the shared library so end-user requests never need a live call.
+36. [high] Word visibility is the same rule everywhere (is_public=1 OR created by me OR I hold a user_words row; admins see all), but /api/stages totals count only is_public=1 rows, so users' private provisional words never appear in stage counts or other users' 词库, and an admin browsing 词库 sees private rows too.
+     ev: backend/wd/deps.py:214-215; backend/wd/deps.py:208-209; backend/tests/integration/test_vocab.py:205-210
+     q: f"({alias}.is_public = 1 OR {alias}.created_by_user_id = {p} "
+     why: The shared library users see is exactly the is_public=1 set, which is what an admin would curate; user-created private rows do not leak into it until validated.
+## GLOSSARY
+- shared vocabulary library (global words) = 词库 (nav: 词库)
+- personal word bank (user_words) = 生词库 (never 单词本)
+- stages (zk/gk/cet4/cet6) = 阶段：初中 / 高中 / 四级 / 六级 (full: 初中（中考）/ 高中（高考）/ 大学英语四级 / 大学英语六级)
+- target stages setting (Settings.stages) = 目标阶段
+- main stage setting (current_stage) = 主攻阶段
+- new-only stage filter (new_only / stage_min) = 仅本阶段新增 (cet6: 仅六级新增（不含四级）)
+- CET-6 star word (cet6_star) = 六级星标词
+- daily push (push_enabled / scheduled batch) = 每日推送
+- today's push / batch = 今日词汇 (nav: 今日)
+- push time = 推送时间
+- daily new count = 每日新词
+- daily screen count = 每日推荐词
+- max reviews = 每日最多复习
+- deferred reviews = 顺延 N 个复习
+- build now (POST /api/today/build) = 立即生成
+- item kinds review / new / screen / extra = 复习 / 新词 / 推荐词 / 加练
+- screening card in a batch (kind=screen) = 推荐词
+- screening page (/screen) = 筛词
+- more new / more screen (POST /api/today/more) = 再来一组新词 / 再筛一组推荐词
+- go to vocab / go to screen (empty-state actions) = 去词库 / 去筛词
+- mark unfamiliar / known (mark actions) = 不熟悉 / 认识
+- in bank / added to bank = 已在生词库 / 已加入生词库
+- bank tabs new / learning / mastered / known / removed / attention = 待学 / 学习中 / 已掌握 / 已认识 / 已移除 / 待处理
+- add words (/bank/add) = 添加生词
+- study today (study_today) = 今天就学
+- import data (POST /api/bank/import) = 导入数据
+- consolidation (consolidate_bank) = 整理 (DESIGN heading: 整合与更新)
+- suggestion inbox (bank_suggestions) = 整理建议
+- consolidate now (POST /api/bank/consolidate) = 立即整理
+- auto-applied suggestions section = 已自动整理
+- pending AI validation (is_valid_english IS NULL) = 待校验 / 待 AI 校验
+- collect-only (is_valid_english=0 kept) = 仅收藏
+- custom word (origin=custom) = 自添生词
+- dictionary gloss (ECDICT translation) = 词典释义
+- examples / collocations / mnemonic / confusables (Claude content) = 例句 / 搭配 / 记忆 / 易混
+- generate examples (POST content/request) = 生成例句
+- content pending / failed / deferred copy = 例句生成中… / 今天的例句暂时生成不了，先用词典释义学习 / 今日 AI 额度已用完，例句将在明天补齐
+- AI disabled error = AI 功能暂时关闭
+- image (word_images) = 配图
+- template card (card_svg) = 系统生成卡片
+- Claude SVG image = AI 生成示意图
+- change image / flag image = 换一张 / 不合适
+- admin prewarm (POST /api/admin/content/prewarm) = 预生成
+- admin regenerate / refetch image = 重新生成 / 换图
+- seed version (AdminHealth.seed_version) = 词库版本
+- sort by frequency / alpha / difficulty = 词频 / 字母 / 难度
+- letter index = 字母索引
+- search placeholder = 搜索英文或中文
+## UNKNOWNS
+- What happens to generate_content jobs already queued when WD_AI_ENABLED=0: the ClaudeWorker gate only flags queued lookups and sleeps (worker.py 254-258); whether content jobs expire or leave words at content_state='queued' indefinitely (and thus permanently in the misleading 明天补齐 state) was not read (jobs slice).
+- Whether images.image_meta (WP6) itself returns the card for image_state='none' and whether the initial fetch_image path (not user refresh) can fall back to a Claude SVG call; images/* is another slice and only the handler's images_enabled gate and the API.md refresh note were checked.
+- Whether /media/card/{id}.svg re-renders when dictionary fields change (server LRU cache in render_card plus the 24 h private browser cache); media/render_card was not read.
+- The scheduler's 03:30 prefetch (scheduler.py 252, 289) also enqueues content for preview_selection when AI is enabled; its exact gating and WD_PREBUILD_HOURS were not read (jobs slice).
+- No frontend unit test for VocabPage/WordDetailPage was read (only the endpoints.test.ts coverage check is referenced), so UI behaviour claims rest on the component source rather than tests.
+- Whether an admin can set stage flags / frq for a hand-added word through the CLI (cli.py / seed.py are another slice); within this slice no API path exists.
+## SUGGESTED VERIFICATIONS
+- Degraded-copy check: run with WD_AI_ENABLED=0, mark a seed word that has content_state='none' as 不熟悉 in 词库, then GET /api/words/{id}/content; expect {state:'queued', eta_s:null, deferred_until:null} and confirm the detail page switches to 「今日 AI 额度已用完，例句将在明天补齐」 after the first 5-s poll (WordDetailPage deferredFrom).
+- Validation asymmetry: insert a row with is_public=1, is_valid_english=NULL, stage_cet4=1 and verify it is returned by GET /api/vocab?stage=cet4 and counted by GET /api/stages but absent from GET /api/screen/next?stage=cet4 and from batches.select_words screens (vocab.py 50-56 vs screen.py 54 / batches.py 269).
+- Frequency ordering: insert a public validated stage word with frq NULL and confirm it sorts last in GET /api/vocab (default sort) and last among 推荐词 candidates with the same stage distance (batches.py 61).
+- Live-content check: build a batch for a user, then set words.active_content_id/content_state='ready' for one of its words directly in SQLite, and confirm GET /api/today returns the item with content populated without rebuilding (screen.study_item_dict reads active_content per request).
+- Absence of admin word-write routes: grep -rn '"/api/admin' backend/wd/routers | grep -iv 'users\|invites\|jobs\|ai\|reports\|events\|config\|push\|overview\|health' and confirm only prewarm/regenerate/refetch-image remain; also grep -rn 'INSERT INTO words' backend/wd to confirm only seed.py and services/words.py.
+- No offline layer in the built bundle: run `cd frontend && npm run build` and grep -r 'serviceWorker\|indexedDB\|workbox' dist/assets to confirm no runtime cache code ships.
+- Card staleness: edit a word's translation, request /media/card/{id}.svg before and after, and check whether the server LRU in render_card and the 'private, max-age=86400' header serve the old card.

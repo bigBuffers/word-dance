@@ -1,0 +1,198 @@
+# SLICE schema-model  (34 findings)
+## SUMMARY
+The library lives in one SQLite file whose complete baseline schema is backend/wd/migrations/0001_init.sql (byte-identical to docs/SCHEMA.sql, enforced by a
+unit test); only two later files exist, 0008 (additive indexes) and 0009 (a data-only repair of words.phonetic), with numbers 0002-0007 deliberately skipped.
+The global, shared library is exactly four tables: words (one row per normalised lemma, UNIQUE), word_forms (inflection to lemma), word_contents (versioned AI
+example content, one row per (word_id, version), at most one status='active' per word via a partial unique index) and word_images (one active image per word,
+binaries on disk under DATA_DIR/images). Every learner-specific thing is per-user: user_words (bank state, needs_attention, attention_msg, suggested_word_id,
+SRS fields), review_logs, daily_stats, push_batches/push_items, consolidation_runs, bank_suggestions, user_settings; jobs, ai_calls, kv, system_events,
+provider_* and content_reports are global bookkeeping. A words row carries provenance in source (CHECK 'seed'|'ecdict'|'claude'|'user'), sources, ecdict_id and
+created_by_user_id, trust in is_public/is_valid_english/safe_for_sharing, lifecycle in
+content_state/image_state/active_content_id/active_image_id/merged_into_word_id, and level data in stage_zk/gk/cet4/cet6, stage_min, cet6_star, difficulty, frq,
+bnc, collins, oxford; there is no soft-delete, hidden or archived column and no triggers, so updated_at is set only by application UPDATEs. Visibility is not
+enforced by the schema: is_public plus created_by_user_id plus the holder's own user_words row form a documented predicate that deps.visible_word_sql() emits
+and every reading route is supposed to include; a user-created provisional word (source='user', is_public=0) is therefore visible to its creator and to any
+other user who adds the same string (they share the single lemma row) but not to third parties, and admins see everything. Words become public only through the
+seed upsert, an ECDICT hit, or a Claude lookup/merge verdict; Claude paths are the only ones that set is_public back to 0. word_contents rows are inserted in
+exactly one place (ai/content.py store_content) and word_images in one place (images/store.py); there is no admin, import or hand-edit write path to either, no
+'admin'/'upload' provenance value in any CHECK list, and no table or column for approval, curation, publication or content packs (grep-proven). Deleting a words
+row cascades to word_forms, word_contents, word_images, user_words, push_items and content_reports, sets NULL on
+merged_into_word_id/suggested_word_id/target_word_id, and leaves review_logs.word_id, jobs payloads and the logical pointers (active_content_id,
+active_image_id, ai_call_id, content_reports.image_id/content_id) dangling; the only DELETE FROM words in the codebase is the orphaned-private-word cleanup
+during account deletion. Migrations are applied by db.run_migrations from four entry points (wd migrate, wd serve startup, wd worker-once, wd claude-check),
+each pending file inside one BEGIN IMMEDIATE with FK enforcement off and a foreign_key_check before the runner's own bookkeeping insert; a pre-migrate snapshot
+backups/pre-migrate-<from>-to-<to>.db.gz is written first except on a fresh database, its failure aborts the migration, and such snapshots are never pruned. The
+seed import (ON CONFLICT(lemma) DO UPDATE of dictionary columns, forcing source='seed', is_public=1, trust flags 1 and merged_into_word_id=NULL, never touching
+content pointers or per-user rows, auto-run at startup when kv.seed_version differs from the file's sha256) is the one existing admin-side channel that updates
+shared dictionary data for all clients without any end-user AI call; AI gating in this slice is config WD_AI_ENABLED combined with the runtime kv keys
+claude.enabled, claude.paused_until and claude.available documented in the kv header.
+## FINDINGS
+1. [high] docs/SCHEMA.sql is byte-identical to backend/wd/migrations/0001_init.sql, and a unit test enforces this; 0001 is the complete baseline schema (25 tables + view v_bank).
+     ev: docs/SCHEMA.sql:2; backend/tests/unit/test_db.py:362-366; backend/tests/unit/test_db.py:50-51
+     q: -- word-Dance — SQLite schema  (== backend/wd/migrations/0001_init.sql)
+     why: Anyone designing an admin-curation schema change can treat 0001 as the single source of truth and must keep docs/SCHEMA.sql in sync or the test fails.
+2. [high] Only three migration files ship (0001_init, 0008_fk_child_indexes, 0009_strip_phonetic_delimiters); 0002-0007 were pre-allocated to work packages and never used, and the runner tolerates gaps because pending = every NNNN file whose version is absent from schema_migrations.
+     ev: backend/wd/migrations/0008_fk_child_indexes.sql:8-9; backend/wd/db.py:190-192; docs/TASKS.md:5
+     q: Numbers 0002–0007 were pre-allocated to -- the work packages and left unused (TASKS.md).
+     why: A new curation table or column would be a new 0010_*.sql file; nothing else about numbering constrains it.
+3. [high] The runner applies each pending file inside one explicit BEGIN IMMEDIATE, turns PRAGMA foreign_keys OFF before the BEGIN, runs PRAGMA foreign_key_check, inserts the schema_migrations row itself, then COMMITs; a file that COMMITs itself or leaves FK violations is rolled back with MigrationError.
+     ev: backend/wd/db.py:227-240; backend/wd/db.py:235-239; backend/wd/migrations/0001_init.sql:33-34
+     q: conn.execute("PRAGMA foreign_keys=OFF")         try:             begin(conn, immediate=True)             try:                 conn.executescript(sql)
+     why: Extending any CHECK list (e.g. adding an 'admin' source or an import job type) needs a table-rebuild migration, which this runner explicitly supports without cascade-deleting children (test_db.py:185-212).
+4. [high] A pre-migrate snapshot backups/pre-migrate-<from>-to-<to>.db.gz is taken by the pre_hook before the first pending file; it is skipped on a fresh database (from_version 0), its failure aborts the migration, and such snapshots are never pruned by retention.
+     ev: backend/wd/backup.py:290-292; backend/wd/backup.py:300-303; backend/wd/backup.py:221
+     q: if from_version <= 0:         log.info("fresh database: no pre-migrate snapshot (migrating 0 → %d)", to_version)         return
+     why: A bulk admin update shipped as a data migration (like 0009) automatically gets a restorable snapshot of the whole library first.
+5. [high] Migrations run automatically from four entry points, not only `wd migrate`: main.startup (every `wd serve`), `wd worker-once`, `wd claude-check` and `wd migrate`; install.sh stops the unit before migrating and warns that with --no-restart only purely additive migrations are safe.
+     ev: backend/wd/main.py:478; backend/wd/jobs/worker.py:294; backend/wd/ai/probe.py:193
+     q: result = db.run_migrations(conn, pre_hook=db.backup_pre_hook())
+     why: A schema change for admin curation is applied the moment the new code starts; a non-additive change needs the stop-first path of install.sh.
+6. [high] The words table carries these provenance/trust columns: source (CHECK 'seed','ecdict','claude','user'), sources (free-text seed provenance), ecdict_id, created_by_user_id (FK users ON DELETE SET NULL), is_public (default 1), is_valid_english (NULL = unchecked), safe_for_sharing (NULL = unchecked), merged_into_word_id (self-FK SET NULL), plus created_at/updated_at.
+     ev: backend/wd/migrations/0001_init.sql:188-190; backend/wd/migrations/0001_init.sql:193-194; backend/wd/migrations/0001_init.sql:196-197
+     q: sources             TEXT,                             -- provenance, e.g. 'cet4 cet46 ecdict gk zk'   ecdict_id           INTEGER,                          -- s
+     why: These are the only fields an admin-curation layer could key on to mark 'curated' rows; note there is no value for admin-authored provenance in the CHECK list.
+7. [high] The words table carries these lifecycle/status columns: content_state and image_state (CHECK 'none','queued','ready','failed'), active_content_id and active_image_id (logical pointers, no FK constraint), indexed by ix_words_content.
+     ev: backend/wd/migrations/0001_init.sql:198-201; backend/wd/migrations/0001_init.sql:200-201
+     q: active_content_id   INTEGER,                          -- logical FK → word_contents.id (no constraint: avoids a cycle)   active_image_id     INTEGER,           
+     why: content_state='queued' is what clients poll on; a server-side-only library must leave every served word at 'ready' or 'none' so no client ever waits on a job that cannot run.
+8. [high] Level/frequency fields on words are stage_zk/stage_gk/stage_cet4/stage_cet6 (0/1, cumulative), stage_min (1-4, NULL = outside the four lists), cet6_star, difficulty (1-5, NULL until Claude content/consolidation fills it), exam_tags, collins, oxford, bnc, frq; indexes ix_words_frq and ix_words_stage_min(stage_min, frq).
+     ev: backend/wd/migrations/0001_init.sql:178-179; backend/wd/migrations/0001_init.sql:185; backend/wd/migrations/0001_init.sql:195
+     q: bnc                 INTEGER,                          -- BNC rank; 0/NULL = unknown   frq                 INTEGER,                          -- COCA-ish rank; 0/
+     why: Stage/frequency drive screening and batch selection, and all of it is seed-sourced global data that an admin can refresh via the seed file without AI.
+9. [high] words.lemma is globally UNIQUE (ux_words_lemma) and normalised, so there is exactly one row per headword shared by every user; two users who add the same unknown string share one provisional row.
+     ev: backend/wd/migrations/0001_init.sql:168; backend/wd/migrations/0001_init.sql:205; docs/DESIGN.md:296
+     q: lemma               TEXT NOT NULL,                    -- normalised key: NFKC, lower-case, single spaces, ASCII ' - .
+     why: A curated library can be keyed by lemma for bulk upserts (the seed importer already does ON CONFLICT(lemma)), and a user-created row is a global row, not a private copy.
+10. [high] There is no soft-delete, hidden, archived or deleted_at column on words (or any library table); the only hide mechanisms are is_public=0 and merged_into_word_id. Searched: grep -n -i 'approv|curat|moderat|publication|content_pack|word_pack|review_queue|pending_review|hidden|deleted_at|is_deleted|archived|visib' over backend/wd/migrations/*.sql returned only comment lines (191, 404, 508, 569).
+     ev: backend/wd/migrations/0001_init.sql:191; backend/wd/migrations/0001_init.sql:404
+     q: is_public           INTEGER NOT NULL DEFAULT 1 CHECK (is_public IN (0,1)),   -- 0 = unvalidated/unsafe user word. VISIBILITY RULE (API.md §1, DESIGN §5.2)
+     why: An admin cannot 'unpublish' a seed word today without physically deleting it (cascading into every user's bank) or repurposing is_public.
+11. [high] The schema defines no triggers; words.updated_at (and every other updated_at) is maintained only by explicit application UPDATE statements. Searched: grep -n TRIGGER over backend/wd/migrations/*.sql and docs/SCHEMA.sql returned nothing.
+     ev: backend/wd/ai/content.py:223; backend/wd/ai/lookup.py:363; backend/wd/seed.py:77
+     q: "UPDATE words SET active_content_id = ?, content_state = 'ready', difficulty = ?, updated_at = ? WHERE id = ?",
+     why: A direct SQL bulk edit by an admin would not bump updated_at unless it sets the column itself; clients cannot rely on it as a change-detection signal.
+12. [high] word_contents is keyed by its own id, with UNIQUE(word_id, version) and a partial UNIQUE on word_id WHERE status='active'; columns prompt_version ('content-v1'), model (NOT NULL), content_json, status ('active','superseded','rejected'), cost_usd, ai_call_id (logical FK), created_at (there is no column named generated_at). Many rows per word are allowed; exactly one may be active.
+     ev: backend/wd/migrations/0001_init.sql:233-237; backend/wd/migrations/0001_init.sql:242-243; backend/wd/ai/content.py:37
+     q: version        INTEGER NOT NULL,                      -- 1, 2, … per word   prompt_version TEXT    NOT NULL,                      -- 'content-v1'   model       
+     why: The versioning model already supports replacing content server-side (insert new version, supersede old) without touching per-user rows.
+13. [high] The version number is computed in Python as MAX(version)+1, the previous active row is set to 'superseded', the new row inserted as 'active' and words.active_content_id/content_state='ready' repointed in one transaction; this is the ONLY INSERT INTO word_contents and the ONLY UPDATE word_contents in the backend (grep -rn 'INSERT INTO word_contents' and 'UPDATE word_contents' backend/wd each return one hit).
+     ev: backend/wd/ai/content.py:212-214; backend/wd/ai/content.py:214-216; backend/wd/ai/content.py:216-217
+     q: version = int(conn.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM word_contents WHERE word_id = ?", (wid,)).fetchone()[0])
+     why: There is no admin, import or hand-edit write path to example content: every content row originates from a Claude generate_content job, so an offline 'content pack' loader would be new code.
+14. [high] A generate_content job skips a word that is already 'ready' under the current PROMPT_VERSION unless the payload has force; bumping PROMPT_VERSION or enqueuing with a ':r<n>' dedupe key therefore regenerates content for the whole library.
+     ev: backend/wd/ai/content.py:364; backend/wd/migrations/0001_init.sql:464-465
+     q: if not job.payload.get("force") and word.get("content_state") == "ready" and _active_prompt_version(conn, word) == PROMPT_VERSION:
+     why: This is how the shared content is 'updated' today: an admin-side (or prewarm) AI regeneration, never a client-side edit.
+15. [high] word_images is keyed by id with FK word_id ON DELETE CASCADE, a partial UNIQUE active row per word, provider CHECK ('wikimedia','openverse','pixabay','pexels','claude_svg'), mime CHECK ('image/jpeg','image/svg+xml'), file_path relative to DATA_DIR/images and sha256 of the stored file; the single INSERT site is images/store.py, 'rejected' is written only by images/service.py, and DELETE FROM word_images exists only in images/handler.py.
+     ev: backend/wd/migrations/0001_init.sql:248; backend/wd/migrations/0001_init.sql:262-265; backend/wd/migrations/0001_init.sql:272
+     q: provider         TEXT NOT NULL CHECK (provider IN ('wikimedia','openverse','pixabay','pexels','claude_svg')),
+     why: Image binaries live outside the DB, so a server-side curated library must ship DATA_DIR/images alongside the SQLite file, and there is no 'upload'/'manual' provider value for admin-supplied pictures.
+16. [high] Tables with a real FK to words and their delete actions: word_forms CASCADE, word_contents CASCADE, word_images CASCADE, user_words CASCADE, push_items CASCADE, content_reports CASCADE; ON DELETE SET NULL for words.merged_into_word_id, user_words.suggested_word_id and bank_suggestions.target_word_id. (grep -n 'REFERENCES words' backend/wd/migrations/*.sql lists exactly these nine.)
+     ev: backend/wd/migrations/0001_init.sql:281; backend/wd/migrations/0001_init.sql:409; backend/wd/migrations/0001_init.sql:449
+     q: word_id           INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+     why: A bulk DELETE of words would silently erase every user's bank rows, push items and reports for those words; curation must prefer UPDATE/merge over delete.
+17. [high] Several references to words are NOT foreign keys and would dangle after a word delete: review_logs.word_id (NOT NULL, no REFERENCES), jobs.payload_json/dedupe_key word ids, words.active_content_id/active_image_id, word_contents.ai_call_id, content_reports.image_id/content_id; account deletion cancels jobs by dedupe key manually before deleting orphaned words.
+     ev: backend/wd/migrations/0001_init.sql:327-331; backend/wd/migrations/0001_init.sql:559-560; backend/wd/routers/account.py:106-110
+     q: user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,   word_id         INTEGER NOT NULL,   user_word_id    INTEGER,
+     why: Any admin bulk delete/merge tool must replicate this manual cleanup or history/stats queries will reference missing word ids.
+18. [high] Across the backend there is exactly one DELETE FROM words (orphaned private words during account deletion) and exactly two INSERT INTO words sites (seed upsert and services/words.resolve for ECDICT/provisional rows); no admin create/delete-word SQL exists. (grep -rn 'DELETE FROM words' / 'INSERT INTO words' backend/wd --include='*.py'.)
+     ev: backend/wd/routers/account.py:99-110; backend/wd/routers/account.py:110; backend/wd/services/words.py:579-584
+     q: private_words = [int(r[0]) for r in conn.execute("SELECT id FROM words WHERE created_by_user_id = ? AND is_public = 0", (user_id,))]
+     why: Adding words to the shared library today happens either via the seed file or via an end user's custom add (which then needs Claude); an admin add path would be new.
+19. [high] Visibility is application-level, not schema-level: the words row carries is_public and created_by_user_id, the documented predicate is 'is_public = 1 OR created_by_user_id = :me OR EXISTS(user_words for me)', deps.visible_word_sql() emits it (admins get '1=1', anonymous callers 'is_public = 1'), and the v_bank view deliberately has no is_public filter.
+     ev: backend/wd/migrations/0001_init.sql:191-192; backend/wd/deps.py:208-215; backend/wd/migrations/0001_init.sql:569-570
+     q: word-reading route: is_public=1 OR created_by_user_id=:me OR EXISTS(user_words uw WHERE uw.user_id=:me AND uw.word_id=words.id); admins see all
+     why: Nothing in SQLite stops a new read path (e.g. an export or a new client endpoint) from leaking private user words; every such path must include visible_word_sql().
+20. [high] A user-created provisional word is a GLOBAL row (source='user', is_public=0, is_valid_english NULL, created_by_user_id=me) visible to its creator and to every other user holding a user_words row for it, invisible to third parties until is_public flips to 1.
+     ev: backend/wd/services/words.py:672; docs/DESIGN.md:296; docs/API.md:8
+     q: cols.update(is_public=0, is_valid_english=None, safe_for_sharing=None, created_by_user_id=user_id)
+     why: If end-user custom adds remain enabled without AI, provisional rows would accumulate at is_public=0 forever and still be shared between co-holders; a curated-only library would disable that path.
+21. [high] The only writers that set is_public=1 on an existing row are the seed upsert (source='seed') and ECDICT resolution; Claude code paths (lookup, content valid=false, consolidate invalid_word) are the only ones that set is_public=0 after creation, and lookup is the only path that promotes a 'user' row (is_public = safe_for_sharing).
+     ev: backend/wd/seed.py:77; backend/wd/services/words.py:674; backend/wd/ai/lookup.py:331
+     q: + ", source = 'seed', is_public = 1, is_valid_english = 1, safe_for_sharing = 1, merged_into_word_id = NULL, updated_at = excluded.updated_at "
+     why: With AI off there is no mechanism that ever validates or publishes a user-added word; only seed/ECDICT-backed words can be public.
+22. [high] The seed import is an idempotent ON CONFLICT(lemma) upsert of dictionary columns that forces source='seed', is_public=1, trust flags 1 and merged_into_word_id=NULL, promotes an existing provisional user row to a public seed word while keeping created_by_user_id, restores merged headwords, and never touches active_content_id/active_image_id/content_state/image_state/difficulty or any per-user table; it records kv.seed_version (sha256), kv.seed_imported_at and a system_events('seed_imported') row.
+     ev: backend/wd/seed.py:73-81; backend/wd/seed.py:287-290; backend/tests/unit/test_seed.py:209-217
+     q: "ON CONFLICT(lemma) DO UPDATE SET "     + ", ".join(f"{c} = excluded.{c}" for c in SEED_COLUMNS)
+     why: This is the one existing admin-side, AI-free channel that updates shared dictionary data for all clients; it covers words/word_forms only, not word_contents or word_images.
+23. [high] Seed import runs automatically at server startup whenever kv.seed_version differs from sha256(WD_SEED_PATH) (after migrations), and install.sh also runs `wd import-seed` after `wd migrate`.
+     ev: backend/wd/main.py:304-315; backend/wd/main.py:8; deploy/install.sh:141
+     q: """Import the seed when ``kv.seed_version`` differs from the sha256 of ``WD_SEED_PATH`` (warn-and-continue otherwise)."""
+     why: Shipping a new vocab.jsonl.gz with a release is already a zero-AI, admin-controlled way to update every client's dictionary data on the next restart.
+24. [high] No table or column exists for curation, approval, publication of words/content, or content packs. Proof: the 25 CREATE TABLE statements (0001 lines 39-566) are schema_migrations, kv, system_events, users, sessions, invite_codes, auth_throttle, email_codes, user_settings, words, word_forms, word_contents, word_images, user_words, review_logs, daily_stats, push_batches, push_items, consolidation_runs, bank_suggestions, jobs, ai_calls, provider_usage, provider_state, content_reports; grep -n -i 'approv|curat|moderat|publication|content_pack|word_pack|review_queue|pending_review' backend/wd/migrations/*.sql has zero hits, and 'publish' matches only push_batches.status/published_at (lines 158, 379, 390, 473). The same grep over backend/wd/*.py hits only CURATED_TIMEZONES in routers/settings.py.
+     ev: backend/wd/migrations/0001_init.sql:379; backend/wd/routers/settings.py:33-34
+     q: status           TEXT NOT NULL DEFAULT 'building' CHECK (status IN ('building','ready','published')),
+     why: An admin review/approve workflow or a versioned content-pack manifest would require new schema; nothing can be reused as-is.
+25. [high] No CHECK list has a value for admin-authored or imported data: words.source lacks 'admin'/'curated', word_contents has no source/author column and model+prompt_version are NOT NULL, word_images.provider lacks 'upload'/'manual', jobs.type lacks any import/publish type, ai_calls.kind lacks 'import'.
+     ev: backend/wd/migrations/0001_init.sql:190; backend/wd/migrations/0001_init.sql:487; backend/wd/migrations/0001_init.sql:511
+     q: source              TEXT NOT NULL CHECK (source IN ('seed','ecdict','claude','user')),  -- where dictionary fields came from
+     why: Loading curated content into the existing tables would either misreport provenance (fake model string) or require table-rebuild migrations to extend the CHECK lists.
+26. [high] Global (shared by all users) tables: words, word_forms, word_contents, word_images, plus bookkeeping kv, system_events, schema_migrations, jobs, ai_calls, provider_usage, provider_state, invite_codes. Per-user tables: users, sessions, auth_throttle, email_codes, user_settings, user_words, review_logs, daily_stats, push_batches, push_items, consolidation_runs, bank_suggestions; content_reports is per-user authored but about global rows. DESIGN states content is never per user.
+     ev: backend/wd/migrations/0001_init.sql:164; backend/wd/migrations/0001_init.sql:228; docs/DESIGN.md:187
+     q: -- 3. Vocabulary (shared by all users)
+     why: A 'read-only shared library' deployment only needs to freeze the four global tables plus images; every learner-facing write stays in per-user tables and needs no AI.
+27. [high] Per-user attention status lives on user_words (needs_attention, attention_msg, suggested_word_id) but validity lives on the GLOBAL words row (is_valid_english), so a Claude rejection of one user's custom word flags every holder's bank row.
+     ev: backend/wd/migrations/0001_init.sql:287-289; backend/wd/migrations/0001_init.sql:292; backend/wd/ai/content.py:11
+     q: needs_attention   INTEGER NOT NULL DEFAULT 0 CHECK (needs_attention IN (0,1)),  -- Claude: not English / unresolved.
+     why: UI states 待校验/未识别/仅收藏 are derived from a global column plus per-user flags; with AI off, custom words would sit at 待校验 for everyone unless the add path is closed.
+28. [high] The AI kill switch recorded in the schema is kv.claude.enabled ('0' = off) combined with config WD_AI_ENABLED; kv.claude.paused_until defers jobs; kv.claude.available/claude.flag_tier record probe state. When off/paused, content stays 'queued' and the API reports deferred_until so clients stop polling.
+     ev: backend/wd/migrations/0001_init.sql:45-46; backend/wd/ai/budget.py:114-119; backend/wd/config.py:332
+     q: -- small runtime flags: seed_version, seed_imported_at, last_tick_at, worker_lease (JSON {instance, expires_at}), -- claude.flag_tier ('0'|'1'), claude.availabl
+     why: WD_AI_ENABLED=0 is the schema-visible way to guarantee no end-user-triggered Claude call; the degraded state is a permanent 'queued' content_state for any word lacking an active content row.
+29. [high] ai_calls is a global ledger with one row per `claude` spawn inserted before the subprocess starts; word_contents.ai_call_id and consolidation_runs.ai_call_id are logical (unconstrained) links to it, and stdout is kept on disk under claude-logs/ for 14 days.
+     ev: backend/wd/migrations/0001_init.sql:507-508; backend/wd/migrations/0001_init.sql:526
+     q: -- one row per `claude` spawn; INSERTED BEFORE the subprocess starts (status 'running') and updated afterwards, -- so a killed or crashed call is never invisibl
+     why: An auditor can prove from ai_calls alone whether any Claude call happened after a given date, which supports a 'no live AI for end users' compliance claim.
+30. [high] content_reports is the only schema path for user feedback on shared content; it is per-user authored, FK CASCADE on both users and words, has status open/resolved/dismissed and a free-text resolution, with logical (unconstrained) image_id/content_id pointers.
+     ev: backend/wd/migrations/0001_init.sql:556-557; backend/wd/migrations/0001_init.sql:561-562
+     q: target      TEXT NOT NULL CHECK (target IN ('content','image','dictionary')),   reason      TEXT NOT NULL CHECK (reason IN ('wrong_meaning','unnatural_example',
+     why: This is the natural inbox for an admin-curation loop, but its resolutions presume AI regeneration ('regenerated') rather than manual edits.
+31. [high] ECDICT is not part of the application schema: services/ecdict.py opens the separate stardict.db read-only via WD_ECDICT_DB_PATH, nothing is ATTACHed, and words.ecdict_id is a plain integer with no FK.
+     ev: backend/wd/services/ecdict.py:205; backend/wd/services/ecdict.py:3; backend/wd/migrations/0001_init.sql:189
+     q: conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
+     why: ECDICT is an AI-free dictionary source that could back admin-side word additions without Claude, but it is an optional external file, not guaranteed on a public server.
+32. [high] Migration 0009 is a pure data migration that bulk-edits the global words.phonetic column, demonstrating that NNNN_*.sql files are already used as the mechanism for admin-side bulk repair of shared library data (with the pre-migrate snapshot and single-transaction guarantees).
+     ev: backend/wd/migrations/0009_strip_phonetic_delimiters.sql:9-12; backend/wd/migrations/0009_strip_phonetic_delimiters.sql:3-4
+     q: UPDATE words    SET phonetic = NULLIF(TRIM(phonetic, '/[] '), '')  WHERE phonetic IS NOT NULL    AND (phonetic LIKE '/%' OR phonetic LIKE '%/' OR phonetic LIKE 
+     why: A curated bulk content update could be shipped the same way, but it would be a code release, not an admin UI action.
+33. [high] Migration 0008 exists only because ON DELETE cascades from user_words/words into push_items and bank_suggestions were measured at 5.2 s per account delete on a 73,000-row push_items table; it adds ix_push_items_word (CASCADE from words) and two user_word indexes.
+     ev: backend/wd/migrations/0008_fk_child_indexes.sql:4-6; backend/wd/migrations/0008_fk_child_indexes.sql:12
+     q: every other writer waits on busy_timeout; with the indexes the same delete takes 0.07 s.
+     why: Bulk word deletes/merges by an admin would hit the same cascade paths; the indexes make them tractable but the data loss in per-user tables remains.
+34. [high] The jobs queue is a single global table whose word-level dedupe keys ('content:<word_id>', 'lookup:<word_id>', 'svg:<word_id>', 'image:<word_id>') are per word, not per user, so generated content work is shared; only consolidate/email/webhook keys are per user or per batch.
+     ev: backend/wd/migrations/0001_init.sql:462-463; backend/wd/migrations/0001_init.sql:503
+     q: -- Durable queue. Dedupe keys: 'content:<word_id>' | 'lookup:<word_id>' | 'consolidate:<user_id>:<YYYY-MM-DD>' | --   'svg:<word_id>' | 'image:<word_id>' | 'ema
+     why: An end user's action only ever enqueues a per-word job that benefits everyone; the question for compliance is who triggers it, not who consumes it.
+## GLOSSARY
+- Personal word bank (user_words.state new/learning) = 生词库
+- Vocabulary browse page (words table) = 词库
+- Pending AI validation (needs_attention=0, is_valid_english IS NULL) = 待校验
+- Not recognised / could not validate (needs_attention=1, attention_msg NOT NULL) = 未识别 / 暂时无法校验
+- Re-validation in progress (needs_attention=1, attention_msg IS NULL) = 重新校验中
+- Kept although not recognised, never pushed (needs_attention=0, is_valid_english=0) = 仅收藏
+- Custom word (origin='custom') = 自添生词
+- Consolidation / suggestions inbox (consolidation_runs, bank_suggestions) = 整理 / 整理建议
+- Screening card in today's push (push_items.kind='screen') = 推荐词
+- Screening page = 筛词
+- Mastered (user_words.state='mastered') = 已掌握
+- Screened as known (state='known') = 认识 / 已认识
+- Removed (state='removed') = 移除 / 已移除
+- Stages (stage_zk/gk/cet4/cet6) = 初中 / 高中 / 四级 / 六级
+- Target stages (user_settings.stages_json) = 目标阶段
+- Main stage (user_settings.current_stage) = 主攻阶段
+- Only words new to this stage (stage_min = idx) = 仅本阶段新增
+- Stubborn word (times_added >= 3) = 顽固词
+- Example sentence / image / pronunciation (word_contents / word_images / phonetic) = 例句 / 配图 / 发音
+- Today's push (push_batches) = 今日词汇
+## UNKNOWNS
+- Whether the live deployed database's schema_migrations currently holds versions {1, 8, 9} (not inspected; no DB was opened).
+- Whether every word-reading route actually includes deps.visible_word_sql() (other slices own routers; only the predicate helper and its documentation were verified here).
+- Whether word_contents.status='rejected' is ever written: grep found no writer for contents (only word_images gets 'rejected' in images/service.py:195), so the content 'rejected' state appears unused, but admin_reports.py was not read in full.
+- Whether a `wd restore` of a pre-migrate snapshot also restores DATA_DIR/images consistently (backup.py mentions image tars at line 221 but the pairing was not verified in this slice).
+- Whether the Content JSON schema (content_json validated in Python per schemas.py) would accept hand-authored content without the model/prompt_version fields the storer injects (schemas.py is outside this slice).
+## SUGGESTED VERIFICATIONS
+- Re-run `grep -rn "INSERT INTO word_contents\|UPDATE word_contents" backend/wd --include='*.py'` to confirm ai/content.py:214-217 remain the only writers; also check backend/wd/routers/admin_*.py for raw sqlite execute strings built dynamically (f-strings) that the literal grep could miss.
+- Open a scratch DB with `python3 -c "import sqlite3;sqlite3.connect(':memory:').executescript(open('docs/SCHEMA.sql').read())"` and run `PRAGMA foreign_key_list(review_logs)` to confirm word_id has no FK, and `PRAGMA foreign_key_list(user_words)` to confirm CASCADE from words.
+- Run `pytest backend/tests/unit/test_seed.py -k 'promoted or merged_seed or never_touches'` to confirm the seed re-import semantics claimed (promotion of provisional rows, restoration of merged headwords, content pointers untouched).
+- Verify the visibility predicate is applied in routers/vocab.py, routers/words.py, routers/media.py and services/screen.py by grepping for `visible_word_sql(`; any word-reading SELECT without it is a leak of is_public=0 rows.
+- Check DESIGN.md §5.2 claim that ECDICT rows whose translation starts with [网络] are created is_public=0 against services/words.py around line 672 to confirm the exact condition, since those rows would also be stranded with AI off.

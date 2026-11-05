@@ -1,0 +1,206 @@
+# SLICE ops-change-management  (35 findings)
+## SUMMARY
+Production is one Ubuntu box, one systemd system unit (`wd serve` = uvicorn with workers=1 plus in-process Claude/IO workers and scheduler), one SQLite file in
+WAL mode, and one data directory `WD_DATA_DIR` (default /home/sqin/word-dance-data, 0700) holding `.env`, `word-dance.db` (+-wal/-shm),
+`images/<2hex>/<sha>.jpg|svg`, `backups/`, `claude-cwd/`, `claude-logs/`, `tmp/`, the live SPA symlink `frontend -> frontend-releases/<sha>` and optionally
+`stardict.db`. Code lives in the git checkout and is changed only by `git pull && deploy/install.sh`, which builds the SPA into `frontend-releases/<sha>.new`,
+stops the unit, publishes the snapshot with an atomic symlink rename (keeping two), runs `wd migrate` (which first writes `backups/pre-
+migrate-<from>-to-<to>.db.gz`), runs `wd import-seed` (a no-op unless the sha256 of the tracked `data/seed/vocab.jsonl.gz` changed, so a release that ships a
+new seed is applied automatically), runs the paid `wd claude-check` probe, re-renders the units and restarts; the service lifespan repeats migrate + seed-check
+at every boot anyway. Backups are a separate systemd timer at 03:30 Asia/Shanghai running `wd backup --keep-daily 14 --keep-weekly 8` (VACUUM INTO ->
+integrity_check -> gzip -> retention -> kv.backup.last), safe while the service runs; restore (`wd restore`) requires the service to be stopped and refuses
+while the worker lease is live, systemctl reports the unit active, or any other connection holds an open transaction. Concurrency is plain SQLite: every
+request/job/CLI opens its own autocommit connection with busy_timeout=5000 and writes under BEGIN IMMEDIATE with three short retries, so an external process may
+modify the database while the service runs as long as its transactions are short; nothing in the code prevents it, and `wd migrate`, `wd import-seed`, `wd
+fetch-image`, `wd images-prune`, `wd build-batch`, `wd push-now` all run next to the live service without a lease check, while `wd worker-once`, `wd tick`, `wd
+consolidate --now` and `wd restore` exit 2 when `kv.worker_lease` is live. The lease (TTL 90 s, renewed every 30 s) plus the stale-lock sweep (`requeue_stale`
+on boot and in the hourly GC) mean a separate "curation" process must never claim jobs from the `jobs` table, but it may freely write to global tables (`words`,
+`word_contents`, `word_images`, `kv`) in short transactions. There is no CLI, endpoint or documented procedure for bulk word/content edits: the only shipped
+bulk writers of `words` are the seed upsert (`import-seed`, which never touches content pointers or per-user tables) and numbered SQL migration files (0009 is a
+data-only UPDATE precedent), and the only documented direct-DB access is read-only verification of backup copies. Runtime switches live in the global `kv` table
+and are read on every call without caching: `POST /api/admin/ai/pause` sets `claude.paused_until` (+24 h) and resume deletes it and writes `claude.enabled='1'`;
+`kv.claude.enabled='0'` is a hand-set kill switch that no code or CLI ever writes; `WD_AI_ENABLED=0` in `.env` is the restart-requiring equivalent. With AI off,
+the Claude worker idles 30 s at a time, groups are deferred rather than failed, queued lookups are flagged 暂时无法校验, the client sees `ai_enabled:false` and the UI
+falls back to dictionary data and template cards. `provider_usage`/`provider_state` are image-provider quota counters and cooldowns written only by
+`images/quota.py` with no reset endpoint; `system_events` is the operator-visible event log. Two constraints matter for a no-AI public deployment: install.sh
+preflight hard-fails without a `claude` binary in PATH and unconditionally runs the paid `wd claude-check`, and the unit deliberately omits ProtectHome because
+all AI calls run under the operator's own `/home/sqin/.claude` OAuth login.
+## FINDINGS
+1. [high] The data directory (WD_DATA_DIR, default /home/sqin/word-dance-data, 0700) holds all runtime state: .env, word-dance.db (+-wal/-shm), images/<2hex>/<sha>.<ext>, claude-cwd/, claude-logs/, backups/, tmp/, the `frontend` symlink into frontend-releases/<sha>/, and optionally stardict.db; the git checkout holds code only.
+     ev: docs/DEPLOY.md:12-21; deploy/install.sh:57; backend/wd/config.py:192-194
+     q: | `/home/sqin/word-dance-data` (`WD_DATA_DIR`) | **all runtime state**, outside the checkout | 0700 sqin |
+     why: A server-side curation workflow has exactly two global stores to manage: the single SQLite file and the images/ tree, both inside one directory that git never touches.
+2. [high] Configuration is a single .env file created once by install.sh and never overwritten; the service reads it only at startup (Settings frozen on app.state), so every WD_* change (including WD_AI_ENABLED) requires `sudo systemctl restart word-dance`.
+     ev: deploy/install.sh:74-75; docs/ops.md:146; backend/wd/deps.py:59-60
+     q: # 5. .env (created once; never overwritten) ------------------------------- if [ ! -f "$DATA/.env" ]; then
+     why: Turning AI off for a public launch via WD_AI_ENABLED="0" is a one-line .env edit plus a restart, not a code change.
+3. [high] Backups run nightly at 03:30 Asia/Shanghai from an independent systemd timer (Persistent=true, RandomizedDelaySec=10m) executing `wd backup --keep-daily 14 --keep-weekly 8`; the application process is not involved.
+     ev: deploy/word-dance-backup.timer:5-7; deploy/word-dance-backup.service:10; docs/ops.md:28-29
+     q: OnCalendar=*-*-* 03:30:00 Asia/Shanghai Persistent=true RandomizedDelaySec=10m
+     why: A curated shared library gets a consistent nightly snapshot without any admin action, so curation mistakes have a daily restore point.
+4. [high] `wd backup` is safe while the service is serving: it runs `VACUUM INTO` a temp copy, `PRAGMA integrity_check` on the copy, gzips it to backups/word-dance-YYYYMMDD-HHMM.db.gz (0600), applies retention and records kv.backup.last; an integrity failure writes system_events('backup_failed'), leaves no file and exits 1.
+     ev: backend/wd/backup.py:158; backend/wd/backup.py:165-167; backend/wd/backup.py:276
+     q: conn.execute("VACUUM INTO ?", (str(copy),))
+     why: An admin can take a manual snapshot immediately before a bulk curation pass without downtime.
+5. [high] Retention keeps the newest 14 snapshots plus one Sunday copy per ISO week up to 8 weeks; pre-migrate-*.db.gz snapshots are never pruned; images/ is not backed up unless --with-images adds images-YYYYMMDD.tar.
+     ev: backend/wd/backup.py:204-205; backend/wd/backup.py:221; backend/wd/backup.py:24-25
+     q: Retention rule: the newest ``keep_daily`` files stay; among the older ones a Sunday copy per ISO week stays,     newest weeks first, up to ``keep_weekly``; ever
+     why: If curated images become hand-picked rather than re-fetchable, the default backup no longer covers them and --with-images (or an rsync of images/) becomes mandatory.
+6. [high] Restore requires stopping the service: `wd restore <file> --yes` exits 2 while kv.worker_lease is live or `systemctl is-active word-dance.service` succeeds, and also exits 2 when `PRAGMA wal_checkpoint(TRUNCATE)` reports another connection holding an open transaction; it keeps the old DB as word-dance.db.bak-<ts> (hard link) and swaps the verified copy in with one atomic os.replace.
+     ev: docs/ops.md:69-70; backend/wd/backup.py:463-468; backend/wd/backup.py:507-510
+     q: `wd restore` replaces the live database. It refuses (exit 2) while the service runs — it checks the worker lease in the database **and** `systemctl is-active wo
+     why: Rolling back a bad curation pass is a documented stop-restore-start procedure with downtime of seconds, but it rolls back per-user data too (no table-level restore).
+7. [high] `wd migrate` applies pending backend/wd/migrations/NNNN_*.sql files; it first writes backups/pre-migrate-<from>-to-<to>.db.gz (skipped only on a fresh DB, and a snapshot failure aborts the migration), runs each file inside its own BEGIN IMMEDIATE with the runner inserting the schema_migrations row, and `--dry-run` lists pending files.
+     ev: backend/wd/cli.py:100; backend/wd/db.py:229-231; backend/wd/db.py:239
+     q: result = db.run_migrations(conn, pre_hook=db.backup_pre_hook())
+     why: Numbered SQL migration files are the one release-shipped, atomic, pre-snapshotted channel for bulk data changes to the shared library.
+8. [high] The service itself runs migrations and the seed check at every boot (lifespan startup), so a plain `systemctl restart` after a `git pull` migrates and re-imports a changed seed inside the service process even without install.sh.
+     ev: backend/wd/main.py:478-481; backend/wd/main.py:310-313; backend/wd/main.py:8-9
+     q: result = db.run_migrations(conn, pre_hook=db.backup_pre_hook())         for version, name in result.applied:             log.info("applied migration %04d_%s", v
+     why: A curated seed shipped in a release is applied automatically at the first service start; there is no way to deploy new code while deferring the seed import, short of pinning WD_SEED_PATH.
+9. [high] Seed re-import IS part of every upgrade: install.sh step 6 runs `wd migrate` then `wd import-seed` unconditionally; the import is a no-op when kv.seed_version equals the sha256 of the tracked data/seed/vocab.jsonl.gz, `--force` overrides, and pack_seed.sh makes the .gz byte-stable so the sha only changes when content changes.
+     ev: deploy/install.sh:140-141; docs/ops.md:99-100; backend/wd/seed.py:359
+     q: run "$REPO/.venv/bin/wd" migrate                                    # cli.py: db.run_migrations() records each NNNN file itself; snapshots first (§5) run "$REPO
+     why: The seed file is a working release-time channel for curated dictionary columns of the shared library; an admin who edits the seed and tags a release gets it applied on the next install.sh or restart.
+10. [high] The seed upsert only writes dictionary columns of `words` and rebuilds `word_forms`; it never touches active_content_id, active_image_id, content_state, image_state, or any per-user table, so a seed change cannot deliver curated example sentences or images.
+     ev: backend/wd/seed.py:11-13; backend/wd/seed.py:282-283; backend/tests/unit/test_seed.py:171
+     q: ``active_content_id``, ``active_image_id``, ``content_state``, ``image_state``, ``difficulty``, ``created_by_user_id``   and every per-user table are never touc
+     why: Curating word_contents / word_images server-side needs a new channel; the existing seed pipeline is limited to headword, phonetic, translation, definition, stages and forms.
+11. [medium] `wd import-seed` has no lease or service check and performs the whole upsert (9,162 rows + word_forms rebuild + kv + system_events) inside one BEGIN IMMEDIATE, so it can be run next to the live service but holds the write lock for the full import while the service's writers wait on busy_timeout=5000 ms plus three retries (50/100/200 ms).
+     ev: backend/wd/seed.py:16-17; backend/wd/seed.py:343-346; backend/wd/db.py:48
+     q: ``kv.seed_version`` = sha256 of the file (what ``main.seed_check`` compares) and ``kv.seed_imported_at`` are set and a   ``system_events('seed_imported')`` row 
+     why: An online bulk import is possible but any curation transaction longer than ~5.35 s will surface as 'database is locked' errors to concurrent learners; import duration on the real DB is unmeasured.
+12. [high] The upgrade path is `git pull && deploy/install.sh`: preflight, venv/pip, npm ci + build into frontend-releases/<sha>.new, stop the unit, publish the snapshot, `wd migrate`, `wd import-seed`, `wd claude-check`, `wd create-admin --if-none`, re-render both units, daemon-reload, restart, health check; documented downtime is migration time + ~3 s.
+     ev: docs/ops.md:93; deploy/install.sh:123; deploy/install.sh:158
+     q: cd /home/sqin/word-Dance && git pull && deploy/install.sh        # or: make install
+     why: Shipping a curated library as a release is a stop-the-world event of seconds; there is no blue/green or zero-downtime path.
+13. [high] Since commit 9ee4455 the live SPA is a versioned snapshot in the data dir: install.sh builds to frontend-releases/<sha>.new, renames it to <sha>, swaps the `frontend` symlink with one `mv -T`, prunes to the two newest; `wd serve` resolves WD_FRONTEND_DIST at startup, so a swap (or UI-only rollback) takes effect only after a restart.
+     ev: deploy/install.sh:72; deploy/install.sh:136-139; backend/wd/config.py:268
+     q: run bash -c "cd '$REPO/frontend' && npm ci --silent && npm run build --silent -- --outDir '$DATA/frontend-releases/$REL.new' --emptyOutDir"
+     why: Frontend changes for a read-only client (e.g. hiding AI-triggering buttons) are deployed atomically and are independently rollbackable from the DB.
+14. [high] install.sh preflight hard-fails (exit 1) when no `claude` binary is in PATH, and step 6 unconditionally runs the paid `wd claude-check` probe (<= $0.05) on every install/upgrade; the probe's failure is only a WARN.
+     ev: deploy/install.sh:48-49; deploy/install.sh:142-143; backend/wd/ai/probe.py:207
+     q: CLAUDE_BIN=$(command -v claude || true) [ -n "$CLAUDE_BIN" ] || { echo "claude CLI not found in PATH for $RUN_USER (expected /home/sqin/.local/bin/claude)"; exi
+     why: A public no-AI deployment cannot run the shipped installer on a box without the claude CLI, and every upgrade still makes one operator-triggered Claude call unless the script is changed.
+15. [high] The single-process invariant is enforced: `wd serve` passes workers=1, create_app refuses WEB_CONCURRENCY/--workers > 1, and kv.worker_lease (TTL 90 s, renewed every 30 s) makes a second `wd serve` serve requests only while retrying the lease; a process that loses the lease fences its workers and scheduler.
+     ev: backend/wd/cli.py:145; backend/wd/main.py:505; backend/wd/jobs/lease.py:31-33
+     q: workers=1,
+     why: A separate curation process cannot be a second `wd serve`; it must be a plain SQLite client that stays out of the job queue.
+16. [high] A foreign process that claims rows from the `jobs` table gets them swept back to `queued` by requeue_stale (locked_by not ending in the service's boot_id) at service startup and in the scheduler's GC; the CLIs that would do so (`wd worker-once`, `wd tick`, `wd consolidate --now`) exit 2 while the lease is live. Code runs that GC hourly although the queue docstring and CLAUDE_INTEGRATION say every 5 min.
+     ev: backend/wd/jobs/queue.py:281-282; docs/CLAUDE_INTEGRATION.md:326; backend/wd/jobs/worker.py:296-299
+     q: "UPDATE jobs SET status='queued', locked_at=NULL, locked_by=NULL, updated_at=? "             "WHERE status='running' AND (locked_by IS NULL OR locked_by NOT LIK
+     why: Any server-side curation tool must write results directly to words/word_contents/word_images rather than run as a competing job worker, or its work will be duplicated or clobbered.
+17. [high] Only four CLI paths check the worker lease (restore, worker-once, tick, consolidate --now); `wd migrate`, `wd import-seed`, `wd fetch-image` (which writes word_images and enqueues generate_svg into the live queue), `wd images-prune`, `wd build-batch` and `wd push-now` run next to the live service with no refusal.
+     ev: backend/wd/cli.py:10-12; backend/wd/cli.py:88-90; backend/wd/images/handler.py:275-276
+     q: Commands that must not run next to the service (``worker-once``, ``tick``, ``restore``) check ``wd.jobs.lease.is_live`` themselves and exit 2 with the DEPLOY §9
+     why: The codebase already treats direct global-table writes from a second process as acceptable (fetch-image, images-prune), which is the pattern an admin curation CLI would follow; grep `lease.is_live\|lease_is_live backend/wd` lists only backup.py, consolidate.py, worker.py, scheduler.py.
+18. [high] SQLite access is one autocommit connection per request/job/CLI with persistent WAL, synchronous=NORMAL, foreign_keys=ON, busy_timeout=5000, and explicit BEGIN IMMEDIATE transactions with three short retries; nothing stops an external writer, and the docs' only guidance on direct DB access is read-only verification of a copy and a warning that an open transaction blocks `wd restore`.
+     ev: backend/wd/db.py:3-7; backend/wd/db.py:44-51; backend/wd/deps.py:70
+     q: :func:`connect` opens ``sqlite3.connect(path, autocommit=True, timeout=5)`` — the Python 3.12   API in which the module never opens implicit transactions
+     why: An admin may safely modify global rows while the service runs provided each transaction is short; stopping the service is required only for restore and non-additive migrations.
+19. [high] There is no CLI, Make target or documented procedure for bulk word/content edits; the complete `wd` command set is serve, migrate, version, import-seed, create-admin, set-password, promote, demote, invite, backup, restore, claude-check, worker-once, tick, build-batch, push-now, consolidate, fetch-image, images-prune, stats, check, logs.
+     ev: backend/wd/cli.py:45-56; docs/DEPLOY.md:408; Makefile:54
+     q: COMMAND_OWNERS: dict[str, tuple[str, ...]] = {     "wd.seed": ("import-seed",),     "wd.security": ("create-admin", "set-password", "promote", "demote", "invite
+     why: Searched with `grep -rn 'add_parser(' backend/wd` (22 subcommands) and `grep -rn -i 'bulk\|curat\|import-words\|export-words\|edit-word\|update-word\|set-content' backend/wd/cli.py docs/DEPLOY.md docs/ops.md README.md Makefile` (no matches): an admin-curation tool would be new code.
+20. [high] The only shipped precedent for a bulk data repair of the shared library is a data-only SQL migration: 0009 rewrites words.phonetic for every row matching a predicate, idempotently, under the runner's BEGIN IMMEDIATE and pre-migrate snapshot.
+     ev: backend/wd/migrations/0009_strip_phonetic_delimiters.sql:1; backend/wd/migrations/0009_strip_phonetic_delimiters.sql:9-12; backend/wd/migrations/0008_fk_child_indexes.sql:8
+     q: -- 0009_strip_phonetic_delimiters.sql — one-off repair of words.phonetic values stored WITH IPA delimiters.
+     why: Curated bulk changes could be shipped today as numbered migration files, but each is a release with a stop-the-world install, not an admin runtime action.
+21. [high] No HTTP endpoint mutates configuration or arbitrary kv: GET /api/admin/config is read-only with secrets masked, the only kv writes in routers are claude.paused_until / claude.enabled / claude.probe_started_at, and the only admin word endpoints are POST regenerate and POST refetch-image (both enqueue jobs).
+     ev: backend/wd/routers/admin_ops.py:427; docs/API.md:134; backend/wd/routers/admin_ops.py:376
+     q: @router.get("/api/admin/config", response_model=schemas.ConfigResponse)
+     why: Searched with `grep -rn 'kv_set\|kv_delete' backend/wd/routers/` and `grep -rn '@router.(put|patch|delete|post)("/api/admin/words' backend/wd/routers/`: the admin UI has no edit-content surface, only AI/image re-run triggers.
+22. [high] The global `kv` table (key, value, updated_at; WITHOUT ROWID) stores runtime flags, not user data: seed_version, seed_imported_at, last_tick_at, worker_lease, claude.{flag_tier,available,paused_until,enabled,version,last_probe_at,probe_started_at,overloaded_streak}, maintenance.{last_date,hourly_at}, consolidate:<user_id>:last_date, prewarm:<plan_id>:{planned,spent}, backup.last, public_url_guess; every reader calls kv_get per use with no in-process cache.
+     ev: backend/wd/migrations/0001_init.sql:45-46; backend/wd/migrations/0001_init.sql:50-54; backend/wd/db.py:265-267
+     q: -- small runtime flags: seed_version, seed_imported_at, last_tick_at, worker_lease (JSON {instance, expires_at}), -- claude.flag_tier ('0'|'1'), claude.availabl
+     why: kv is a usable no-restart switchboard (any UPDATE is seen on the next call), but it has no generic feature-flag namespace beyond the claude.* keys.
+23. [high] AI pause is a runtime kv switch: POST /api/admin/ai/pause {paused:true} sets kv.claude.paused_until = now + 24 h and writes system_events('claude_paused'); {paused:false} deletes it and writes claude.enabled='1'; budget.paused_until/ai_enabled read kv before every call. Automatic pauses: auth/spawn_error 30 min, six consecutive overloads 15 min.
+     ev: backend/wd/routers/admin_ops.py:35; backend/wd/routers/admin_ops.py:326-327; backend/wd/routers/admin_ops.py:330-331
+     q: MANUAL_PAUSE = timedelta(hours=24)
+     why: The pause is temporary by design (24 h, self-expiring), so it is not a mechanism for permanently disabling end-user-triggered AI on a public server.
+24. [high] The kill switch has two layers: WD_AI_ENABLED in .env (restart required) and kv.claude.enabled='0' (no restart, read per call). No code, CLI or endpoint ever writes claude.enabled='0'; it exists only as a hand-set SQL row that the resume endpoint clears.
+     ev: backend/wd/ai/budget.py:114-119; backend/wd/config.py:332; deploy/env.example:58-59
+     q: def ai_enabled(conn: sqlite3.Connection, cfg: Settings | None = None) -> bool:     """The kill switch: ``WD_AI_ENABLED`` and ``kv.claude.enabled`` (``'0'`` = of
+     why: Searched `grep -rn "claude\.enabled" backend/wd scripts deploy docs/ops.md docs/DEPLOY.md`: a permanent no-AI mode is available today (env flag or a manual kv row), and an admin resume click would silently re-enable the kv layer but not the env layer.
+25. [high] Degraded mode when AI is disabled: the Claude worker's gate returns a 30 s idle, flags queued lookups' bank rows 暂时无法校验, budget-refused groups are deferred (not failed) to resumes_at or +30 min, the scheduler skips prefetch, SVG generation is not allowed, and the client receives ai_enabled:false (UI: 'AI 功能暂时关闭').
+     ev: backend/wd/jobs/worker.py:253-258; backend/wd/jobs/worker.py:46; backend/wd/ai/common.py:168-169
+     q: if not budget.ai_enabled(conn, self.ctx.cfg):                 flagged = lookup.flag_queued_lookups(conn, now=self.ctx.now())
+     why: With AI off, end-user actions still enqueue Claude jobs that sit queued forever (deferred, never dead), so a read-only public client needs the enqueue paths closed, not just the worker idled.
+26. [high] provider_usage and provider_state are global image-provider quota counters (minute/day windows, UTC) and cooldown/error state, written only by images/quota.py, displayed on the admin page and by `wd check providers`; no endpoint resets a cooldown and they hold no feature flags.
+     ev: backend/wd/migrations/0001_init.sql:533-539; backend/wd/migrations/0001_init.sql:542-544; backend/wd/images/quota.py:1
+     q: -- image provider quota counters per window, persisted across restarts CREATE TABLE provider_usage (   provider     TEXT NOT NULL,                           -- 
+     why: Searched `grep -rn 'cooldown' backend/wd/routers/*.py` (no matches): these tables are operational telemetry for the image pipeline, irrelevant to curation except that server-side bulk image fetching would consume the same daily quotas.
+27. [high] system_events is the global operator-visible event log (管理 → 事件): backup_failed, seed_imported, migration, downtime, claude_paused/claude_resumed, claude_auth, claude_overloaded, budget_* rows are written by backup.py, seed.py, admin_ops.py, scheduler.py and ai/common.py.
+     ev: backend/wd/migrations/0001_init.sql:56-57; backend/wd/backup.py:183; backend/wd/seed.py:290
+     q: -- operator-visible events (admin page): downtime, budget_daily, budget_monthly, budget_svg, claude_auth, provider_blocked, -- content_anomaly, seed_imported, m
+     why: A curation tool has an existing audit sink: inserting its own system_events rows makes admin-driven library changes visible in the admin UI.
+28. [high] Under `--no-restart` (or without passwordless sudo) install.sh still publishes the SPA and runs `wd migrate` against the live old process; the script prints that pending migrations must be purely additive, and without sudo its last line warns that the OLD process answered the health check.
+     ev: deploy/install.sh:126; deploy/install.sh:183; docs/ops.md:117-118
+     q: echo "NOTE: the running service is kept; pending migrations must be purely ADDITIVE (new tables/columns/indexes only) — DEPLOY §10"
+     why: Additive schema or data-only migrations (the kind a curation channel would add) can be rolled out online; the stop is a convention for destructive changes, not an enforced lock.
+29. [high] install.sh resolves the data directory from the installed unit's EnvironmentFile= line when WD_DATA_DIR is unset and refuses (exit 2) a WD_DATA_DIR that differs from it unless --move-data, to prevent building a second empty instance; both units are re-rendered from that value on every run.
+     ev: deploy/install.sh:34-39; deploy/install.sh:150-154; docs/ops.md:166-168
+     q: if [ -n "$UNIT_DATA" ]; then   if [ -z "${WD_DATA_DIR:-}" ]; then     DATA=$UNIT_DATA; echo "data dir from the installed unit: $DATA"
+     why: Moving the shared library to a bigger disk or a new server has a tested procedure; a stray environment variable can no longer fork the library into two copies.
+30. [high] File modes are enforced in three places: UMask=0077 in both units, os.umask(0o077) in `wd serve`, and explicit chmod 0600 in migrate/backup/restore; the data dir is 0700 and the SPA snapshots keep the build's modes behind 0700 parents.
+     ev: deploy/word-dance.service:23; backend/wd/cli.py:135; backend/wd/cli.py:116-117
+     q: UMask=0077
+     why: Any curation process must run as the service user (sqin) or it cannot open the 0600 database and 0700 directories at all.
+31. [high] The unit deliberately omits ProtectHome/ProtectSystem=strict because the claude CLI needs read/write access to /home/sqin/.claude and .claude.json; the run user must be the one whose claude login is authenticated, so every AI call the server makes runs under the operator's personal Claude OAuth identity.
+     ev: deploy/word-dance.service:33-34; deploy/install.sh:11; docs/DEPLOY.md:3
+     q: # Deliberately NOT set: ProtectHome / ProtectSystem=strict — the claude CLI must read and write # /home/sqin/.claude and /home/sqin/.claude.json (OAuth credenti
+     why: On the current design the server is the only Claude caller and it uses the owner's login; a curation-only model keeps that identity confined to admin-run processes rather than end-user request paths.
+32. [high] Graceful restarts preserve in-flight work: TimeoutStopSec=300 with KillMode=mixed lets a Claude call finish, threads are joined for up to 250 s, and on the next start requeue_stale(boot_id) returns any job still marked running by the previous boot to queued.
+     ev: deploy/word-dance.service:21-22; backend/wd/main.py:112; backend/wd/main.py:378-380
+     q: TimeoutStopSec=300 KillMode=mixed
+     why: A release that ships a curated library can be installed at any time of day without losing queued or running background work.
+33. [high] `wd check db [--db PATH]` is a read-only probe (PRAGMA quick_check, schema version, pending migrations, kv seed_version/last_tick_at/worker_lease/backup.last) usable against a restored copy; the monthly drill restores the newest snapshot into tmp/ and runs it.
+     ev: backend/wd/diag.py:62-66; backend/wd/diag.py:257; docs/ops.md:63-64
+     q: quick = str(conn.execute("PRAGMA quick_check").fetchone()[0])         version = db.current_version(conn)         pending = db.pending_migrations(conn)
+     why: An admin can validate a curated database offline (restore a copy, check it) before swapping it in, using only shipped tooling.
+34. [high] Off-box backup is a documented rsync of backups/ from another machine; .env (secrets) is explicitly not in backups/ and must be copied separately; the admin health page shows kv.backup.last as 上次备份.
+     ev: docs/ops.md:54; docs/ops.md:57-58; backend/wd/routers/admin_ops.py:174
+     q: rsync -a --delete sqin@<box>:/home/sqin/word-dance-data/backups/ /backups/word-dance/      # cron, e.g. 04:30
+     why: A public deployment's disaster-recovery story for the shared library is complete only with an external copy of backups/ plus .env.
+35. [low] DEPLOY §1 states tmp/ is 'cleared at start', but no code outside backup.py references cfg.tmp_dir and the lifespan startup contains no tmp cleanup; the claim appears to be documentation only.
+     ev: docs/DEPLOY.md:19; backend/wd/main.py:473-477; backend/wd/backup.py:153-154
+     q: | `…/word-dance-data/tmp/` | downloads in flight (cleared at start) | 0700 |
+     why: Minor: leftover restore drill files or aborted downloads in tmp/ are not reclaimed automatically; searched with `grep -rn 'tmp_dir' backend/wd --include='*.py'` (only backup.py and config.py) and `grep -rn 'tmp' backend/wd/images/fetch.py backend/wd/main.py backend/wd/cli.py` (no tmp-dir use).
+## GLOSSARY
+- admin section (nav) = 管理
+- admin tabs = 概览 / 用户与邀请 / 任务 / AI / 内容反馈 / 事件 / 配置
+- pause AI / resume AI / paused = 暂停 AI / 恢复 AI / 已暂停
+- probe claude = 探测 claude
+- prewarm = 预生成
+- retry / requeue all dead jobs / regenerate / refetch image = 重试 / 重排所有失败任务 / 重新生成 / 换图
+- last scheduler tick = 上次调度
+- worker lease = 工作租约
+- last backup = 上次备份
+- image provider quotas / cooldown until = 图片来源配额 / 冷却至
+- data directory / disk free / health / database = 数据目录 / 剩余磁盘 / 健康状态 / 数据库
+- AI disabled (client error) = AI 功能暂时关闭
+- daily AI budget exhausted = 今日 AI 额度已用完
+- frontend not built (503 page) = 前端尚未构建
+- could not validate (bank row flag when AI off) = 暂时无法校验
+- Claude CLI not logged in (admin banner) = Claude CLI 未登录
+- vocabulary library = 词库
+- personal word bank = 生词库
+- consolidation / suggestion inbox = 整理 / 整理建议
+- invite code = 邀请码
+- server offline (history) = 服务器离线
+- example sentence / image / pronunciation = 例句 / 配图 / 发音
+## UNKNOWNS
+- Wall-clock duration of a full `wd import-seed --force` (9,162 rows + word_forms rebuild in one BEGIN IMMEDIATE) on the production database; this decides whether an online seed re-import makes concurrent learner writes fail after busy_timeout (5 s + 350 ms retries).
+- Whether `wd claude-check` (probe.check) short-circuits when WD_AI_ENABLED=0 or kv.claude.enabled='0'; probe.check's body was not read, so an install.sh run on a no-AI deployment may or may not still spawn claude.
+- Which stale-sweep cadence is authoritative: scheduler.hourly_gc runs requeue_stale once per hour (HOURLY = 1 h) while queue.py's docstring and CLAUDE_INTEGRATION §6.2 say every 5 minutes; this affects how quickly a foreign process's claimed jobs are clobbered.
+- Whether anything actually clears tmp/ at startup as DEPLOY §1 claims (no code found).
+- Current production .env values (WD_AI_ENABLED, WD_SEED_PATH, WD_FRONTEND_DIST) and on-disk sizes of word-dance.db and images/ — runtime state not inspectable from the repo.
+- Whether `wd consolidate --now` and `wd fetch-image --provider claude_svg` respect kv.claude.paused_until (they go through budget.reserve / enqueue respectively, but the --now drain path was not traced end to end).
+## SUGGESTED VERIFICATIONS
+- Online bulk write safety: on a copy of a production-sized DB, start `wd serve` (dev data dir), run a write-heavy client loop, then run `wd import-seed --force`; confirm whether any client write raises 'database is locked' and measure the import's elapsed time (seed.py SeedStats.seconds).
+- Kill-switch writers: run `grep -rn "claude\.enabled" backend scripts deploy docs` and `grep -rn "kv_set(.*claude.enabled" backend` to confirm no code path writes '0'; then set `INSERT OR REPLACE INTO kv(key,value) VALUES('claude.enabled','0')` on a dev instance and confirm the worker idles (log 'AI disabled: flagged') without a restart.
+- install.sh hard dependency on claude: in a sandbox with WD_UNIT_FILE pointing at a temp file, run `PATH=/usr/bin:/bin deploy/install.sh --dry-run` and confirm it exits 1 with 'claude CLI not found in PATH'; then with a fake claude confirm the dry run prints `+ .../wd claude-check` unconditionally.
+- Lease-free CLIs: with a dev `wd serve` holding the lease, run `wd migrate --dry-run`, `wd import-seed`, `wd images-prune --unused-days 3650 --dry-run`, `wd build-batch <user>` and confirm none exits 2, while `wd worker-once` and `wd tick --once` do.
+- Pause without restart: on a dev instance POST /api/admin/ai/pause {paused:true}, enqueue a lookup, and confirm the worker logs 'deferred until' with resumes_at = paused_until without restarting; then {paused:false} and confirm the job runs.
+- Stale-sweep cadence: read scheduler.hourly_gc (HOURLY) and run backend/tests/unit/test_scheduler.py tests covering requeue_stale to establish whether a foreign-boot_id running job is swept at the next hourly GC or sooner.
+- tmp/ clearing: place a file in $WD_DATA_DIR/tmp, restart a dev `wd serve`, and confirm the file survives (contradicting DEPLOY §1 'cleared at start').

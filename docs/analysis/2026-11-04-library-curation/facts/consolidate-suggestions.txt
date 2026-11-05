@@ -1,0 +1,206 @@
+# SLICE consolidate-suggestions  (35 findings)
+## SUMMARY
+DESIGN §5.4 names 整合与更新 as two Claude jobs: `lookup_word` (per added word, minutes after an add; another slice) and `consolidate_bank`, the nightly per-user
+bank sweep that is this slice. The scheduler tick enqueues `consolidate_bank {user_id, trigger:'nightly'}` once per local day at 02:30 for every active,
+onboarded user whose bank rows (user_words in new/learning) changed since the last run or whose words still have `is_valid_english IS NULL` / `difficulty IS
+NULL`; a user can also press 立即整理 (POST /api/bank/consolidate, 60-min cooldown, 503 when AI is off/paused) and an operator can run `wd consolidate <username>`;
+there is no admin HTTP endpoint. The handler builds one prompt per user: up to 2,000 bank headwords plus up to 80 items, each carrying the user_words id, the
+normalised typed text (≤48 chars), the stored headword, whether dictionary data exists, the difficulty, and the first 120 sanitised characters of the learner's
+private 备注 — the only prompt in the system that ever sees the note. Claude returns one verdict per item (ok / lemmatize / merge_duplicate / fix_spelling /
+invalid_word / split_phrase / fill_data) plus confusable_groups and difficulty_tags. Some effects are auto-applied to GLOBAL `words` rows: fill_data writes
+phonetic/pos/translation/definition/difficulty onto non-seed words (and flips source user→claude), difficulty_tags set `words.difficulty` on any word including
+seed rows, and invalid_word sets is_valid_english=0/is_public=0 on provisional words; a validated `target` that does not yet exist is created as a private
+provisional `words` row with its own `lookup_word` AI job, so consolidation can add (private, unvalidated) words to the global table. Everything else lands in
+the PER-USER `bank_suggestions` table: auto lemmatize repoints (7-day undo), open fix_spelling/merge/split/invalid suggestions (30-day expiry), and accepted
+confusable_group rows that feed the 易混 chips. Accepting a suggestion only rewrites the user's own user_words/push_items/review_logs (repoint, merge with the
+losing row set to removed, or remove) and never writes `words`/`word_contents`, though it may enqueue a `generate_content` AI job for the target and an undo can
+revert the auto-filled `words` columns or un-tombstone a merged word. Gating is only the shared AI chain — kill switch WD_AI_ENABLED / kv.claude.enabled, pause,
+hourly/daily/monthly caps, a $0.05 reservation, $0.40 per-call cap, 240 s timeout; there is no opt-in setting, no minimum bank size, no per-user switch and no
+consolidate-specific switch. With AI disabled the Claude worker idles, queued consolidate jobs are left untouched (and accumulate one per user per day because
+the scheduler never checks the kill switch), no consolidation_runs rows are written, and the UI still shows the button but receives 503 「AI 功能当前不可用」. Nothing in
+the push/SRS pipeline depends on consolidation: batches, grading and the scheduler run independently, difficulty NULL falls back to the stage index, confusables
+fall back to [], and the inbox stays empty (lookup_word still writes fix_spelling rows while it runs). Privacy-wise the prompt contains the user's whole bank
+word list, user_words ids and note excerpts, and the full argv (prompt included) is persisted under claude-logs for 14 days; usernames and e-mails are never
+sent. For a mainland launch this feature is a live Claude call driven by end-user input and a nice-to-have that can be dropped by leaving AI off, at the cost of
+bank-hygiene suggestions, auto-filled data for user-added words, difficulty tags and 易混 chips.
+## FINDINGS
+1. [high] DESIGN §5.4 defines 整合与更新 as exactly two Claude jobs: `lookup_word` (validates a provisional user-added word minutes after an add) and `consolidate_bank` (nightly per-user bank sweep, also on demand).
+     ev: docs/DESIGN.md:302-305; docs/DESIGN.md:305
+     q: ### 5.4 Consolidation (整合与更新) — two Claude jobs, specified in `CLAUDE_INTEGRATION.md`
+     why: Both jobs are live Claude calls whose inputs come from an individual learner, which is what the mainland-user policy forbids; neither is an admin-curation step.
+2. [high] `consolidate_bank` is enqueued by the scheduler tick for every active user with `onboarding_state='done'` once per local day once local time passes 02:30, guarded by `kv consolidate:<uid>:last_date`, at priority 50 with dedupe key `consolidate:<uid>:<local_day>`.
+     ev: backend/wd/jobs/scheduler.py:51; backend/wd/jobs/scheduler.py:199; backend/wd/jobs/scheduler.py:210-223
+     q: CONSOLIDATE_AT = time(2, 30)
+     why: The nightly cadence is per user and automatic: every onboarded learner generates a Claude call whenever their bank changed, with no opt-in.
+3. [high] The only gate on the nightly enqueue is `_bank_needs_consolidation`: a bank row in new/learning that changed since the last done/skipped run, or whose word has `is_valid_english IS NULL` or `difficulty IS NULL`. There is no minimum bank size, no opt-in setting and no budget check at enqueue time.
+     ev: backend/wd/jobs/scheduler.py:230-238; backend/wd/jobs/scheduler.py:231; backend/tests/unit/test_scheduler.py:268-279
+     q: "AND (? IS NULL OR uw.updated_at > ? OR w.is_valid_english IS NULL OR w.difficulty IS NULL) LIMIT 1",
+     why: Because seed words ship with `difficulty` NULL, a user whose bank holds only untouched seed words is still consolidated every night until Claude tags them — the trigger is broader than 'bank changed'.
+4. [medium] The scheduler never consults the AI kill switch before enqueueing; with `WD_AI_ENABLED=0` the Claude worker idles without claiming, so one queued `consolidate_bank` job per eligible user accumulates per local day (the dedupe key contains the date, and the UPSERT folds only into live jobs with the same key).
+     ev: backend/wd/jobs/scheduler.py:194-225; backend/wd/jobs/worker.py:254-258; backend/wd/jobs/worker.py:258
+     q: def nightly_consolidation(conn: sqlite3.Connection, now: datetime) -> int:
+     why: Running the public server with AI permanently off (the mainland-safe configuration) leaves a slowly growing backlog of never-run jobs in the `jobs` table unless the scheduler step is also disabled; I did not execute this scenario.
+5. [high] The on-demand trigger `POST /api/bank/consolidate` returns 202 `{job_id}` at priority 10 with the same dedupe key as the nightly job (so it folds into a queued nightly run), 503 `ai_disabled` when the kill switch is off or AI is paused, and 429 when any `consolidation_runs` row for the user started in the last 60 minutes.
+     ev: backend/wd/routers/bank.py:150-151; backend/wd/routers/bank.py:27; backend/wd/routers/bank.py:160-167
+     q: if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now) is not None:
+     why: This is an end-user-initiated Claude call; the 503 path is the degraded behaviour a disabled server shows.
+6. [high] The 60-minute cooldown query filters only on `started_at`, not `status`, so a run that was recorded as `skipped` (nothing to examine, or deferred by budget/pause) or `failed` also blocks 立即整理 for an hour.
+     ev: backend/wd/routers/bank.py:152-158; backend/wd/ai/consolidate.py:483-486
+     q: "SELECT started_at FROM consolidation_runs WHERE user_id = ? AND started_at > ? ORDER BY started_at DESC LIMIT 1",
+     why: Minor product behaviour, but it shows the manual trigger is rate-limited by attempts rather than by actual Claude spend.
+7. [high] The only operator path is the CLI `wd consolidate <username>` (trigger `admin`, priority 10); there is no admin HTTP endpoint to run consolidation for one or all users, and no endpoint reads `consolidation_runs` (searched: `grep -rn consolidat backend/wd/routers/*.py` matched only bank.py and suggestions.py; `grep -rn consolidation_runs backend/wd` matched only bank.py, ai/consolidate.py, jobs/scheduler.py).
+     ev: backend/wd/ai/consolidate.py:582; backend/wd/ai/consolidate.py:560; backend/wd/routers/admin_ops.py:314
+     q: p = sub.add_parser("consolidate", help="enqueue a bank consolidation (整理) for one user; --now runs it here while the service is stopped")
+     why: An admin cannot drive consolidation centrally from the UI; whatever curation it does is per-user and user- or cron-initiated, not a server-side library workflow.
+8. [high] Each consolidate prompt item sends: `id` (= user_words.id), `input` (normalised display of what the learner typed, ≤48 chars), `headword`, `has_dictionary_data`, `difficulty`, and optionally `note`; the prompt also carries `bank_headwords`, the display forms of every word in the user's bank (≤2,000).
+     ev: backend/wd/ai/consolidate.py:118-129; backend/wd/ai/consolidate.py:94-99; backend/wd/ai/consolidate.py:134
+     q: "id": int(row["uw_id"]),
+     why: The whole personal bank list (a profile of what one learner is studying) leaves the server on every run — this is per-user data, not shared library data.
+9. [high] The learner's private 备注 reaches Claude only in this prompt, as its first 120 sanitised characters; the docs state no other prompt ever sees it and usernames/e-mails are never sent.
+     ev: backend/wd/ai/consolidate.py:64-66; backend/wd/ai/consolidate.py:126-128; docs/CLAUDE_INTEGRATION.md:424
+     q: """The first 120 sanitised characters of the learner's private 备注 (the only prompt that ever sees it, §5.4)."""
+     why: Of all AI features this is the one that transmits free-text personal data; disabling it removes that transfer entirely.
+10. [high] Per run the handler examines at most 80 bank rows (state new/learning, not merged, changed since the last `done` run or unvalidated / difficulty NULL, oldest change first), and keeps the serialised prompt under 96,000 bytes by trimming headwords first and then trailing items; the rest roll to the next night.
+     ev: backend/wd/ai/consolidate.py:46-47; backend/wd/ai/consolidate.py:87; backend/wd/ai/consolidate.py:57
+     q: MAX_ITEMS = 80
+     why: Bounds the per-user cost and the amount of personal data per call.
+11. [high] The system prompt casts Claude as 整理助手 and asks for one verdict per item from {ok, lemmatize, merge_duplicate, fix_spelling, invalid_word, split_phrase, fill_data}, plus `confusable_groups` drawn only from the bank list and `difficulty_tags`; it forbids following instructions found in inputs and copying the note into outputs.
+     ev: backend/wd/ai/prompts/consolidate_system.txt:1; backend/wd/ai/prompts/consolidate_system.txt:10; backend/wd/ai/prompts/consolidate_system.txt:12
+     q: You are the word-bank consolidator (整理助手) of word-Dance. One learner's personal English word bank is given as data:
+     why: Shows the job's purpose is bank hygiene for one learner, not enrichment of the shared library.
+12. [high] The JSON schema `consolidate_v1.json` constrains the output to ≤80 items with `id/verdict/target/confidence/note_zh/fill`, ≤15 `confusable_groups` of 2–4 strings, and ≤80 `difficulty_tags`.
+     ev: backend/wd/ai/schemas/consolidate_v1.json:4; backend/wd/ai/schemas/consolidate_v1.json:10
+     q: "verdict":{"type":"string","enum":["ok","lemmatize","merge_duplicate","fix_spelling","invalid_word","split_phrase","fill_data"]},
+     why: Defines exactly what outputs exist: suggestions to merge/lemmatise/fix/split/remove, dictionary fills, difficulty tags and confusable groups — no 'related words to add'.
+13. [high] GLOBAL write: a `fill_data` verdict is auto-applied to the shared `words` row — phonetic, pos, translation, definition and difficulty are set where NULL/empty, and `source` flips from 'user' to 'claude' — but only for non-seed words; an `auto` audit row with `undo_json` is stored for the user.
+     ev: backend/wd/ai/consolidate.py:265-266; backend/wd/ai/consolidate.py:288-289; backend/wd/ai/consolidate.py:292
+     q: if word is None or word.get("source") == "seed":
+     why: A per-user nightly job mutates shared dictionary columns of user-created words; in an admin-curated library this write path would have to be removed or replaced by a curation step.
+14. [high] GLOBAL write: `difficulty_tags` set `words.difficulty` whenever it is NULL — including seed words (the test asserts the seed word 'apple' receives difficulty 1).
+     ev: backend/wd/ai/consolidate.py:311; backend/tests/unit/test_consolidate_apply.py:315
+     q: cur = conn.execute("UPDATE words SET difficulty = ?, updated_at = ? WHERE id = ? AND difficulty IS NULL", (int(difficulty), now, int(uw["word_id"])))
+     why: This is the one place where a learner's nightly run changes a seed (shared, public) row; a shared library maintained by an admin should get difficulty from a curated source instead.
+15. [high] GLOBAL write: an `invalid_word` verdict sets `is_valid_english=0, is_public=0` on the shared `words` row only when `source='user'` (provisional); seed/ECDICT rows are untouched, and an open suggestion is written for the user in every case.
+     ev: backend/wd/ai/consolidate.py:416-418; backend/tests/unit/test_consolidate_apply.py:290-293
+     q: conn.execute("UPDATE words SET is_valid_english = 0, is_public = 0, updated_at = ? WHERE id = ?", (now, int(current["id"])))
+     why: Consolidation can retract a user-added word from public visibility globally — a moderation effect triggered by one user's run.
+16. [high] Consolidation can add rows to the global `words` table: a validated `target` with no existing headword is created through `words.resolve`, which inserts a private provisional row (`source='user'`, `is_public=0`, `is_valid_english=NULL`, `created_by_user_id`) and enqueues a `lookup_word` AI job; the same happens at accept time for a `fix_spelling` stored without `target_word_id`.
+     ev: backend/wd/ai/consolidate.py:216-221; backend/wd/services/words.py:695-699; backend/wd/services/words.py:707
+     q: res = words.resolve(conn, norm.lemma, norm.display, norm.kind, user_id, now=now)
+     why: A Claude-proposed headword can seed a new (private) library row and spawn a second AI call; whether such rows later become public is decided in the lookup slice.
+17. [high] The only auto-applied PER-USER change is `lemmatize`: the user's bank row is repointed to the target when the target exists, the input is a known inflection (word_forms or suffix rule), the target is not already in the user's bank and the entry is not a seed word; SRS state is preserved, an `auto` suggestion with `undo_json={prev_word_id}` is written, and a `generate_content` job is enqueued for the target if it lacks content.
+     ev: backend/wd/ai/consolidate.py:429; backend/wd/ai/consolidate.py:240; backend/wd/ai/consolidate.py:260
+     q: if existing is not None and related and bank.my_row(conn, user_id, int(existing["id"])) is None and current.get("source") != "seed" and int(existing["id"]) != i
+     why: Even the per-user auto path fans out into a global-content AI job, so a 'consolidation only' budget line understates its AI footprint.
+18. [high] All other verdicts become PER-USER rows in `bank_suggestions` (user_id NOT NULL, ON DELETE CASCADE): open `fix_spelling`/`merge_duplicate`/`split_phrase`/`invalid_word`/non-auto `lemmatize` rows expire after 30 days, `auto` rows lose undo after 7 days; `fix_spelling` is never auto-applied.
+     ev: backend/wd/migrations/0001_init.sql:443-447; backend/wd/ai/lookup.py:56-57; backend/wd/ai/consolidate.py:52
+     q: user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     why: The suggestion inbox is strictly per-user state; nothing in it is shared library content.
+19. [high] `confusable_groups` are stored PER-USER as `bank_suggestions(type='confusable_group', status='accepted')`, filtered to headwords present in that user's bank (≤15 groups, 2–4 members), never listed in the inbox, and served as the 易混 chips through `words.confusables_for` on word detail, study items and screening cards.
+     ev: backend/wd/ai/consolidate.py:368; backend/wd/ai/consolidate.py:375; backend/wd/services/words.py:389
+     q: if s and s.lower() in allowed and allowed[s.lower()] not in members:
+     why: 易混 chips are the one visible learning aid that disappears entirely without consolidation, and they are not a shared-library attribute (an admin could not pre-generate them globally with the current schema).
+20. [high] Accepting a repoint suggestion (fix_spelling/lemmatize/merge_duplicate/split_phrase) changes only the user's own `user_words` (repoint with SRS preserved, or merge where the row with more repetitions wins and the loser becomes `state='removed'`), `push_items` in open batches and `review_logs`; the service's only `UPDATE words` statements are in the undo and un-merge paths, never in accept.
+     ev: backend/wd/services/suggestions.py:190; backend/wd/services/suggestions.py:211; backend/wd/services/suggestions.py:418
+     q: conn.execute("UPDATE user_words SET word_id = ?, updated_at = ? WHERE id = ?", (target, now, row["id"]))
+     why: Accept/reject are pure per-user actions that need no AI and touch no shared data, so the inbox UI could stay even if its producers were disabled.
+21. [high] Accepting a repoint suggestion can itself trigger an AI job: when the row stays in the bank, `bank.enqueue_content_if_needed(target_row)` enqueues `generate_content` for a validated target lacking content (global `word_contents`).
+     ev: backend/wd/services/suggestions.py:195-196; backend/wd/services/bank.py:476
+     q: bank.enqueue_content_if_needed(conn, target_row, priority=bank.CONTENT_PRIORITY_BANK, now=now)
+     why: A learner clicking 接受 is an end-user action that can start a Claude call unless the content pipeline is also disabled or the library is pre-filled.
+22. [high] Undo of an `auto` row (7-day window) can change GLOBAL state: `fill_data`/`difficulty` undo restores allow-listed `words` columns from `undo_json`, and a lemmatize undo whose previous word was tombstoned by a lookup merge un-merges it (`merged_into_word_id = NULL`) and deletes the `alt` word_form.
+     ev: backend/wd/services/suggestions.py:411-418; backend/wd/services/suggestions.py:44; backend/wd/services/suggestions.py:433
+     q: allowed = {k: v for k, v in fields.items() if k in RESTORABLE_WORD_COLUMNS}
+     why: A single user's 撤销 can blank dictionary fields on a shared word other users may already hold — a conflict with admin-owned library data.
+23. [high] Claude cannot address arbitrary rows: item ids are validated against the batch (unknown ids ignored and logged) and every proposed `target` must pass `validate_target`/`validate_headword` (charset/length plus relatedness: equal, in word_forms, suffix rule, or same first three letters), otherwise the verdict is downgraded to `ok`.
+     ev: backend/wd/ai/consolidate.py:389-391; backend/wd/ai/consolidate.py:404-408; backend/wd/services/words.py:792-799
+     q: log.info("consolidate: ignoring id %r outside the batch", raw_id)
+     why: Limits how far a hallucinated or injected output can reach into the shared `words` table, but 'same first three letters' is a loose relatedness rule for creating new provisional words.
+24. [high] Every run is recorded PER-USER in `consolidation_runs` (trigger nightly/manual/admin; status running→done/failed/skipped; words_examined, auto_applied, suggestions, ai_call_id, summary_json); the row is inserted before the Claude call and closed as `skipped` when nothing is examined or the call was deferred.
+     ev: backend/wd/migrations/0001_init.sql:428-440; backend/wd/ai/consolidate.py:158; backend/wd/ai/consolidate.py:511-513
+     q: trigger        TEXT NOT NULL CHECK (trigger IN ('nightly','manual','admin')),
+     why: Gives an operator a per-user audit trail of AI runs, but only via SQL/CLI since no endpoint exposes it.
+25. [high] The Claude call is gated solely by the shared chain `common.claude_call → budget.reserve → can_spend`: kill switch (`WD_AI_ENABLED` and `kv.claude.enabled`), `kv.claude.paused_until`, hourly call cap (60), monthly ($40) and daily ($3) caps with a $0.05 reservation per consolidate call; the call itself runs with `--max-budget-usd 0.40` (`WD_AI_BUDGET_CONSOLIDATE`) and a 240 s timeout.
+     ev: backend/wd/ai/common.py:156-170; backend/wd/ai/budget.py:206-207; backend/wd/ai/budget.py:32
+     q: if not reservation.ok:         resumes = reservation.resumes_at or to_iso(parse_iso(now) + timedelta(minutes=30))         queue.defer(conn, ids, resumes, now=no
+     why: There is no consolidation-specific budget or switch — turning the feature off means turning all AI off or editing code.
+26. [high] Degraded mode with the kill switch off: `ClaudeWorker.gate()` returns a 30 s idle before claiming, so `consolidate_bank` jobs are never dispatched, no `consolidation_runs` row is written, no bank row changes, and the API returns 503 with message_zh 「AI 功能当前不可用」; the handler passes no `on_disabled` callback, so unlike lookups nothing is flagged for the user.
+     ev: backend/wd/jobs/worker.py:249-258; backend/wd/ai/consolidate.py:500-510; backend/wd/errors.py:64
+     q: flagged = lookup.flag_queued_lookups(conn, now=self.ctx.now())
+     why: Disabling AI silently removes consolidation with no user-visible error other than the manual button's toast — the clean 'no end-user AI' configuration.
+27. [high] When AI is paused or a budget cap is hit the handler writes a `skipped/deferred` run and the job is deferred (no attempt consumed); on a failed call the run is `failed` and `handle_failure` applies the §6.3 table — a single-job group falls to backoff then dead, while `auth`/`spawn_error` pauses AI 30 minutes for every user and raises the admin banner.
+     ev: backend/wd/ai/consolidate.py:514-516; backend/wd/ai/common.py:264-267; backend/wd/ai/common.py:37
+     q: finish_run(conn, run_id, "failed", ai_call_id=result.call_id, summary={"status": result.status, "error": (result.error or "")[:300]}, now=now)
+     why: A failing nightly run for one learner can pause AI globally (auth/spawn classes), coupling per-user jobs to shared availability.
+28. [high] The frontend never gates the 立即整理 button on `server.ai_enabled`: the flag appears only in the DTO (`grep -rn ai_enabled frontend/src` → types.ts:29 only), while BankPage and SuggestionsPage (including the empty state) always render the button and surface the server error as a toast.
+     ev: frontend/src/api/types.ts:29; frontend/src/pages/BankPage.tsx:310-312; frontend/src/pages/SuggestionsPage.tsx:122
+     q: ai_enabled: boolean; images_enabled: boolean; dev: boolean;
+     why: A no-AI public deployment would ship a visible button that always fails plus copy promising nightly tidying — UI work is needed to hide the feature.
+29. [high] There is no per-user opt-out: `user_settings` (0001_init.sql:139-160) has no consolidation/AI column, the settings schemas carry no such field (`grep -rn "consolidat|ai_opt|opt_out" backend/wd/services/settings.py backend/wd/routers/settings.py backend/wd/schemas.py` → only the ServerFlags `ai_enabled` and the admin job-type literal), and the nightly filter excludes only `is_active=0` or not-yet-onboarded users; the manual endpoint is open to users before onboarding (`/api/bank*` is auth level U).
+     ev: backend/wd/migrations/0001_init.sql:139-143; backend/wd/jobs/scheduler.py:199; docs/API.md:7
+     q: CREATE TABLE user_settings (   user_id            INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+     why: Region- or consent-based exclusion of individual learners from AI would need a new column or middleware; nothing exists today.
+30. [high] Global off switches are the environment variable `WD_AI_ENABLED=0` and the kv key `claude.enabled='0'`; the admin API can only pause (`paused_until = now + 24 h`) or resume (which also sets `claude.enabled='1'`) — no endpoint sets the kill switch to '0' (`grep -rn claude.enabled backend/wd` shows only reads, the diag printer and the '1' setter), and no consolidate-only switch exists (only `WD_AI_TIMEOUT_CONSOLIDATE_SEC` and `WD_AI_BUDGET_CONSOLIDATE`).
+     ev: backend/wd/config.py:332; backend/wd/ai/budget.py:114-119; backend/wd/routers/admin_ops.py:325-330
+     q: ai_enabled=flag("WD_AI_ENABLED", True),
+     why: The mainland-safe configuration is a one-line env change, but it is all-or-nothing across lookup, content, SVG and consolidation.
+31. [medium] Consolidation is not load-bearing for the learning state machine: the scheduler runs pushes, finalisation and GC before it and isolates it in try/except; batch building, grading and SRS never read `bank_suggestions`/`consolidation_runs`; documented fallbacks exist for its two data products (difficulty NULL → stage index in vocab sorting; `confusables` → `[]`).
+     ev: backend/wd/jobs/scheduler.py:419-422; docs/API.md:169; docs/API.md:463
+     q: result.consolidations = nightly_consolidation(conn, now)     except Exception:         log.exception("scheduler: nightly consolidation failed")
+     why: The product can ship without consolidation; what is lost is bank hygiene (duplicates, inflections, typos in the user's own bank), auto-filled data for user-added words, difficulty tags and 易混 chips — none of which an admin-curated shared library depends on.
+32. [high] `consolidate_bank` is not the only producer of inbox rows: `lookup_word` step 2 writes one open `fix_spelling` suggestion per bank holder, so disabling only the nightly job would not empty 整理建议 while lookups still run.
+     ev: backend/wd/ai/lookup.py:392-393; backend/wd/services/suggestions.py:3
+     q: def _suggest_fix_spelling(conn: sqlite3.Connection, word: Mapping[str, Any], proposed: str, item: Mapping[str, Any], *, now: str) -> int:     """Step 2: one ope
+     why: Any plan to keep the inbox UI while removing per-user AI must account for both producers.
+33. [high] The full `claude` argv — which embeds the user prompt with bank headwords, user_words ids and note excerpts — is written to `claude-logs/YYYY-MM-DD/<call_id>.json` (mode 0600, each argv element truncated at 20,000 chars) and kept `WD_AI_LOG_KEEP_DAYS=14` days; the `ai_calls` ledger row itself stores only counts, cost and the path.
+     ev: backend/wd/ai/runner.py:295-302; backend/wd/config.py:108; backend/wd/migrations/0001_init.sql:527
+     q: "argv": [a if len(a) <= 20_000 else a[:20_000] + "…" for a in argv],
+     why: Personal notes persist on the server disk for two weeks after transmission; account deletion does not reach these files in this slice (DESIGN §10 lists DB cascades only).
+34. [high] Hourly scheduler GC expires timed-out open suggestions for all users and the nightly job repeats it for its own user; the API already reports a timed-out open row as `expired` and refuses accept/reject on it with 409 `already_resolved`.
+     ev: backend/wd/jobs/scheduler.py:184; backend/wd/ai/consolidate.py:179; backend/wd/services/suggestions.py:300-303
+     q: expired = consolidate.expire_stale_suggestions(conn, None, now=now_s)
+     why: Suggestion rows are self-cleaning per-user state; nothing here needs AI, so the sweep is harmless in a no-AI deployment.
+35. [medium] Measured/estimated cost per consolidate run is small: the budget reserves $0.05, the test fixture records $0.028, and the owner's launch analysis estimates $0.010–0.017 per user-night (approaching $0.07 at a 2,000-word bank), charged only on nights the bank changed.
+     ev: backend/wd/ai/budget.py:32; backend/tests/fixtures/claude_consolidate_ok.json:79; docs/PUBLIC_LAUNCH_AND_IOS.md:196
+     q: "consolidate": (0.05, 0.0),
+     why: Cost is not the reason to drop it for a mainland launch — policy is; but at 1,000 users the hourly call cap (60) would also make nightly per-user runs infeasible (noted in the same untracked analysis, line 210).
+## GLOSSARY
+- Consolidation (job/feature) = 整理 (DESIGN §5.4 section title: 整合与更新)
+- Suggestion inbox = 整理建议
+- Personal word bank = 生词库
+- Private note on a bank entry = 备注
+- Confusable-words chips = 易混
+- Run consolidation now button = 立即整理
+- Queued toast = 已安排整理，稍后查看整理建议
+- Auto-applied section = 已自动整理
+- Accept / reject (keep) / undo buttons = 接受 / 保留 / 撤销
+- Empty inbox copy = 暂无整理建议。每晚会自动整理你的生词库。
+- fix_spelling copy = “a” 看起来是 “b” 的拼写错误。替换？
+- lemmatize copy = “a” 是 “b” 的变化形式，合并？
+- merge_duplicate copy = “a” 与 “b” 是同一个词的不同拼写，合并？
+- invalid_word copy = “a” 似乎不是英文单词，删除？
+- split_phrase copy = 建议改学核心词 “b”
+- fill_data copy = 已为 “a” 补全词典信息
+- Pending AI validation = 待校验
+- Could not validate (dead job / AI off) = 暂时无法校验
+- Kept although not recognised = 仅收藏
+- Attention tab (flagged rows) = 待处理
+- Custom (user-added) word = 自添生词
+- ai_disabled server message = AI 功能当前不可用
+- Prompt persona = 整理助手
+- Admin AI-auth banner = Claude CLI 未登录，请以 sqin 身份运行 claude 完成登录
+## UNKNOWNS
+- Whether `money("WD_AI_BUDGET_CONSOLIDATE", 0.40)` accepts 0 (which would make every consolidate call a `budget` stop → dead after 3 attempts) and so could serve as a crude consolidate-only switch — I did not read `money()` in config.py.
+- Whether provisional `words` rows created from a Claude-proposed `target` (via `words.resolve`) can later become public — that depends on `lookup_word` apply rules (lookup slice); I also did not read `_resolve_ecdict` (words.py:652-687), which could create an ECDICT-backed row for a target.
+- The queue-growth claim under `WD_AI_ENABLED=0` (one queued consolidate job per eligible user per day) is a code reading, not an executed scenario.
+- Whether `kv.claude.enabled='0'` can be set by any shipped command — grep found only readers, the `wd check` printer and the admin resume setter writing '1'; setting '0' appears to require direct SQL.
+- Real production cost per run: the untracked PUBLIC_LAUNCH_AND_IOS.md line 68 cites a local ledger figure of $0.0198 per 整理 call, the fixture $0.028, the estimate $0.05 — I did not query the live ledger.
+- Whether account deletion (`DELETE /api/account`) removes `claude-logs` files containing that user's prompt — DESIGN §10 describes DB cascades only; PUBLIC_LAUNCH_AND_IOS.md line 344 lists '注销时清理 claude-logs' as future work, suggesting it does not today.
+## SUGGESTED VERIFICATIONS
+- Queue growth under the kill switch: with WD_AI_ENABLED=0, drive `scheduler.run_tick` for a user with one bank row across two simulated local days (after 02:30 each) and count `jobs WHERE type='consolidate_bank'` — expect 2 queued rows with different dedupe keys (scheduler.py:210-223, worker.py:254-258).
+- Seed-row mutation: craft a consolidate response with only `difficulty_tags` for a seed word's user_words id and run `consolidate.apply`; confirm `words.difficulty` changes on the seed row (consolidate.py:311) while `fill_data` on the same seed row is refused (consolidate.py:265-266).
+- Accept never writes `words`: `grep -n "UPDATE words" backend/wd/services/suggestions.py` should show only lines 418 (in `_undo`) and 432 (in `_unmerge_word`); trace that `_accept` reaches neither.
+- Note persistence on disk: run `test_handler_end_to_end_against_the_fake` with a note on the bank row and inspect `claude-logs/<date>/<call_id>.json` → `argv` for the note text (runner.py:299).
+- Cooldown ignores status: insert a `consolidation_runs` row with status 'skipped' started 10 minutes ago and call POST /api/bank/consolidate — expect 429 (bank.py:152-158).
+- Frontend gating absence: `grep -rn "ai_enabled" frontend/src --include='*.tsx' --include='*.ts'` → only `api/types.ts:29`; confirm BankPage/SuggestionsPage render the button unconditionally.
+- Target creation path: call `consolidate.apply` with a `fix_spelling` verdict whose target is a word absent from `words` and from ECDICT; confirm a new `words` row with `is_public=0, is_valid_english IS NULL` and a live `lookup:<id>` job appear (consolidate.py:445, words.py:688-708).

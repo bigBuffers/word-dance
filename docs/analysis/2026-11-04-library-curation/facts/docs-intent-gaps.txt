@@ -1,0 +1,202 @@
+# SLICE docs-intent-gaps  (33 findings)
+## SUMMARY
+The design documents define the shared library as an operator-seeded canon (9,162 ECDICT/syllabus words imported with source='seed', is_public=1,
+is_valid_english=1, safe_for_sharing=1, "seed words are trusted") living in the GLOBAL tables words/word_forms/word_contents/word_images ("Content is never per
+user"), while user_words, review_logs, daily_stats, push_batches/push_items, bank_suggestions, consolidation_runs and user_settings are PER-USER. User-typed
+words enter the same global words table as private provisional rows (is_public=0, created_by_user_id) under a global UNIQUE(lemma), and the one stated promotion
+rule is purely automatic: a row becomes public only when Claude's lookup_word returns is_english=true AND safe_for_sharing=true (decision log #4, principle 6
+"Shared data is validated data"); the docs contain no human review queue, moderation, promotion-to-canon or unpublish step, and ECDICT-hit words skip validation
+entirely. Integrity rules are UNIQUE lemma, tri-state is_valid_english, safe_for_sharing, a source CHECK of seed/ecdict/claude/user (no 'admin'),
+merged_into_word_id, the word_forms headword guard, a deterministic validator plus relatedness rule for any Claude-proposed headword, never-auto-applied typo
+fixes, and seed words being immune to AI invalidation. AI-optional operation is a first-class design decision (principle 5 "Never-empty fallbacks", decision
+#10, kill switch WD_AI_ENABLED=0 / kv.claude.enabled='0' → "the app runs on ECDICT data + template cards", finalize_building flips batches to ready at once,
+browsing never enqueues jobs), and both the docs and tests pin the degraded states. Of the 7 MUST-HAVEs, #1, #2, #3 and #6 need no AI; #7's image half needs no
+AI (Claude SVG is an optional last resort, template card never fails) but its example-sentence half exists only as Claude-generated word_contents because the
+seed carries no examples; #5 works without AI only for words resolvable via seed/ECDICT (unknown strings become permanently 待校验 dead-ends); #4 is intrinsically
+Claude Code (lookup_word, consolidate_bank, generate_content). Operator-side global content generation already exists as the admin prewarm plan (admin-only,
+never automatic, budgeted) plus per-word regenerate/refetch-image, and the seed file can be updated via wd import-seed (idempotent upsert that never touches
+content or user data, auto-run when the file's sha256 changes). However, the kill switch only stops the worker: adds still create provisional rows and lookup
+jobs, unfamiliar marks and batch builds still enqueue content, and the scheduler still enqueues nightly consolidate_bank per user, so queued end-user-originated
+jobs would all run the moment AI is re-enabled — config alone is not a policy guarantee. Consolidated gap list for an "admin-curated shared library, zero end-
+user AI" mode: already exists — seed import/update path, admin prewarm/regenerate/refetch, visibility rule, GET-only browsing, degraded card copy; config-only —
+WD_AI_ENABLED=0 (or kv.claude.enabled) to silence the worker, WD_SVG_VIA_CLAUDE=0, WD_ECDICT_DB_PATH for instant dictionary resolution, raised budget caps for a
+one-off full-seed prewarm, WD_REGISTRATION_MODE; small code change — stop enqueueing lookup/content/consolidate jobs when a "no end-user AI" flag is set (or
+refuse unknown strings instead of creating provisional rows), hide 生成例句/立即整理 and reword the "tomorrow" copy using ServerFlags.ai_enabled, route admin-initiated
+regeneration through a separate switch; new feature — admin word-curation API/UI (publish/unpublish/merge/delete/rename/ban, provisional-word review queue), an
+admin privileged add/promote path with provenance/licence columns, export of curated words back to data/seed, non-AI content authoring or import (hand-written
+examples), and per-user AI attribution (already identified in PUBLIC_LAUNCH A1/A2/B5/C7/D8, cross-referenced not duplicated here).
+## FINDINGS
+1. [high] The design defines the shared library as GLOBAL tables words/word_forms (one row per normalised lemma) and word_contents/word_images (versioned per word, never per user), seeded from a trusted operator file with source='seed', is_public=1, is_valid_english=1, safe_for_sharing=1.
+     ev: docs/DESIGN.md:186; docs/DESIGN.md:187; docs/DESIGN.md:207
+     q: | Vocabulary (shared) | `words`, `word_forms` | one row per normalised `lemma`; stage flags `stage_zk/gk/cet4/cet6` (cumulative as in the sources)
+     why: An admin-curated library maps directly onto these four global tables; everything a client needs to read is already shared data, not per-user data.
+2. [high] PER-USER data is explicitly separated in the design: user_words/review_logs/daily_stats (learning), push_batches/push_items (daily push), consolidation_runs/bank_suggestions (nightly 整理 inbox) and user_settings; none of these hold dictionary or example content.
+     ev: docs/DESIGN.md:188; docs/DESIGN.md:190; docs/DESIGN.md:189
+     q: | Per-user learning | `user_words`, `review_logs`, `daily_stats` | one row per (user, word) ever touched; SRS fields on the row;
+     why: A read-only client regime only has to freeze writes to the global group; per-user learning state keeps working without any AI.
+3. [high] The stated privacy rule for custom words: a user-added row is private (is_public=0) until Claude validates it; visibility is creator OR any holder of a user_words row OR admin; it becomes public only when lookup_word returns is_english=true AND safe_for_sharing=true (decision log #4, principle 6).
+     ev: docs/DESIGN.md:296; docs/DESIGN.md:296; docs/DESIGN.md:603
+     q: a `words` row is visible to user `me` iff `is_public = 1 OR created_by_user_id = me OR EXISTS (SELECT 1 FROM user_words uw WHERE uw.user_id = me AND uw.word_id 
+     why: Promotion from private to shared is designed as an AI verdict, so with zero end-user AI no user word can ever become public unless an admin path is added.
+4. [high] The only designed gate between a user's keyboard and the public library is Claude's lookup verdict; `safe_for_sharing` is defined solely as a model judgement and no document (DESIGN, API, TASKS, CLAUDE_INTEGRATION, FRONTEND, ops, DEPLOY) mentions a human review queue, moderation, approval or promotion step (grep -n -i 'moderat|curat|promot|approv|review queue|unpublish|ban|下架' over those docs returns only the timezone list 'curated 30' and prompt wording).
+     ev: docs/CLAUDE_INTEGRATION.md:176; docs/API.md:161
+     q: "safe_for_sharing":{"type":"boolean","description":"false if the string is a personal name, offensive, private or otherwise unsuitable to show other users"},
+     why: Admin curation is not a deferred feature but an unscoped one: the design never planned a human in the loop for the shared library.
+5. [high] Integrity rules on the shared table are schema-level: UNIQUE lemma, tri-state is_valid_english (NULL = unchecked), safe_for_sharing, source CHECK limited to seed/ecdict/claude/user (no 'admin' value), created_by_user_id SET NULL on account deletion, merged_into_word_id for merges.
+     ev: docs/SCHEMA.sql:205; docs/SCHEMA.sql:193; docs/SCHEMA.sql:190
+     q: CREATE UNIQUE INDEX ux_words_lemma      ON words(lemma);
+     why: An admin-curated word has no provenance value to carry today; adding an 'admin' source or a curation column is a (additive) schema change.
+6. [high] Any Claude-proposed headword that would mutate shared rows must pass the same deterministic validator as user input plus a relatedness rule, typo corrections are never auto-applied, and the word_forms headword guard prevents a form from shadowing a seed headword — these are the designed defences for shared-data integrity.
+     ev: docs/DESIGN.md:304; docs/DESIGN.md:304; docs/DESIGN.md:186
+     q: a proposed headword mutates shared data only if it passes the deterministic validator (same charset/length/token rules as user input **and** relatedness
+     why: These rules bound what AI may change in the canon; an admin tool would need to honour the same validator to keep resolution deterministic.
+7. [high] Seed words are protected from AI invalidation by design: a content call answering valid=false for a seed word is an anomaly (nothing stored), and the consolidation invalid_word verdict only touches provisional (source='user') rows; conversely user/ECDICT words can be flipped back to private by a later content call.
+     ev: docs/CLAUDE_INTEGRATION.md:347; docs/CLAUDE_INTEGRATION.md:347; docs/CLAUDE_INTEGRATION.md:386
+     q: * `valid=false` for a **seed** word (`source='seed'`) → anomaly: nothing stored, `system_events('content_anomaly')`, the job is requeued once with `group_size=1
+     why: The seed canon is already treated as authoritative and AI-immutable, which is the right base for an admin-maintained library.
+8. [high] ECDICT-hit words (when WD_ECDICT_DB_PATH is set) bypass AI validation and become public immediately, except rows whose only translation starts with [网络]; the docs frame ECDICT as the no-AI path for words outside the seed.
+     ev: docs/DESIGN.md:293; docs/ops.md:217; docs/DEPLOY.md:328
+     q: ECDICT rows are dictionary data, so they are created with `is_public=1, is_valid_english=1` — except rows whose only translation starts with `[网络]`
+     why: [config-only] Installing ECDICT makes requirement #5 (user adds own words) work for almost all real words with zero AI, but it also lets unreviewed dictionary rows go public automatically.
+9. [high] [already exists] The designed operator path for updating global dictionary rows is the seed file: `wd import-seed` is an idempotent upsert keyed by lemma that never touches content/difficulty/user data, the lifespan auto-imports when the file's sha256 differs from kv.seed_version, and the builder script is maintenance-only; in code the import is ON CONFLICT DO UPDATE (no DELETE of words) and forces source='seed', is_public=1.
+     ev: docs/TASKS.md:165; docs/DESIGN.md:172; docs/TASKS.md:162
+     q: `wd import-seed [--file PATH] [--force]` (`--file` defaults to `cfg.seed_path` = `WD_SEED_PATH`; reads `.jsonl.gz` or `.jsonl`, idempotent upsert keyed by `lemm
+     why: An admin can already add or correct canon words server-side by shipping a new seed file, but only dictionary fields (no examples/content) travel that way and nothing can be removed.
+10. [high] [GAP — new feature] No admin endpoint, CLI or UI can publish/unpublish, merge, delete, rename or ban a word: the API catalogue's only admin word routes are 68 regenerate and 69 refetch-image, and in code is_public is written only by words.resolve (provisional insert), seed import, and the three AI appliers (lookup/content/consolidate) — never by a router (grep -rn 'is_public' backend/wd/routers backend/wd/services backend/wd/ai backend/wd/seed.py filtered to UPDATE/SET/INSERT). PUBLIC_LAUNCH B5 already lists this gap.
+     ev: docs/API.md:129-130; backend/wd/routers/admin_ops.py:394; backend/wd/services/words.py:672
+     q: | 68 | POST | `/api/admin/words/{id}/regenerate` | A | new content version |
+     why: Without a curation API the admin cannot promote a user's provisional word to the shared canon or remove a bad public one except by raw SQL, which is the core of the owner's question (2).
+11. [high] [GAP — new feature] The words table has no provenance or licence column for contributed words (only the seed `sources` string and word_images.license exist), and PUBLIC_LAUNCH D8 leaves the contribution licence/seed-回流 question open.
+     ev: docs/SCHEMA.sql:188; docs/SCHEMA.sql:256; docs/PUBLIC_LAUNCH_AND_IOS.md:399
+     q: sources             TEXT,                             -- provenance, e.g. 'cet4 cet46 ecdict gk zk'
+     why: Promoting user words into an admin-curated canon needs a record of where each word came from and under what terms.
+12. [high] [GAP — new feature] There is no export of library/contributed words back to data/seed: the only export is the per-account endpoint 11, and neither cli.py, seed.py nor the admin routers contain an export command (grep -rn -i 'export' backend/wd/cli.py backend/wd/seed.py backend/wd/routers/admin_ops.py → nothing).
+     ev: docs/API.md:72; docs/PUBLIC_LAUNCH_AND_IOS.md:344
+     q: | 11 | GET | `/api/account/export` | U | export bank + history (csv/json) |
+     why: An admin who validates user words on one server cannot fold them into the shipped seed, so curation does not compound across deployments.
+13. [high] AI-optional operation is a stated design decision: principle 5 (never-empty fallbacks), decision log #10, and §6.3's rule that a batch becomes ready immediately when AI is disabled; the kill-switch row says the app then runs on ECDICT data + template cards.
+     ev: docs/DESIGN.md:53; docs/DESIGN.md:362; docs/CLAUDE_INTEGRATION.md:410
+     q: 5. **Never-empty fallbacks.** A word without Claude content shows its ECDICT entry; a word without a photo gets the template card; the daily push never blocks o
+     why: [config-only] The read/study path is explicitly designed to work with AI off, so a pre-generated library plus WD_AI_ENABLED=0 is a supported, tested operating mode.
+14. [high] Kill-switch mechanics in docs and code: the Claude worker idles and leaves jobs untouched, flags bank rows of queued lookups as 「暂时无法校验」, endpoints 30/38/67 answer 503 ai_disabled, ServerFlags.ai_enabled is sent to the client, and tests pin the idle/flag behaviour.
+     ev: docs/CLAUDE_INTEGRATION.md:306; docs/API.md:185; backend/wd/jobs/worker.py:254-255
+     q: if not ai_enabled(): stop.wait(30); continue        # WD_AI_ENABLED=0 or kv.claude.enabled='0' → idle, jobs untouched
+     why: This is the existing degraded mode an operator would rely on; its semantics are 'paused', not 'never', which matters for the policy question.
+15. [medium] [GAP — small code change] The kill switch does not stop end-user actions from enqueueing AI jobs: enqueue_content_if_needed has no ai_enabled check, words.enqueue_lookup has none (routers/bank.py checks ai_enabled only in bank_consolidate), DESIGN §6.3 step 9 enqueues content at batch build, and the scheduler's nightly_consolidation enqueues consolidate_bank per user without consulting ai_enabled (only prefetch does); queued jobs run as soon as AI is re-enabled.
+     ev: backend/wd/services/bank.py:465-477; backend/wd/services/words.py:604; backend/wd/routers/bank.py:150-151
+     q: job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=int(priority), now=now)
+     why: A 'zero end-user AI' guarantee needs enqueue-site gating (or a dedicated flag), because WD_AI_ENABLED=0 only defers user-originated Claude calls rather than preventing them.
+16. [high] Requirement mapping to live AI: #1 accounts, #2 complete vocabulary (seeded words table), #3 mark unfamiliar and #6 confirm mastered need no AI; #4 is defined as Claude Code jobs (lookup_word, consolidate_bank, generate_content) and is intrinsically AI; #5 needs AI only for strings outside seed/ECDICT; #7's examples exist only as Claude content while its image half has non-AI providers and a never-failing card.
+     ev: docs/DESIGN.md:42; docs/DESIGN.md:43; docs/DESIGN.md:45
+     q: | 4 | Backend uses **Claude Code** to consolidate/update the bank and pushes a daily batch per user settings | `claude -p` jobs: `lookup_word` (validate/normali
+     why: Only requirement #4 (and the example half of #7) is structurally tied to live AI; both can be satisfied by operator-run generation if the end-user triggers are removed.
+17. [high] The seed record format carries phonetic/translation/definition/pos/frequency/exchange/stages but no example sentences, collocations or mnemonics; those fields exist only in word_contents produced by generate_content, so 'authentic idiomatic examples' (requirement #7) cannot come from the seed without AI or a new authoring path.
+     ev: docs/DESIGN.md:197-207; data/seed/stats.json:21-24; docs/SCHEMA.sql:236
+     q: | `translation[]` | `translation` (`'\n'.join`) | zh lines |
+     why: [GAP — new feature] An admin-curated library with examples needs either operator-run prewarm or an import/edit path for hand-written content; neither a content upload endpoint nor a seed field exists.
+18. [high] [already exists] Operator-side bulk generation of GLOBAL content is the admin prewarm plan: admin-only, never automatic, priority 90, selects public valid words by stage/frequency, Wikimedia-only images, bounded by its own sub-cap and the daily/monthly caps; whole-seed cost is estimated at ≈ $37 and PUBLIC_LAUNCH C7 notes caps must be raised to finish it before launch.
+     ev: docs/CLAUDE_INTEGRATION.md:297; docs/CLAUDE_INTEGRATION.md:405; docs/API.md:230
+     q: **`prewarm_plan` mechanics** (admin only, never automatic): each pass selects up to `5 × WD_AI_BATCH_SIZE` candidate words of the stage (public, valid, `content
+     why: This is the mechanism by which an admin can pre-fill the shared library server-side so clients only read; it requires AI to be enabled while the admin runs it (503 ai_disabled otherwise).
+19. [high] Content generation is global and idempotent: the prompt never receives user notes or identities, the handler skips words that already have current content, prefetch is gated off when AI is disabled, and browsing never enqueues or spends; so once the canon is pre-generated the system-triggered content paths become no-ops.
+     ev: docs/CLAUDE_INTEGRATION.md:299; docs/DESIGN.md:300; docs/DESIGN.md:405
+     q: Content is global: before every call the handler drops words whose `content_state='ready' AND prompt_version == current` unless `force`.
+     why: [already exists] A fully pre-generated library turns every remaining content trigger into a cache hit, which is exactly the 'clients just read it' property the owner wants.
+20. [high] The per-user AI paths that carry end-user input to Claude are enumerated by the design: lookup_word (typed strings), consolidate_bank (bank headwords plus a ≤120-char sanitised note), explicit content requests, studied-word SVGs and unfamiliar-triggered content; PUBLIC_LAUNCH 2.3 already classifies these as live calls on the user's input versus read-only cached outputs.
+     ev: docs/DESIGN.md:567; docs/DESIGN.md:567; docs/PUBLIC_LAUNCH_AND_IOS.md:108
+     q: user strings reach Claude only as JSON string values inside a labelled data block
+     why: These five triggers are the exact set an 'admin-curated, zero end-user AI' mode must disable or redirect to an admin queue.
+21. [high] [GAP — small code change] With AI off, a custom word outside seed/ECDICT is a permanent dead-end by design: it is created provisional with badge 待校验, flagged 「暂时无法校验」 with a 重试 button that re-enqueues a job that never runs, excluded from every batch, and 保留 only yields 仅收藏; no path lets an admin validate it without Claude.
+     ev: docs/DESIGN.md:294; docs/DESIGN.md:342; docs/CLAUDE_INTEGRATION.md:373
+     q: The bank row exists immediately with badge **待校验**.
+     why: In zero-end-user-AI mode the add-word UX must either reject unknown strings up front or route them to an admin review queue instead of promising a validation that will never happen.
+22. [high] [config-only] Requirement #7's image half is satisfiable with zero AI: photos come from Wikimedia/Openverse/keyed providers, the Claude SVG is an optional last resort (WD_SVG_VIA_CLAUDE, also disabled by WD_AI_SVG_DAILY_BUDGET_USD=0 or the kill switch), and the deterministic template card never fails; the admin overview exposes the card_only share.
+     ev: docs/DESIGN.md:549; docs/DEPLOY.md:331; docs/DESIGN.md:601
+     q: No file, no network, no Claude — every word always has an image URL.
+     why: Images need no AI at all, so the only AI-dependent learner-facing asset is the example/collocation/mnemonic content.
+23. [high] [GAP — new feature] No configuration flag exists to disable custom-word creation, to require review before publication, to pin a 'no end-user AI' policy, or to gate by region: config.py, DEPLOY §4 and env.example contain no custom/review/region/geo variable (grep -n -i 'custom|review|region|geo|public_words|curat' on all three → nothing); the existing toggles are WD_AI_ENABLED, kv.claude.enabled (lifted by the admin pause endpoint), WD_SVG_VIA_CLAUDE, WD_ECDICT_DB_PATH, WD_REGISTRATION_MODE, WD_IMAGES_ENABLED. PUBLIC_LAUNCH stage 2 proposes WD_PUBLIC_WORDS_REQUIRE_REVIEW.
+     ev: backend/wd/config.py:332; backend/wd/config.py:321; docs/CLAUDE_INTEGRATION.md:409
+     q: ai_enabled=flag("WD_AI_ENABLED", True),
+     why: The operator has an AI on/off switch but no policy switch; any mode where admin AI is allowed while end-user AI is forbidden needs a new flag and enqueue-site checks.
+24. [high] [GAP — small code change] The frontend does not consult ServerFlags.ai_enabled: the only client-side use is mapping a 503 to the toast 'AI 功能暂时关闭'; 生成例句 / 立即整理 buttons and the 添加生词 'AI 校验补全' preview copy still render when AI is off, and the degraded card copy promises examples 'tomorrow' (明天补齐) rather than describing a permanent dictionary mode.
+     ev: frontend/src/api/client.ts:212; frontend/src/i18n/zh.ts:19; frontend/src/i18n/zh.ts:39
+     q: return z.aiDisabled;
+     why: A read-only client experience needs the AI affordances hidden and the copy changed; the server already sends the flag needed to do it.
+25. [high] Install and ops assume a logged-in claude on the box but tolerate its absence: install.sh only warns when `wd claude-check` fails, and the runbook's 'Claude not logged in' row says jobs stay queued and the UI runs on dictionary data; nothing in the docs forbids a server without a claude binary.
+     ev: deploy/install.sh:143; docs/ops.md:196
+     q: run "$REPO/.venv/bin/wd" claude-check || echo "WARN: claude check failed — run 'claude' once as $RUN_USER to log in, then 'wd claude-check'"
+     why: [config-only] A public read-only server can be deployed without any Claude credential; the AI work can be done elsewhere and the database (or seed) shipped.
+26. [medium] Governance was never scoped rather than deferred: TASKS.md has no work package for word curation (grep -n -i 'deferred|not built|out of scope|post-MVP|future|TODO|not implemented' finds only handler/stub notes), and ops.md §10 'Known issues and deferred items' lists only unrun manual acceptance and provider observations.
+     ev: docs/ops.md:250-253; docs/ops.md:253; docs/TASKS.md:275
+     q: ## 10. Known issues and deferred items (integration hand-over)
+     why: There is no half-built curation feature to finish; an admin library tool would be net-new design work.
+27. [high] Per-user nightly consolidation writes GLOBAL rows: fill_data and difficulty verdicts auto-apply to non-seed words rows (source='claude'), and lemmatize can repoint; decision log #5 limits auto-apply to these, everything else becomes a per-user suggestion.
+     ev: docs/DESIGN.md:305; docs/DESIGN.md:604
+     q: Auto-applied (status `auto`, 7-day 撤销): `fill_data` for NULL fields of non-seed words, `difficulty` when NULL, and `lemmatize` **only** when the target exists i
+     why: If shared data must be admin-only, this user-triggered write path to the global words table is one more thing to disable, not just the lookup/content jobs.
+28. [high] Admins have no privileged write path to the library: the visibility rule lets admins see every word, but an admin adding a word goes through the same resolve() as a user (source='user', is_public=0 until lookup), and the source CHECK has no admin value.
+     ev: docs/API.md:8; docs/SCHEMA.sql:190; backend/wd/services/words.py:672-674
+     q: admins see every word. A word that is invisible yields 404 `word_not_found` (never 403) and is absent from lists.
+     why: [GAP — new feature] 'Admin curates the shared library' presupposes an admin add/promote primitive that the data model and routes do not provide.
+29. [high] [already exists] Content is versioned with an active/superseded/rejected status and content_reports feed admin regenerate (endpoint 68, priority 10), so an admin can re-curate a word's content — but only by issuing a new Claude call; there is no endpoint to hand-edit or upload content JSON (catalogue rows 54-74 contain no content PUT).
+     ev: docs/API.md:231; docs/SCHEMA.sql:237; docs/FRONTEND.md:157
+     q: **68 `POST /api/admin/words/{id}/regenerate`** → `202 {job_id}` (new content version, priority 10; a word that already has content keeps `content_state='ready'`
+     why: Admin-initiated regeneration is compatible with the owner's constraint (operator input, not end-user input), but non-AI correction of a bad example sentence is impossible today.
+30. [high] Budgets are global rather than per user (PUBLIC_LAUNCH 1.4/A1/A2, cross-referenced, not re-derived here); in an admin-curated regime that becomes a strength because all spend is operator-initiated, but the default monthly cap of $40 is below the ≈ $37-44 whole-seed prewarm plus daily caps, so a one-off cap increase is a prerequisite.
+     ev: docs/PUBLIC_LAUNCH_AND_IOS.md:65; docs/PUBLIC_LAUNCH_AND_IOS.md:66; docs/DEPLOY.md:324
+     q: **全部是全局的**：`ai_calls` 没有用户列。
+     why: [config-only] Running the whole-library prewarm needs the caps raised once; per-user quotas become moot when end users cannot trigger AI.
+31. [high] PUBLIC_LAUNCH already names the target mode ('大陆用户…只能使用预生成内容与字典模式') and plans curation in stage 2 (admin word API/page, review-quarantine switch, wd words-audit, wd export-words, curation_state), but no design document specifies that mode's behaviour; it exists only as a proposal.
+     ev: docs/PUBLIC_LAUNCH_AND_IOS.md:332; docs/PUBLIC_LAUNCH_AND_IOS.md:344
+     q: 大陆用户在地区门控下只能使用预生成内容与字典模式。
+     why: The owner's question is already on the roadmap as a multi-week feature set, not as something switchable today.
+32. [medium] The in-app AI disclosure is a single global line in 关于与数据来源 ('例句、搭配与记忆提示由 AI 生成，仅供学习参考'), which already fits pre-generated content; PUBLIC_LAUNCH B3 notes per-card labelling is absent.
+     ev: frontend/src/i18n/zh.ts:86; docs/PUBLIC_LAUNCH_AND_IOS.md:80
+     q: ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考'
+     why: Serving operator-pre-generated AI content to readers still requires disclosure; the existing copy covers it minimally.
+33. [high] qa.md confines real-Claude acceptance to one section (§C, ≤ $0.20) and every other acceptance step runs with the fake claude; the manual checklists therefore already exercise the product end-to-end without a live model.
+     ev: docs/qa.md:39; docs/qa-study.md:58
+     q: ## C. Real Claude acceptance (post-step 5 — total ≤ $0.20; watch `journalctl -u word-dance -f`)
+     why: Evidence that the non-AI operating surface is the tested default, which lowers the risk of running the public instance with AI off.
+## GLOSSARY
+- Personal word bank (user_words) = 生词库
+- Shared vocabulary browser / the library = 词库
+- Screening card in today's push = 推荐词
+- Screening page = 筛词
+- Consolidation = 整理 ; suggestion inbox = 整理建议 ; manual trigger button = 立即整理
+- Custom (user-added) word = 自添生词
+- Pending AI validation = 待校验 ; add-result badge = 待 AI 校验
+- Not recognised / could not validate = 未识别 / 暂时无法校验
+- Re-validation in progress = 重新校验中
+- Kept although not recognised (collected, never pushed) = 仅收藏
+- Mark as unfamiliar = 不熟悉 / 标为不熟悉
+- Mastered (removed from bank) = 已掌握
+- Admin bulk pre-generation (prewarm) = 预生成
+- Seed version (admin tile) = 词库版本
+- User-added words (admin tile) = 用户添加
+- AI disabled toast (503 ai_disabled) = AI 功能暂时关闭
+- Budget exhausted / deferred content = 今日 AI 额度已用完，例句将在明天补齐
+- Generate examples button = 生成例句
+- Content pending = 例句生成中…
+- Content failed = 今天的例句暂时生成不了，先用词典释义学习
+- Lookup preview for an unknown string = 词典中未找到，将由 AI 校验补全
+- Template card caption = 系统生成卡片 ; Claude SVG caption = AI 生成示意图
+- About / data sources section = 关于与数据来源
+- AI disclosure line = 例句、搭配与记忆提示由 AI 生成，仅供学习参考
+- Example sentence / image / pronunciation = 例句 / 配图 / 发音
+- Today's push = 今日词汇 (nav 今日)
+- Stages = 初中 / 高中 / 四级 / 六级
+## UNKNOWNS
+- Whether build_batch step 9 and the mark/batch-mark routes (bank.py:606-642, routers/words.py) check ai_enabled before calling enqueue_content_if_needed — I verified the helper has no gate, not every caller (other slice).
+- Whether `wd import-seed --force` with a custom seed file containing non-syllabus words works end to end (record format requirements, stage flags NULL) and whether a forced re-import overwrites translation/definition fields that lookup/consolidation had filled on seed rows.
+- Whether the admin overview's 待校验 (pendingValidation) count is backed by any admin list of provisional words; FRONTEND §5.8 lists no such tab.
+- Anthropic's actual stance on serving cached outputs to users in unsupported regions — PUBLIC_LAUNCH 2.3 states this is an inference, not a written safe harbour.
+- Whether the 02:30 consolidate_bank enqueue is covered by a frozen-clock test with kv.claude.enabled='0' (test_scheduler.py monkeypatches ai_enabled for prefetch only, as far as I read).
+## SUGGESTED VERIFICATIONS
+- Start a test instance with WD_AI_ENABLED=0, POST /api/bank/add an unknown string, and confirm a provisional words row plus a queued lookup_word job are created (expected: yes, words.py:604 has no gate); then set WD_AI_ENABLED=1 and confirm the job runs — this proves the kill switch defers rather than prevents end-user AI.
+- grep -rn 'enqueue_content_if_needed\|enqueue_lookup\|consolidate_bank' backend/wd/services backend/wd/routers backend/wd/jobs and check each call site for an ai_enabled/paused guard; the claim is that only prefetch and the three 503 endpoints are gated.
+- Confirm no router writes words.is_public: grep -rn 'is_public' backend/wd/routers should show only reads inside visibility SQL; any UPDATE would falsify the 'no admin unpublish' finding.
+- Run `wd import-seed --force` against a DB where a seed word's translation was changed and where a user holds it; verify translation reverts, difficulty/active_content_id/user_words are untouched, and no words row is deleted (TASKS.md:165 / seed.py:75-77,222).
+- zcat data/seed/vocab.jsonl.gz | head -1 | python3 -I -c 'import json,sys; print(sorted(json.loads(sys.stdin.readline()).keys()))' to confirm the record has no examples/collocations/mnemonic keys.
+- In the frontend, grep for server.ai_enabled usage (expected none besides types) and manually load /words/<id> with kv.claude.enabled='0' to confirm the 生成例句 button still renders and 503s.
+- With a frozen clock at 02:31 local and kv.claude.enabled='0', run one scheduler tick and check jobs for a queued consolidate_bank row (expected: present, scheduler.py:194-226 has no gate).
