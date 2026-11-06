@@ -22,7 +22,7 @@ from ..config import Settings
 from ..deps import current_user, get_clock, get_db, get_settings, visible_word_sql
 from ..errors import ApiError
 from ..jobs import queue
-from ..services import bank, ecdict, words
+from ..services import bank, ecdict, learn_order, words
 
 router = APIRouter()
 
@@ -101,9 +101,11 @@ def lookup(
         elif ecdict.lookup(norm.lemma) is not None:
             out["via"] = "ecdict"
 
+    # raw frequency on purpose — the one list that is autocomplete, not a learning order: suggestions rank by commonness
+    # (learn_order.FRQ_TAIL, API.md 22; the learning order words.learn_rank drives 词库 / 筛词 / 推荐词 / 预生成)
     sug = conn.execute(
         f"SELECT w.* FROM words w WHERE w.lemma >= :q AND w.lemma < :q || '~' AND w.merged_into_word_id IS NULL AND {vis} "
-        "AND w.id != :exclude ORDER BY (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma LIMIT :limit",
+        f"AND w.id != :exclude ORDER BY {learn_order.FRQ_TAIL} LIMIT :limit",
         {**params, "exclude": -1 if exclude is None else exclude, "limit": LOOKUP_SUGGESTIONS},
     ).fetchall()
     out["suggestions"] = words.word_briefs(conn, sug, uid)

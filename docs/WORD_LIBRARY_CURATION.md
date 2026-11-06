@@ -86,7 +86,7 @@
 
 **所以管理员今天已经可以**：改一行 JSONL 的释义或音标（更稳的做法是写进 `data/lists/overrides.tsv` 再 `make seed`，重建可复现）、追加新词（只需 `word` 字段；不给 `stages` 则 `stage_min` 为空，只在「全部」标签可见，不会进入筛词与推荐词）、修正词形，然后打包、提交、部署或重启。**不能**：删词或下架、提供例句、在网页上操作。
 
-**一个陷阱（已复现）。** `kv` 只记录哈希，不记录路径。`wd import-seed --file 自定义文件` 之后，下次服务启动或下次 `install.sh`（第 6 步也是不带 `--file` 的 `wd import-seed`）会再次导入仓库种子，把两边都有且被你改过的 lemma 改回原值；只在自定义文件里的词因为不删除而保留。你 Mac 的 `.env` 里 `WD_SEED_PATH=""`，等价于未设置，也在这个陷阱范围内。要么替换 `data/seed/vocab.jsonl.gz`，要么把 `WD_SEED_PATH` 指向自定义文件。`seed_check` 对损坏或不配套的种子文件（截断的 gzip、未知阶段码）现在有防御：导入异常被捕获并记录为 `system_events('seed_import_failed')`（管理页事件表可见），服务用库里已有的词表继续启动，下次启动再试；改种子前仍应先在副本上 `wd import-seed --file … --dry-run` 看计划，导入后 `wd check db` 看四条不变量。
+**一个陷阱（已复现）。** `kv` 只记录哈希，不记录路径。`wd import-seed --file 自定义文件` 之后，下次服务启动或下次 `install.sh`（第 6 步也是不带 `--file` 的 `wd import-seed`）会再次导入仓库种子，把两边都有且被你改过的 lemma 改回原值；只在自定义文件里的词因为不删除而保留。你 Mac 的 `.env` 里 `WD_SEED_PATH=""`，等价于未设置，也在这个陷阱范围内。要么替换 `data/seed/vocab.jsonl.gz`，要么把 `WD_SEED_PATH` 指向自定义文件。`seed_check` 对损坏或不配套的种子文件（截断的 gzip、未知阶段码）现在有防御：导入异常被捕获并记录为 `system_events('seed_import_failed')`（管理页事件表可见），服务用库里已有的词表继续启动，下次启动再试；改种子前仍应先在副本上 `wd import-seed --file … --dry-run` 看计划，导入后 `wd check db` 看全部不变量（schema 14 起八条，含学习顺序四条——导入会在同一事务里重算 `learn_rank`）。
 
 **运行时的非管理员增长路径。**
 
@@ -139,7 +139,7 @@
 
 能做（21 个接口加 CLI，全部要求 admin 角色）：概览与健康；用户、邀请、禁用、重置密码、设为管理员；任务重试与重排；AI 暂停 24 小时、恢复、探测；预生成；单词重新生成（仅 API，无按钮）；换图（仅 API）；内容反馈处理（重新生成 / 换图 / 忽略）；事件；只读配置。CLI 另有 `import-seed`、`backup` / `restore`、`fetch-image`、`images-prune`、`consolidate <用户>`、`create-admin` / `promote` 等。
 
-不能做：新建、编辑、隐藏、删除词；编辑或手写内容；通过界面或命令把用户临时词转正（只能走种子文件）；下架一个词（用 SQL 把种子词的 `is_public` 改成 0，也会在下一次种子哈希变化时被导入改回去）；按创建者列出用户添加的词；跨用户查看待校验；导入或导出词与内容；发布「词库版本」（唯一的版本信号是 `kv.seed_version`）。角色只有 user 和 admin。
+不能做：新建、编辑、隐藏、删除词；编辑或手写内容；通过界面或命令把用户临时词转正（只能走种子文件）；下架一个词（用 SQL 把种子词的 `is_public` 改成 0，也会在下一次种子哈希变化时被导入改回去）；按创建者列出用户添加的词；跨用户查看待校验；导入或导出词与内容；发布「词库版本」（唯一的版本信号是 `kv.seed_version`）；改学习顺序——只能改策略版本（`services/learn_order.py` 的 `LEARN_ORDER_VERSION`）并重算，不能手改 `learn_rank`（`wd check db` 的 `learn_rank_matches_policy` 会报；撒入的无词频词、副词等的键则在下一次重算时被改回）。角色只有 user 和 admin。
 
 管理员对内容的每个操作都回到同一条 Claude 任务管线，而且管理员触发与用户触发共用**一个** AI 开关：没有「只允许管理员用 AI」的模式。唯一绕过开关的是「探测」接口和 `wd claude-check`，它们在 `WD_AI_ENABLED=0` 时照样调用 Claude（每次最多两次、各 $0.05 上限）；`install.sh` 没有 claude 二进制就直接退出，并无条件执行 `claude-check`。
 
@@ -147,7 +147,7 @@
 
 SPA 没有 service worker、没有缓存库，请求带 `cache: 'no-store'`，服务端对 `/api` 全部回 `Cache-Control: no-store`，每次进入页面都重新读服务器，所以服务端的任何改动下一次请求就可见。两个例外：`/media/images` 按哈希不可变缓存一年（换图等于换 URL）；`/media/card/{id}.svg` 浏览器缓存 24 小时，服务端 LRU 的键是（词 id，active_content_id，`words.updated_at`），所以直接用 SQL 改释义而不更新 `updated_at`，卡片会一直是旧的。
 
-选词规则（核验 C10）：词库页列出 `is_public=1` 的行，不要求 `is_valid_english`；筛词与每日推荐词要求 `is_public=1` 且 `is_valid_english=1` 且未合并且命中用户阶段且用户未持有，按阶段距离 → 词频（frq 为空排最后）→ 字母序。阶段距离按 `stage_min` 计算，一条有阶段标志但 `stage_min` 为空的手工插入行会排在每个用户筛词的**第一位**。所以管理员在服务端插入词条时必须同时给 `stage_*`、`stage_min` 和 `frq`。
+选词规则（核验 C10）：词库页列出 `is_public=1` 的行，不要求 `is_valid_english`；筛词与每日推荐词要求 `is_public=1` 且 `is_valid_english=1` 且未合并且命中用户阶段且用户未持有，按阶段距离 → 学习顺序 `learn_rank`（为空排最后）→ 词频 → 字母序。阶段距离按 `stage_min` 计算，`stage_min` 为空的行距离为 11，排在每个用户筛词的**末尾**（不再是第一位；`wd check db` 的 `stage_min_consistent` 会报这种行）；`learn_rank` 由 `services/learn_order.py` 从 `pos`（主词性）、`frq`/`bnc`、`sources`、`stage_min` 派生，服务启动、导种子、每夜维护和 `wd learn-order` 时重算，不能手改。所以管理员在服务端插入词条时必须同时给 `stage_*`、`stage_min`、`frq` 与 `pos`，然后跑 `wd learn-order`（或等下一次启动）。
 
 ### 1.7 开关语义：现在的「关闭 AI」是暂停，不是禁止
 
@@ -293,7 +293,7 @@ curated 模式移除的是：Anthropic 的最终用户地区问题（走 B1 完�
 | C7 | 21 个管理接口、共用开关、探测绕过 | 确认（执行） | 暂停下任务会被领取后推迟而不是空转；自动暂停 30 / 15 分钟 |
 | C8 | ECDICT 路径不需要 AI | 部分（执行） | 不需要校验但仍排例句任务；`[网络]` 行是 `source='ecdict'`；预览与添加的提示不一致 |
 | C9 | 前端无缓存 | 部分（执行） | `/media/card` 的 24 小时缓存与 `updated_at` 键；错误的「明天补齐」文案在第一次轮询后出现 |
-| C10 | 选词规则 | 部分（执行） | `/api/stages` 只按 `is_public`；`stage_min` 为空的行排第一；预生成排除有活任务的词 |
+| C10 | 选词规则 | 部分（执行） | `/api/stages` 只按 `is_public`；`stage_min` 为空的行排最后（距离 11）；`learn_rank` 为空的行在同距离组内排最后；预生成排除有活任务的词 |
 | C11 | 预生成吞吐与成本 | 部分（算术） | 整点推迟使实际吞吐减半；账本实测 $0.0055/词，全库约 $50 |
 | C12 | 整理对全局表的写入 | 部分（执行） | 接受建议会写 `words`；夜间入队有条件但实际上几乎每晚触发；原始日志每段截断在 20,000 字符 |
 | C13 | 配图治理 | 部分（执行） | 「换一张」不废弃共享图；无现役图时用户路径会落到 Claude SVG；prune 无租约检查 |

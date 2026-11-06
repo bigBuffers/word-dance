@@ -8,7 +8,12 @@ DESIGN §7.1 and the runbooks describe what the code does; each test here pins o
 * TASKS P0 step 4 / §I and DESIGN §7.1 carry the real ``run_migrations`` / ``on_action`` signatures;
 * ops.md §1 and DEPLOY §6 describe ``wd logs`` truthfully (its ring buffer lives inside ``wd serve``; the daily check is
   ``journalctl``); ops.md §5 and DEPLOY §10–§11 move the data directory by passing ``WD_DATA_DIR`` to install.sh instead
-  of hand-editing the unit; DEPLOY §8, ops.md §8 and qa-study.md say that Vite binds ``localhost`` only.
+  of hand-editing the unit; DEPLOY §8, ops.md §8 and qa-study.md say that Vite binds ``localhost`` only;
+* the learning-order release (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.1 item 23): API.md 20 / 22 / 31, DESIGN §3.2 /
+  §6.2 / §6.3 step 4, WORD_LIBRARY_CURATION §1.6 and CLAUDE_INTEGRATION's prewarm paragraph quote ``learn_order.ORDER_SQL`` (the
+  ``w.`` alias stripped) and the NULL stage distance instead of the pre-0014 frequency order; ops.md §1 and TASKS.md list the
+  eight ``wd check db`` invariant names in ``diag`` order; DEPLOY §9 lists ``learn-order`` with the options the parser registers;
+  FRONTEND §5.5 / §8 and zh.ts carry the 学习顺序 label while the wire value stays ``freq``.
 """
 
 from __future__ import annotations
@@ -267,3 +272,122 @@ def test_frontend_copy_contract_lists_the_p0_keys():
     zh = (REPO / "frontend" / "src" / "i18n" / "zh.ts").read_text(encoding="utf-8")
     for key in ("backToToday: '回到今日'", "speak: '发音'", "speechUnsupported: '当前浏览器不支持语音'"):
         assert key in block.group(1) and key in zh, key
+
+
+# ------------------------------------------------------ learning order (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.1 item 23)
+def sql_shape(fragment: str) -> str:
+    """An ``ORDER BY`` fragment the way the docs quote it: no ``w.`` alias, no ``ASC``, no cosmetic whitespace."""
+    text = re.sub(r"\bw\.", "", fragment)
+    text = re.sub(r"\s+ASC\b", "", text)
+    text = re.sub(r"\s*=\s*", "=", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def endpoint(api: str, number: int) -> str:
+    """The paragraph of API.md endpoint ``number``: its ``**N `…`**`` line and the lines up to the next endpoint or blank line."""
+    lines = api.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"**{number} `"))
+    body = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.strip() or re.match(r"^\*\*\d+ `", line) or line.startswith("#"):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def test_docs_quote_the_learning_order():
+    """API.md 20 / 22 / 31, DESIGN §3.2 / §6.2 / §6.3 step 4, WORD_LIBRARY_CURATION §1.6 and CLAUDE_INTEGRATION's prewarm paragraph
+    quote ``learn_order.ORDER_SQL`` (the ``w.`` alias stripped) and the NULL stage distance, not the pre-0014 frequency order; the
+    lookup suggestions are the documented exception that keeps ``FRQ_TAIL``."""
+    from wd.services import learn_order
+
+    order = sql_shape(learn_order.ORDER_SQL)
+    tail = sql_shape(learn_order.FRQ_TAIL)
+    assert order.startswith("learn_rank IS NULL, learn_rank, ") and order.endswith(tail)  # the module keeps the fail-soft tail
+    null_distance = learn_order.STAGE_NULL_DISTANCE
+
+    api = doc("API.md")
+    vocab = endpoint(api, 20)
+    assert "学习顺序" in vocab and sql_shape(vocab).count(order) == 2, vocab  # the `freq` and the `difficulty` sort
+    assert f"NULL → {null_distance}" in vocab
+    lookup = endpoint(api, 22)
+    assert "suggestions keep raw frequency" in lookup and tail in sql_shape(lookup) and order not in sql_shape(lookup)
+    screen = endpoint(api, 31)
+    assert "by frequency" not in screen and "`learn_rank`" in screen and f"distance {null_distance}" in screen
+
+    design = doc("DESIGN.md")
+    mapping = section(design, "### 3.2")
+    assert "| `learn_rank` |" in mapping and "`wd learn-order`" in mapping and "0014" in mapping
+    assert "`learn_rank`" in section(design, "### 6.2")
+    step4 = section(design, "### 6.3")
+    assert order in sql_shape(step4) and f"{null_distance} if s is NULL" in step4
+    assert "frq=0) ASC, w.frq ASC, w.lemma ASC" not in step4  # the pre-0014 tail
+
+    curation = section(doc("WORD_LIBRARY_CURATION.md"), "### 1.6")
+    assert "`learn_rank`" in curation and "`wd learn-order`" in curation and f"距离为 {null_distance}" in curation
+    prewarm = next(l for l in doc("CLAUDE_INTEGRATION.md").splitlines() if l.startswith("**`prewarm_plan` mechanics**"))
+    assert "`words.learn_rank`" in prewarm and "by frequency" not in prewarm
+
+
+def test_runbooks_name_the_eight_invariants_and_the_learn_order_command(settings, seeded):
+    """ops.md §1 and TASKS.md list the ``wd check db`` invariant names in ``diag`` order (the order ``check_db`` prints them); the
+    release note carries every ``invariant <name>: ok`` line; DEPLOY §9 lists `learn-order` with exactly the options the parser
+    registers (DESIGN §2.5) under its owning module."""
+    from wd import cli, diag
+
+    result = diag.check_db(settings)
+    names = tuple(m.group(1) for line in result.lines if (m := re.match(r"invariant (\w+):", line)))
+    assert len(names) == 8 == len(set(names)) and names[:3] == tuple(n for n, _ in diag.STAGE_INVARIANTS), names
+
+    daily = section(doc("ops.md"), "## 1. Daily checks")
+    positions = [daily.find(f"`{name}`") for name in names]
+    assert min(positions) >= 0 and positions == sorted(positions), dict(zip(names, positions))
+    assert "`wd learn-order`" in daily
+    assert "# invariant " + " / ".join(names) + ": ok" in doc("TASKS.md")
+    release = doc("releases/2026-11-learn-order.md")
+    assert all(f"invariant {name}: ok" in release for name in names), names
+
+    cli_ref = section(doc("DEPLOY.md"), "## 9. CLI reference")
+    usage = re.search(r"`learn-order ([^`]*)`", cli_ref)
+    assert usage and "[`wd.services.learn_order`]" in cli_ref, cli_ref
+    choices = cli.build_parser()._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+    registered = {o for o in choices["learn-order"]._option_string_actions if o.startswith("--") and o != "--help"}
+    assert set(re.findall(r"--[a-z][a-z-]*", usage.group(1))) == registered, (usage.group(1), registered)
+
+
+def test_learning_order_copy_and_release_note():
+    """FRONTEND §5.5 / §8 and zh.ts carry the 学习顺序 label (the wire value stays `freq`); DEPLOY §5 / §10 and ops.md §4 call 0014
+    additive; the K-12 note, PLAN §9.2 #5 and the quick-deploy guide point at the new release note, which names the migration, the
+    launchd agent, the restart command, the pre-migrate snapshot and the rollback target."""
+    frontend = doc("FRONTEND.md")
+    block = re.search(r"## 8\. i18n strings.*?```ts\n(.*?)```", frontend, re.S)
+    assert block
+    zh = (REPO / "frontend" / "src" / "i18n" / "zh.ts").read_text(encoding="utf-8")
+    line = "sort: { freq: '学习顺序', alpha: '字母', difficulty: '难度' }"
+    assert line in block.group(1) and line in zh and "freq: '词频'" not in zh
+    browser = section(frontend, "### 5.5")
+    assert "学习顺序" in browser and "`sort=freq`" in browser
+
+    deploy = doc("DEPLOY.md")
+    assert "`0014_learn_rank.sql`" in section(deploy, "## 5. Backups and restore")
+    assert "`0014_learn_rank.sql`" in section(deploy, "## 10. Upgrade and rollback")
+    upgrade = section(doc("ops.md"), "## 4. Upgrade and rollback")
+    assert "`0014_learn_rank.sql`" in upgrade and "eight invariants" in upgrade and "four stage invariants" not in upgrade
+
+    assert "docs/releases/2026-11-learn-order.md" in doc("releases/2026-11-k12-stages.md")
+    plan = (DOCS / "analysis" / "2026-11-05-stages-regions-images" / "design" / "PLAN.md").read_text(encoding="utf-8")
+    assert "已解决（2026-11-06，docs/analysis/2026-11-06-learn-order/DESIGN.md）" in plan
+    assert "八条" in doc("QUICK_DEPLOY_AND_MOBILE.md") and "docs/releases/2026-11-learn-order.md" in doc("QUICK_DEPLOY_AND_MOBILE.md")
+
+    release = doc("releases/2026-11-learn-order.md")
+    for needle in (
+        "0014_learn_rank.sql",
+        "com.word-dance.server",
+        "launchctl kickstart -k gui/$(id -u)/com.word-dance.server",
+        "pre-migrate-13-to-14.db.gz",
+        "applied migration 0014_learn_rank",
+        "deploy/install.sh",
+        "git checkout cd3df8c",
+        "data/seed/learn_order.json",
+    ):
+        assert needle in release, needle

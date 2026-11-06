@@ -139,6 +139,7 @@ run mv -T "$DATA/frontend.tmp" "$DATA/frontend"
 run bash -c "cd '$DATA/frontend-releases' && ls -1t | tail -n +3 | xargs -r rm -rf --"
 run "$REPO/.venv/bin/wd" migrate                                    # cli.py: db.run_migrations() records each NNNN file itself; snapshots first (§5)
 run "$REPO/.venv/bin/wd" import-seed                                # reads WD_SEED_PATH (default <repo>/data/seed/vocab.jsonl.gz); idempotent; no-op when kv.seed_version matches
+run "$REPO/.venv/bin/wd" learn-order || echo "WARN: learning order incomplete (stage words unranked, or a database error) — the service start fills what it can; afterwards run 'wd learn-order' and 'wd check db'"   # fills words.learn_rank (0014) before the unit starts; idempotent; refuses below schema 14 like import-seed; never aborts the install under set -e (the claude-check precedent)
 log "claude probe (<= \$0.05)"
 run "$REPO/.venv/bin/wd" claude-check || echo "WARN: claude check failed — run 'claude' once as $RUN_USER to log in, then 'wd claude-check'"
 run "$REPO/.venv/bin/wd" create-admin --if-none                     # uses WD_ADMIN_USERNAME/WD_ADMIN_PASSWORD when set; otherwise prints a hint and exits 0 —

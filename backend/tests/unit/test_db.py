@@ -411,7 +411,10 @@ def test_upgrade_0011_renumbers_stages_and_rebuilds_two_tables(settings, tmp_pat
 
         # --- the new DDL: stage_xs in front of the other flags (seed.SEED_COLUMNS order), CHECKs 1..5, every index back, K-12 defaults
         words_cols = [r["name"] for r in c.execute("PRAGMA table_info(words)")]
-        assert words_cols == before_words_cols[: before_words_cols.index("stage_zk")] + ["stage_xs"] + before_words_cols[before_words_cols.index("stage_zk") :]
+        expected_cols = before_words_cols[: before_words_cols.index("stage_zk")] + ["stage_xs"] + before_words_cols[before_words_cols.index("stage_zk") :]
+        if (14, "learn_rank") in result.applied:
+            expected_cols.append("learn_rank")  # 0014_learn_rank.sql: one ADD COLUMN, appended after the 0011 layout (test_db_0014.py)
+        assert words_cols == expected_cols
         assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_settings_cols
         ddl = {r["name"]: r["sql"] for r in c.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}
         assert "CHECK (stage_min BETWEEN 1 AND 5)" in ddl["words"] and "CHECK (stage_xs   IN (0,1))" in ddl["words"]

@@ -9,12 +9,15 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from reference_order import reference_order
 from wd import db
 from wd.deps import hash_token
 from wd.services import batches
 
 FAR = "2030-01-01T00:00:00Z"
 TZ = "Asia/Shanghai"
+# the 筛词 candidate pool of the `alice` fixture (目标 cet4+cet6): screen._candidate_sql without the per-user NOT EXISTS (alice has graded nothing)
+ALICE_POOL = "is_public = 1 AND is_valid_english = 1 AND merged_into_word_id IS NULL AND (stage_cet4 = 1 OR stage_cet6 = 1)"
 
 
 # -------------------------------------------------------------------------------------------- helpers
@@ -126,13 +129,18 @@ def test_next_order_and_remaining(client: TestClient, settings, alice):
     total = q1(settings, "SELECT COUNT(*) FROM words WHERE (stage_cet4 = 1 OR stage_cet6 = 1) AND is_public = 1 AND is_valid_english = 1")
     assert b["remaining"] == total and len(b["items"]) == 5
     lemmas = [i["word"]["lemma"] for i in b["items"]]
-    # 主攻阶段 cet6 first (stage_min 5 = absorption / axe / ought to by frequency), then stage 4, then stage 3 …
-    assert lemmas[:3] == ["absorption", "axe", "ought to"]
+    # 主攻阶段 cet6 first (stage_min 5, distance 0), then stage 4, then stage 3 …; inside a distance group the learning order of the
+    # stored learn_rank (DESIGN §6.3 step 4) — pinned against the column through reference_order, never against a lemma list of the seed
+    assert lemmas == reference_order(settings, ALICE_POOL, cur=5)[:5]
+    cet6_new = {r["lemma"] for r in qrows(settings, "SELECT lemma FROM words WHERE stage_min = 5 AND is_public = 1 AND is_valid_english = 1")}
+    assert cet6_new and set(lemmas[: len(cet6_new)]) == cet6_new  # the distance-0 block comes first whatever the order inside it
     assert all(i["word"]["my_state"] is None for i in b["items"]) and b["items"][0]["phonetic"] == b["items"][0]["word"]["phonetic"]
     r = client.get("/api/screen/next?stage=zk&count=3").json()
     # the 初中 pool is every stage_zk word, ordered by distance from 初中 (DESIGN §6.3 step 4): the words first listed at 初中
-    # (stage_min 2 — go / person / better by frequency 35 / 345 / 452) come before the 小学 words (be, a: distance 2)
-    assert [i["word"]["lemma"] for i in r["items"]] == ["go", "person", "better"]
+    # (stage_min 2, distance 0) come before the 小学 words (distance 2), each block in learning order
+    zk_pool = "stage_zk = 1 AND is_public = 1 AND is_valid_english = 1 AND merged_into_word_id IS NULL"
+    assert [i["word"]["lemma"] for i in r["items"]] == reference_order(settings, zk_pool, cur=2)[:3]
+    assert all(i["word"]["stage_min"] == 2 for i in r["items"])
     assert r["remaining"] == q1(settings, "SELECT COUNT(*) FROM words WHERE stage_zk = 1")
     assert client.get("/api/screen/next?count=0").status_code == 400
     assert client.get("/api/screen/next?stage=xx").status_code == 400
@@ -147,10 +155,10 @@ def test_next_auto_for_a_primary_school_learner_orders_by_stage_distance(client:
     r = client.get("/api/screen/next?stage=auto&count=50")
     assert r.status_code == 200, r.text
     items = r.json()["items"]
-    expected_xs = [row["lemma"] for row in qrows(settings, "SELECT lemma FROM words WHERE stage_xs = 1 AND is_public = 1 AND is_valid_english = 1 ORDER BY (frq IS NULL OR frq = 0), frq, lemma")]
-    assert expected_xs and [i["word"]["lemma"] for i in items[: len(expected_xs)]] == expected_xs  # distance 0 first, by frequency
+    expected_xs = reference_order(settings, "stage_xs = 1 AND is_public = 1 AND is_valid_english = 1", cur=1)
+    assert expected_xs and [i["word"]["lemma"] for i in items[: len(expected_xs)]] == expected_xs  # distance 0 first, in learning order
     assert all(i["word"]["stage_min"] == 1 and "xs" in i["word"]["stages"] for i in items[: len(expected_xs)])
-    distance = lambda m: 0 if m == 1 else 2 * (m - 1) - 1  # _STAGE_DISTANCE for a 主攻 of 1 (higher stages only)
+    distance = lambda m: 11 if m is None else 0 if m == 1 else 2 * (m - 1) - 1  # learn_order.stage_distance_sql for a 主攻 of 1 (higher stages only; NULL stage_min last)
     distances = [distance(i["word"]["stage_min"]) for i in items]
     assert distances == sorted(distances) and set(distances) == {0, 1, 3}
     assert r.json()["remaining"] == q1(settings, "SELECT COUNT(*) FROM words WHERE (stage_xs = 1 OR stage_zk = 1 OR stage_gk = 1) AND is_public = 1 AND is_valid_english = 1")
@@ -223,13 +231,14 @@ def test_duplicate_client_event_id_returns_the_stored_response(client: TestClien
 
 
 def test_restore_of_a_screen_known_puts_the_word_back_into_next(client: TestClient, settings, alice, frozen_clock):
-    w = word_id(settings, "absorption")
+    first = reference_order(settings, ALICE_POOL, cur=5)[0]  # the card alice meets first
+    w = word_id(settings, first)
     verdict(client, w, "known")
-    assert "absorption" not in [i["word"]["lemma"] for i in client.get("/api/screen/next?count=3").json()["items"]]
+    assert first not in [i["word"]["lemma"] for i in client.get("/api/screen/next?count=3").json()["items"]]
     frozen_clock.advance(seconds=4)
     r = client.post(f"/api/words/{w}/mark", json={"action": "restore", "context": "screen_page"})
     assert r.status_code == 200 and r.json()["state"] is None
-    assert [i["word"]["lemma"] for i in client.get("/api/screen/next?count=3").json()["items"]][0] == "absorption"
+    assert [i["word"]["lemma"] for i in client.get("/api/screen/next?count=3").json()["items"]][0] == first
     stats = qrows(settings, "SELECT * FROM daily_stats WHERE user_id = ?", (alice,))[0]
     assert (stats["known"], stats["screened"]) == (0, 0)
 

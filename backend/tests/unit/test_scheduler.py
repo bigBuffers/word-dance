@@ -458,6 +458,41 @@ def test_maintenance_requeues_failed_image_words_being_studied(settings, seeded,
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == 2
 
 
+def test_maintenance_recomputes_the_learning_order_once_a_day_and_survives_its_failure(settings, seeded, monkeypatch):
+    """DESIGN §2.4 (docs/analysis/2026-11-06-learn-order/DESIGN.md): the 03:30 maintenance runs learn_order.ensure_current once per
+    WD_TZ day (the self-heal of runtime drift: a NULL-ed key is refilled, the event names the trigger) and an exception out of
+    it never stops the rest of the maintenance."""
+    from wd.services import learn_order
+
+    conn = seeded
+    FakeBudget(spent=3.0).install(monkeypatch)
+    make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z")
+    calls: list[tuple[str | None, str]] = []
+    real = learn_order.ensure_current
+
+    def spy(c, *, now=None, trigger="startup"):
+        calls.append((now, trigger))
+        return real(c, now=now, trigger=trigger)
+
+    monkeypatch.setattr(learn_order, "ensure_current", spy)
+    conn.execute("UPDATE words SET learn_rank = NULL WHERE lemma = 'apple'")
+    r = tick(conn, settings, datetime(2026, 10, 14, 19, 30, tzinfo=UTC))  # 03:30 Asia/Shanghai on 2026-10-15
+    assert r.maintenance is True and calls == [("2026-10-14T19:30:00Z", "maintenance")]
+    assert conn.execute("SELECT learn_rank FROM words WHERE lemma = 'apple'").fetchone()[0] is not None
+    detail = json.loads(conn.execute("SELECT detail_json FROM system_events WHERE kind = 'learn_order_recomputed' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert detail["trigger"] == "maintenance" and detail["changed"] == 1
+    assert db.kv_get(conn, learn_order.KV_AT) == "2026-10-14T19:30:00Z"
+    assert tick(conn, settings, datetime(2026, 10, 14, 20, 30, tzinfo=UTC)).maintenance is False and len(calls) == 1  # once per local day
+
+    def boom(c, *, now=None, trigger="startup"):
+        raise RuntimeError("learning order exploded")
+
+    monkeypatch.setattr(learn_order, "ensure_current", boom)
+    r = tick(conn, settings, datetime(2026, 10, 15, 19, 30, tzinfo=UTC))
+    assert r.maintenance is True and db.kv_get(conn, "maintenance.last_date") == "2026-10-16"  # the night's other steps ran
+    assert conn.execute("SELECT COUNT(*) FROM system_events WHERE kind = 'learn_order_failed'").fetchone()[0] == 0  # the guard in maintenance only logs
+
+
 def _dead(conn, type_: str, word_id: int, key: str, finished: str = "2026-09-30T01:00:00Z") -> int:
     jid = queue.enqueue(conn, type_, {"word_id": word_id}, dedupe_key=key, now="2026-09-30T00:00:00Z")
     conn.execute("UPDATE jobs SET status = 'dead', attempts = 3, finished_at = ? WHERE id = ?", (finished, jid))

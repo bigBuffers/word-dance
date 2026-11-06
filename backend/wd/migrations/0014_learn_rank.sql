@@ -1,0 +1,15 @@
+-- 0014_learn_rank.sql — words.learn_rank: the derived learning-order key (学习顺序) of every words row
+-- (DESIGN §3.2 "learn_rank" / §6.3 step 4; API.md 20; docs/releases/2026-11-learn-order.md; backend/wd/services/learn_order.py).
+--
+-- Additive only, the 0012_word_images_meta.sql precedent: ONE ADD COLUMN, no default (NULL = "not computed yet"), no index — no
+-- list query would use one: every learning-order ORDER BY follows a CASE (stage distance) or COALESCE (difficulty) term and sorts
+-- in a temp B-tree (measured, plans unchanged) — and no table rebuild. No view, trigger or foreign key references the column:
+-- v_bank is `SELECT uw.*, w.lemma, w.display, …` with the words columns named explicitly (0011), so it cannot pick the new column
+-- up. Safe under `deploy/install.sh --no-restart` (DEPLOY §10) and a plain `launchctl kickstart -k` on the Mac. The VALUES are
+-- deliberately not written here: learn_rank is DERIVED by learn_order.rank_rows() from lemma / pos (dominant_pos) / frq / bnc /
+-- sources / stage_min / word_forms and filled at the next service start (main.startup → learn_order.ensure_current), inside every
+-- seed import, by `wd learn-order` (deploy/install.sh runs it after `wd import-seed`) and nightly by the 03:30 maintenance. Until
+-- then a NULL rank sorts after every ranked row of its stage-distance group by the pre-0014 frq order (learn_order.ORDER_SQL):
+-- the lists stay exactly today's. The runner wraps this file in BEGIN IMMEDIATE and records schema_migrations(14, 'learn_rank')
+-- itself (SCHEMA.sql §1) — nothing else belongs here. docs/SCHEMA.sql stays the 0001 baseline byte for byte (test_db.py).
+ALTER TABLE words ADD COLUMN learn_rank INTEGER;  -- closed·10^7 + rank·100 + sub (learn_order.py); smaller = earlier; NULL = not computed (sorts last in its group)

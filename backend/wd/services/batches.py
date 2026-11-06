@@ -28,7 +28,7 @@ from .. import db
 from ..clock import day_start, local_date as clock_local_date, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
-from . import bank, screen, srs, stats, stats_core, suggestions, words
+from . import bank, learn_order, screen, srs, stats, stats_core, suggestions, words
 
 log = logging.getLogger("wd.batches")
 
@@ -56,9 +56,10 @@ _SUPERSEDED_SQL = (
     "EXISTS(SELECT 1 FROM push_items pj JOIN push_batches pbj ON pbj.id = pj.batch_id WHERE pbj.user_id = pb.user_id "
     "AND pbj.local_date > pb.local_date AND pj.word_id = pi.word_id AND pj.kind IN ('review','new','extra')) AS superseded"
 )
-# DESIGN §6.3 step 4: 0 for the 主攻阶段, then higher stages, then lower
-_STAGE_DISTANCE = "CASE WHEN w.stage_min = :cur THEN 0 WHEN w.stage_min > :cur THEN 2 * (w.stage_min - :cur) - 1 ELSE 2 * (:cur - w.stage_min) END"
-_SCREEN_ORDER = f"{_STAGE_DISTANCE}, (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma"
+# DESIGN §6.3 step 4: 0 for the 主攻阶段, then higher stages, then lower, NULL stage_min last (learn_order.stage_distance_sql),
+# then the learning order — the derived words.learn_rank with the frequency tail (learn_order.ORDER_SQL; API.md 31): the
+# 推荐词 of select_words / add_more follow exactly the order the 筛词 page serves
+_SCREEN_ORDER = f"{learn_order.stage_distance_sql()}, {learn_order.ORDER_SQL}"
 _NEWS_ORDER = "(uw.times_added >= 3) DESC, uw.priority DESC, uw.added_at ASC, uw.id ASC"
 
 

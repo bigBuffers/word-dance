@@ -1,7 +1,8 @@
 """Vocabulary browsing (WP3): ``GET /api/stages``, ``GET /api/vocab``, ``GET /api/vocab/letters`` (API.md 19–21).
 
 Every query applies the API.md §1 visibility rule through ``deps.visible_word_sql`` and ``merged_into_word_id IS NULL``;
-browsing never enqueues anything.
+browsing never enqueues anything. The default sort of endpoint 20 (``freq``, UI 学习顺序) is the learning order of
+``services/learn_order.py`` — the tab's stage distance, then the derived ``words.learn_rank`` (DESIGN §3.2 / §6.3 step 4).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Depends, Request
 from .. import schemas
 from ..deps import current_user, get_db, visible_word_sql
 from ..schemas import STAGE_NAMES_ZH, STAGE_ORDER, stage_to_index
-from ..services import bank, words
+from ..services import bank, learn_order, words
 
 router = APIRouter()
 
@@ -72,14 +73,26 @@ def vocab_filters(me: dict[str, Any], q: schemas.VocabQuery, *, with_letter_and_
     return " AND ".join(where), params
 
 
-_ORDER = {
-    "freq": "(w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
-    "alpha": "w.lemma",
-    # `difficulty` is Claude's unchanged 1–5 scale (1 = 初中 basic … 5 beyond CET-6), i.e. one below the 1..5 stage index
-    # since 小学 became index 1 — `+ 1` puts it onto the stage_min axis; 6 sorts words beyond CET-6 / outside every list
-    # last (API.md 20, PLAN R-2: the scale is not widened, the sort key is shifted)
-    "difficulty": "COALESCE(w.difficulty + 1, w.stage_min, 6), (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma",
-}
+def _order_sql(sort: str) -> str:
+    """The ``ORDER BY`` body of endpoint 20 for ``VocabQuery.sort``.
+
+    ``freq`` (UI 学习顺序) is the learning order: the tab's stage distance first — ``:cur`` is the tab's stage index, ``1`` for
+    全部, so the 小学 course opens the list and 课标外 (NULL ``stage_min``, distance 11) closes it (DESIGN §6.3 step 4 / G6 of
+    docs/analysis/2026-11-06-learn-order/DESIGN.md) — then ``learn_order.ORDER_SQL``: the derived ``learn_rank`` (DESIGN §3.2), a
+    NULL key last by the frequency tail. ``alpha`` is the lemma. ``difficulty`` is Claude's unchanged 1–5 scale (1 = 初中 basic …
+    5 beyond CET-6), i.e. one below the 1..5 stage index since 小学 became index 1 — ``+ 1`` puts it onto the stage_min axis; 6
+    sorts words beyond CET-6 / outside every list last (API.md 20, PLAN R-2: the scale is not widened, the sort key is
+    shifted); the tail is the learning order (DESIGN §6.3 step 4).
+    """
+    if sort == "alpha":
+        return "w.lemma"
+    if sort == "difficulty":
+        return f"COALESCE(w.difficulty + 1, w.stage_min, 6), {learn_order.ORDER_SQL}"
+    if sort == "freq":
+        return f"{learn_order.stage_distance_sql()}, {learn_order.ORDER_SQL}"
+    raise ValueError(f"unknown sort {sort!r}")  # VocabQuery.sort is a Literal: unreachable through the API
+
+
 _FROM = "FROM words w LEFT JOIN user_words uw ON uw.word_id = w.id AND uw.user_id = :me"
 
 
@@ -114,9 +127,12 @@ def stages(me: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection 
 def vocab(request: Request, me: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)) -> dict[str, Any]:
     q = bank.query_model(schemas.VocabQuery, request.query_params, int_fields=("new_only",))
     where, params = vocab_filters(me, q, with_letter_and_q=True)
+    # the 主攻 index of the freq sort's stage-distance prefix (1 for 全部); the COUNT and the other sorts leave it unused —
+    # sqlite3 ignores a spare named parameter in a dict (verified), so one dict serves both statements
+    params["cur"] = learn_order.default_cur(q.stage)
     total = int(conn.execute(f"SELECT COUNT(*) {_FROM} WHERE {where}", params).fetchone()[0])
     rows = conn.execute(
-        f"SELECT w.*, uw.state AS my_state {_FROM} WHERE {where} ORDER BY {_ORDER[q.sort]} LIMIT :limit OFFSET :offset",
+        f"SELECT w.*, uw.state AS my_state {_FROM} WHERE {where} ORDER BY {_order_sql(q.sort)} LIMIT :limit OFFSET :offset",
         {**params, "limit": q.page_size, "offset": (q.page - 1) * q.page_size},
     ).fetchall()
     return {"items": words.word_briefs(conn, rows, int(me["id"])), "page": q.page, "page_size": q.page_size, "total": total}

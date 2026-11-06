@@ -10,6 +10,11 @@ From schema 0011 on, ``check db`` also verifies the stage-model data invariants 
 seed-version check; DESIGN §3.1, PLAN §2.1 / §6 S6): one ``invariant <name>: ok | N violation(s)`` line each, any
 violation flips the check to FAIL. They are the operator's post-migration / post-import gate (release notes
 ``docs/releases/2026-11-k12-stages.md``) and the same SQL ``scripts/rehearse_migration.py`` runs on a rehearsal copy.
+From schema 0014 on (:data:`LEARN_ORDER_INVARIANTS_FROM_VERSION`) four learning-order lines follow —
+``learn_rank_present`` / ``learn_order_current`` / ``learn_rank_matches_policy`` / ``calendar_words_in_xs``, rendered by
+``services.learn_order.check_lines`` (docs/analysis/2026-11-06-learn-order/DESIGN.md §2.7; ``wd learn-order`` repairs the
+first three) — and the kv block carries ``kv.learn_order.version`` and the rendered ``kv.learn_order.stats`` line before
+``kv.backup.last``: eight ``invariant`` lines after an import (``docs/releases/2026-11-learn-order.md``).
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ STAGE_INVARIANTS: tuple[tuple[str, str], ...] = (
     ),
 )
 STAGE_INVARIANTS_FROM_VERSION = 11  # 0011_primary_stage.sql: stage_xs exists, stage_min / current_stage are 1..5
+LEARN_ORDER_INVARIANTS_FROM_VERSION = 14  # 0014_learn_rank.sql: words.learn_rank exists (== learn_order.LEARN_ORDER_FROM_VERSION, pinned by test_diag)
 
 
 @dataclass
@@ -94,9 +100,10 @@ def check_db(cfg: Settings, db_path: Path | None = None) -> CheckResult:
         tables = len(db.table_names(conn))
         lines += [f"quick_check: {quick}", f"schema version: {version} ({tables} tables, {len(pending)} pending migration(s))"]
         ok = quick == "ok" and version >= 1 and not pending
-        for key in ("seed_version", "last_tick_at", "worker_lease", "backup.last"):
-            value = db.kv_get(conn, key)
-            lines.append(f"kv.{key}: {value if value is not None else '-'}")
+        for key in ("seed_version", "last_tick_at", "worker_lease", "learn_order.version"):
+            lines.append(_kv_line(conn, key))
+        lines.append(_learn_order_stats_line(conn))  # informational; before kv.backup.last so every later line is an invariant
+        lines.append(_kv_line(conn, "backup.last"))
         if version >= STAGE_INVARIANTS_FROM_VERSION:
             for name, sql in STAGE_INVARIANTS:
                 line, violated = _invariant_line(conn, name, sql)
@@ -105,11 +112,38 @@ def check_db(cfg: Settings, db_path: Path | None = None) -> CheckResult:
             line, violated = _seed_version_line(conn, cfg)
             lines.append(line)
             ok = ok and not violated
+        if version >= LEARN_ORDER_INVARIANTS_FROM_VERSION:
+            for line, violated in _learn_order_lines(conn):
+                lines.append(line)
+                ok = ok and not violated
         return CheckResult("db", ok, lines)
     except sqlite3.Error as e:
         return CheckResult("db", False, [*lines, f"query failed: {e}"])
     finally:
         conn.close()
+
+
+def _kv_line(conn: sqlite3.Connection, key: str) -> str:
+    value = db.kv_get(conn, key)
+    return f"kv.{key}: {value if value is not None else '-'}"
+
+
+def _learn_order_stats_line(conn: sqlite3.Connection) -> str:
+    """``kv.learn_order.stats: …`` rendered by the learning-order module (``-`` before the first recompute); never flips ok."""
+    from .services.learn_order import stats_line  # late import: the `_seed_version_line` pattern (diag stays light for `wd logs`)
+
+    return stats_line(conn)
+
+
+def _learn_order_lines(conn: sqlite3.Connection) -> list[tuple[str, bool]]:
+    """The four ``invariant learn_* / calendar_words_in_xs`` lines of DESIGN §2.7 (``learn_order.check_lines``): stage words
+    without a key, a stale policy version / seed stamp / never computed, stored keys that differ from ``rank_rows()`` (the stage
+    words placed by seed-only rules — ``learn_order.Drift.policy``; re-dealt stage phrases and 课标外 drift are informational
+    counts of the stats line) and calendar words outside 小学; a failing query or a raising policy is ``query failed (…)`` and not
+    counted, like :func:`_invariant_line`."""
+    from .services.learn_order import check_lines  # late import, see _learn_order_stats_line
+
+    return check_lines(conn)
 
 
 def _invariant_line(conn: sqlite3.Connection, name: str, sql: str) -> tuple[str, bool]:
@@ -358,4 +392,17 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=cmd_logs)
 
 
-__all__ = ["STAGE_INVARIANTS", "STAGE_INVARIANTS_FROM_VERSION", "CheckResult", "check_claude", "check_db", "check_providers", "check_smtp", "collect_stats", "register_cli", "run_checks", "tail_lines"]
+__all__ = [
+    "LEARN_ORDER_INVARIANTS_FROM_VERSION",
+    "STAGE_INVARIANTS",
+    "STAGE_INVARIANTS_FROM_VERSION",
+    "CheckResult",
+    "check_claude",
+    "check_db",
+    "check_providers",
+    "check_smtp",
+    "collect_stats",
+    "register_cli",
+    "run_checks",
+    "tail_lines",
+]

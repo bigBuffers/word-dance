@@ -16,7 +16,7 @@ the person running the box. Paths are the defaults of DEPLOY §1: checkout `/hom
 | Liveness | `curl -fsS http://127.0.0.1:8000/api/health` → `{"status":"ok","needs_setup":false,…}` |
 | Live log | `journalctl -u word-dance -f` · `journalctl -u word-dance --since today -p warning` |
 | Last 200 log lines | `journalctl -u word-dance -n 200 -o cat` (JSON lines, DEPLOY §6). `wd logs --tail N` is **not** this: it tails `WD_LOG_FILE` when that is set (empty by default) and otherwise prints only a hint, because the 2000-line ring buffer it reads lives inside the `wd serve` process |
-| Self-check | `wd check all` (db · claude · smtp · providers). `wd check db` also prints the stage-model invariants `stage_min_consistent` / `xs_subset_zk` / `stages_json_known` / `seed_version_matches_file` — `ok` or `N violation(s)`; any violation → `[FAIL] db`, exit 1 (`json_each` is built into SQLite ≥ 3.38; an older build prints `query failed` for the third line, which is reported but not counted) |
+| Self-check | `wd check all` (db · claude · smtp · providers). `wd check db` also prints the stage-model invariants `stage_min_consistent` / `xs_subset_zk` / `stages_json_known` / `seed_version_matches_file` and, from schema 14, the learning-order invariants `learn_rank_present` / `learn_order_current` / `learn_rank_matches_policy` / `calendar_words_in_xs` (`docs/releases/2026-11-learn-order.md`; one command repairs the first three: `wd learn-order`) — `ok` or `N violation(s)`; any violation → `[FAIL] db`, exit 1 (`json_each` is built into SQLite ≥ 3.38; an older build prints `query failed` for the third line, which is reported but not counted) |
 | Admin view | log in as an admin → 管理 (overview: spend, queue, provider quotas, events, health incl. `last_backup`) |
 
 Log lines are JSON (`ts level logger msg request_id user_id method path status duration_ms job_id job_type worker
@@ -117,12 +117,16 @@ empty instance next to the real one. Only the move itself (§5) passes a new dir
 `--no-restart` keeps the service running while migrating — only for purely additive migrations (new tables,
 columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder. `0011_primary_stage.sql` and
 `0013_word_forms_alias.sql` (the K-12 release, `docs/releases/2026-11-k12-stages.md`) are table rebuilds — stop-first,
-never `--no-restart`; `0012_word_images_meta.sql` is additive. Rehearse before the real run: copy the database to a
+never `--no-restart`; `0012_word_images_meta.sql` and `0014_learn_rank.sql` (the learning-order release,
+`docs/releases/2026-11-learn-order.md`: one `ADD COLUMN` on `words`, filled at the next service start or by the `wd learn-order`
+step install.sh runs after `import-seed`) are additive. Rehearse before the real run: copy the database to a
 private directory and `.venv/bin/python -I scripts/rehearse_migration.py <copy>` (applies the pending files through the
 real runner and exits 0 only when every check of the release note passes — SQLite ≥ 3.26 on the box), then
-`wd check db` after the upgrade for the four stage invariants. Database and code roll back **together** for that
+`wd check db` after the upgrade for the eight invariants (the four stage-model lines and, from schema 14, the four
+learning-order lines). Database and code roll back **together** for the K-12
 release (the pre-migrate snapshot + `git checkout`); the Mac launchd instance follows the same order — backup → stop →
-switch → start — spelled out in the release note. Without passwordless
+switch → start — spelled out in the release note; the learning-order release (0014) rolls back by `git checkout` alone — the
+old code never reads `learn_rank`, the column and its `kv.learn_order.*` stamps stay and are harmless. Without passwordless
 `sudo -n` the script cannot stop or restart the unit either: it prints the same NOTE plus `WARN: no passwordless
 sudo — the OLD version keeps serving …`, and its last line is `health OK, but the OLD process answered — … run: sudo
 systemctl restart word-dance` instead of a success message — run that restart yourself (or stop the unit before

@@ -2,7 +2,8 @@
 
 Admin only, never automatic. A plan job (``{"plan_id","stage","limit","max_budget_usd"}``, dedupe ``prewarm:<plan_id>``,
 priority 90) runs in passes: each pass selects up to ``5 × WD_AI_BATCH_SIZE`` candidate words of the stage (public,
-valid, ``content_state IN ('none','failed')``, not yet enqueued, by frequency), enqueues ``generate_content
+valid, ``content_state IN ('none','failed')``, not yet enqueued, in learning order — ``learn_order.ORDER_SQL`` after the
+stage distance, API.md 20: the cards learners meet first are warmed first), enqueues ``generate_content
 {"word_id","plan_id"}`` at priority 90 (dedupe ``content:<word_id>``) and defers itself two minutes. The content
 handler credits ``cost_usd / items_returned`` to ``kv prewarm:<plan_id>:spent``; the plan finishes (``done``,
 ``result_json = {planned, spent, stopped}``) when ``spent ≥ max_budget_usd``, ``planned ≥ limit`` or no candidates
@@ -24,6 +25,7 @@ from ..interfaces import Job
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
 from ..schemas import STAGE_ORDER
+from ..services import learn_order
 
 log = logging.getLogger("wd.ai.prewarm")
 
@@ -42,15 +44,17 @@ def _stage_sql(stage: str) -> str:
 
 
 def candidates(conn: sqlite3.Connection, stage: str, limit: int) -> list[int]:
-    """Words of ``stage`` still lacking content and not already queued, most frequent first."""
+    """Words of ``stage`` still lacking content and not already queued, in learning order (``learn_order.ORDER_SQL`` after the
+    stage distance from ``stage`` — ``all`` counts from the first stage; API.md 20): the cards learners meet first are warmed first.
+    Named placeholders only — ``?`` and ``:name`` cannot mix in one statement."""
     if stage not in STAGES:
         raise ValueError(f"unknown stage {stage!r}")
     rows = conn.execute(
         "SELECT w.id FROM words w "
         f"WHERE w.is_public = 1 AND w.is_valid_english = 1 AND w.merged_into_word_id IS NULL AND w.content_state IN ('none','failed') AND {_stage_sql(stage)} "
         "  AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.dedupe_key = 'content:' || w.id AND j.status IN ('queued','running')) "
-        "ORDER BY (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma LIMIT ?",
-        (max(0, int(limit)),),
+        f"ORDER BY {learn_order.stage_distance_sql()}, {learn_order.ORDER_SQL} LIMIT :limit",
+        {"cur": learn_order.default_cur(stage), "limit": max(0, int(limit))},
     ).fetchall()
     return [int(r[0]) for r in rows]
 

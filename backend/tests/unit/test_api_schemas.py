@@ -45,7 +45,7 @@ def test_stage_mapping_roundtrip():
 
 def test_stage_index_is_position_plus_one():
     """The explicit dictionary and the tuple are two spellings of one fact (DESIGN §0.3): the position-derived code elsewhere
-    (``f"stage_{s}"`` column templates, ``_STAGE_DISTANCE``, ``StageChips``) stays right only while ``index == position + 1``.
+    (``f"stage_{s}"`` column templates, ``learn_order.stage_distance_sql``, ``StageChips``) stays right only while ``index == position + 1``.
     ``Stage`` / ``StageIndex`` must list the same values in the same order because scripts/check_contract.py diffs them
     against frontend/src/api/types.ts in order."""
     assert set(schemas.STAGE_INDEX) == set(schemas.STAGE_ORDER) == set(schemas.STAGE_NAMES_ZH)

@@ -45,7 +45,7 @@ export const zh = {
   screen: { title: '筛词', subtitle: '快速筛一筛，不熟悉的会进入生词库', remaining: (n: number) => `本阶段还剩 ${n} 个未筛`, screenedCount: (n: number) => `本次已筛 ${n} 个`, another: '再筛 30 个', peek: '显示释义',
             addedBank: '已加入生词库', addedToday: '已加入生词库，今天就学', addedTomorrow: '已加入生词库，明天开始学', markedKnown: (w: string) => `${w} · 已认识`, allDone: '这个阶段的词都筛完了 🎉' },
   vocab: { title: '词库', searchPlaceholder: '搜索英文或中文', status: { all: '全部', unmarked: '未标记', unfamiliar: '不熟悉', known: '已认识', mastered: '已掌握' },
-           sort: { freq: '词频', alpha: '字母', difficulty: '难度' }, markUnfamiliar: '不熟悉', markKnown: '认识', inBank: '已在生词库', addedToBank: '已加入生词库',
+           sort: { freq: '学习顺序', alpha: '字母', difficulty: '难度' }, markUnfamiliar: '不熟悉', markKnown: '认识', inBank: '已在生词库', addedToBank: '已加入生词库',
            bulk: '批量选择', bulkUnfamiliar: '标记所选为不熟悉', bulkKnown: '标记所选为认识', selected: (n: number) => `已选 ${n} 个`,
            notFound: (q: string) => `没有找到“${q}”。想把它加入生词库？`, letters: '字母索引' },
   word: { title: '单词详情', forms: '词形', examTags: '考试标签', actions: '操作', reset: '重置进度', remove: '移除', changeImage: '换一张', flagImage: '不合适',

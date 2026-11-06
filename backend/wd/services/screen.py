@@ -1,7 +1,8 @@
 """Screening (筛词 / 推荐词) services (WP3): candidates and verdicts.
 
 Contracts: API.md 31/32 (``GET /api/screen/next``, ``POST /api/screen/verdict``), DESIGN §6.3 step 4 (candidate order:
-``stage_distance`` from the 主攻阶段, then frequency), DESIGN §4 (verdict → state machine through
+``stage_distance`` from the 主攻阶段 — ``learn_order.stage_distance_sql``, NULL ``stage_min`` last — then the learning order
+``learn_order.ORDER_SQL``: the derived ``words.learn_rank`` with the frequency tail), DESIGN §4 (verdict → state machine through
 :func:`wd.services.bank.apply_action`), DESIGN §6.3 (an in-batch ``unfamiliar`` keeps the ``screen`` push row and —
 while TODAY's new-word quota has room — appends a second ``kind='new'`` row through WP4's ``batches.append_to_today``;
 ``added_to_today:false`` when there is no batch today or the word is already in it). The room/duplicate checks run on
@@ -23,17 +24,13 @@ from typing import Any
 from .. import db
 from ..errors import ApiError
 from ..schemas import stage_to_index
-from . import bank, words
+from . import bank, learn_order, words
 
 log = logging.getLogger("wd.screen")
 
 VERDICTS: tuple[str, ...] = ("known", "unfamiliar", "skip")
 SCREEN_CONTEXTS: tuple[str, ...] = ("screen_page", "onboarding", "today", "extra")
 STUDY_KINDS: tuple[str, ...] = ("review", "new", "extra")
-
-_STAGE_DISTANCE = (
-    "CASE WHEN w.stage_min = :cur THEN 0 WHEN w.stage_min > :cur THEN 2 * (w.stage_min - :cur) - 1 ELSE 2 * (:cur - w.stage_min) END"
-)
 
 
 def _stage_scope(conn: sqlite3.Connection, user_id: int, stage: str) -> tuple[list[str], int]:
@@ -62,7 +59,7 @@ def screen_next(conn: sqlite3.Connection, user_id: int, stage: str, count: int) 
     params = {"me": int(user_id), "cur": cur}
     remaining = int(conn.execute(f"SELECT COUNT(*) {body}", params).fetchone()[0])
     rows = conn.execute(
-        f"SELECT w.* {body} ORDER BY {_STAGE_DISTANCE}, (w.frq IS NULL OR w.frq = 0), w.frq, w.lemma LIMIT :limit",
+        f"SELECT w.* {body} ORDER BY {learn_order.stage_distance_sql()}, {learn_order.ORDER_SQL} LIMIT :limit",
         {**params, "limit": max(1, int(count))},
     ).fetchall()
     items = []

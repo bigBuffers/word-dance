@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from reference_order import reference_order
 from wd import db
 from wd.errors import ApiError
 from wd.jobs import queue
@@ -65,6 +66,19 @@ def items_of(conn, batch_id) -> list[dict]:
 
 def count(conn, sql, params=()) -> int:
     return int(conn.execute(sql, params).fetchone()[0])
+
+
+# the 推荐词 pool of the `user` fixture (目标 cet4+cet6): the screens WHERE of batches.select_words / add_more
+SCREEN_POOL = (
+    "is_public = 1 AND merged_into_word_id IS NULL AND is_valid_english = 1 AND (stage_cet4 = 1 OR stage_cet6 = 1) "
+    "AND NOT EXISTS (SELECT 1 FROM user_words uw WHERE uw.user_id = :me AND uw.word_id = w.id)"
+)
+
+
+def screen_order(conn, user: int) -> list[str]:
+    """The 推荐词 order of the fixture's CET-4 learner: 主攻阶段 cet4 (stage index 4) first, then the learning order of the stored
+    learn_rank with the frequency tail (DESIGN §6.3 step 4) — read from the column, never a lemma list of the seed."""
+    return reference_order(conn, SCREEN_POOL, cur=4, params={"me": user})
 
 
 @pytest.fixture
@@ -126,7 +140,7 @@ def test_build_batch_caps_ordering_and_counts(seeded, user):
     screens = [r["lemma"] for r in rows if r["kind"] == "screen"]
     assert reviews == ["bank", "apple"]  # most overdue first, capped at 2
     assert news == ["water", "happy", "glass"]  # stubborn, then priority 100, then oldest added_at
-    assert screens == ["absolutely", "axis"]  # 主攻阶段 cet4 (stage_min 4) by frequency
+    assert screens == screen_order(conn, user)[:2]  # 主攻阶段 cet4 (stage_min 4) first, then the learning order (the stored learn_rank)
     assert [r["kind"] for r in rows][:5] == ["review", "new", "review", "new", "new"]  # k = ceil(2/3) = 1 → R N R N, then the rest
     assert [r["position"] for r in rows] == list(range(len(rows)))
     assert all(r["user_word_id"] is not None for r in rows if r["kind"] != "screen") and all(r["user_word_id"] is None for r in rows if r["kind"] == "screen")
@@ -222,14 +236,15 @@ def test_content_enqueued_only_for_validated_words_lacking_content(seeded, user)
     mark(conn, user, "apple")  # the mark itself enqueued content:apple (priority 20)
     conn.execute("DELETE FROM jobs")
     conn.execute("UPDATE words SET content_state = 'none' WHERE lemma = 'apple'")
-    conn.execute("UPDATE words SET content_state = 'ready' WHERE lemma = 'absolutely'")  # screen word with content
+    s1, s2 = screen_order(conn, user)[:2]  # today's two 推荐词 (daily_screen_count 2)
+    conn.execute("UPDATE words SET content_state = 'ready' WHERE lemma = ?", (s1,))  # screen word with content
     b = batches.build_batch(conn, user, TODAY, "manual", NOW)
     lemmas = {r["lemma"] for r in items_of(conn, b.id)}
-    assert lemmas == {"apple", "absolutely", "axis"}
+    assert lemmas == {"apple", s1, s2}
     jobs = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT dedupe_key, priority, status FROM jobs WHERE type = 'generate_content'")}
-    assert jobs == {f"content:{wid(conn, 'apple')}": (20, "queued"), f"content:{wid(conn, 'axis')}": (20, "queued")}
+    assert jobs == {f"content:{wid(conn, 'apple')}": (20, "queued"), f"content:{wid(conn, s2)}": (20, "queued")}
     assert conn.execute("SELECT content_state FROM words WHERE lemma = 'apple'").fetchone()[0] == "queued"
-    assert conn.execute("SELECT content_state FROM words WHERE lemma = 'absolutely'").fetchone()[0] == "ready"
+    assert conn.execute("SELECT content_state FROM words WHERE lemma = ?", (s1,)).fetchone()[0] == "ready"
     # no fetch_image / other job types are created by the builder
     assert count(conn, "SELECT COUNT(*) FROM jobs WHERE type != 'generate_content'") == 0
 
@@ -267,8 +282,9 @@ def test_append_to_today_rules(settings, seeded, user):
     conn.execute("UPDATE user_settings SET daily_screen_count = 2, daily_new_count = 1 WHERE user_id = ?", (user,))
     mark(conn, user, "apple")
     assert batches.append_to_today(conn, user, wid(conn, "apple"), "extra", NOW) is None  # no batch today
+    s1, s2 = screen_order(conn, user)[:2]  # today's two 推荐词
     b = batches.build_batch(conn, user, TODAY, "manual", NOW)
-    assert [r["lemma"] for r in items_of(conn, b.id)] == ["apple", "absolutely", "axis"]
+    assert [r["lemma"] for r in items_of(conn, b.id)] == ["apple", s1, s2]
     assert batches.append_to_today(conn, user, wid(conn, "apple"), "extra", NOW) is None  # already present as `new`
     mark(conn, user, "bank")
     item = batches.append_to_today(conn, user, wid(conn, "bank"), "extra", NOW)
@@ -277,9 +293,9 @@ def test_append_to_today_rules(settings, seeded, user):
     assert rows[-1]["lemma"] == "bank" and rows[-1]["kind"] == "extra" and rows[-1]["position"] == 3 and rows[-1]["user_word_id"] is not None
     assert batches.append_to_today(conn, user, wid(conn, "bank"), "new", NOW) is None  # one study row per word
     # a word present only as `screen` gets its study row (the in-batch 推荐词 不熟悉 path)
-    mark(conn, user, "axis", context="today")
-    new_item = batches.append_to_today(conn, user, wid(conn, "axis"), "new", NOW)
-    assert new_item is not None and count(conn, "SELECT COUNT(*) FROM push_items WHERE batch_id = ? AND word_id = ?", (b.id, wid(conn, "axis"))) == 2
+    mark(conn, user, s2, context="today")
+    new_item = batches.append_to_today(conn, user, wid(conn, s2), "new", NOW)
+    assert new_item is not None and count(conn, "SELECT COUNT(*) FROM push_items WHERE batch_id = ? AND word_id = ?", (b.id, wid(conn, s2))) == 2
     row = conn.execute("SELECT extra_count, new_count FROM push_batches WHERE id = ?", (b.id,)).fetchone()
     assert (row[0], row[1]) == (1, 2)
     assert conn.execute("SELECT times_pushed FROM user_words WHERE user_id = ? AND word_id = ?", (user, wid(conn, "bank"))).fetchone()[0] == 1
@@ -296,18 +312,19 @@ def test_add_more_rounds_sources_and_rate_limit(settings, seeded, user):
     conn.execute("UPDATE user_settings SET daily_screen_count = 1, daily_new_count = 1 WHERE user_id = ?", (user,))
     for lemma in ("apple", "bank", "cat", "dog"):
         mark(conn, user, lemma)
+    pool = screen_order(conn, user)  # after the four marks: the 推荐词 pool of the CET-4 learner in learning order
     b = batches.build_batch(conn, user, TODAY, "manual", NOW)
-    assert [r["lemma"] for r in items_of(conn, b.id)] == ["apple", "absolutely"]
+    assert [r["lemma"] for r in items_of(conn, b.id)] == ["apple", pool[0]]
     r1 = batches.add_more(conn, user, b.id, "new", 2, NOW)
     assert r1.added == 2 and r1.extra_rounds == 1
     lemmas = [r["lemma"] for r in items_of(conn, b.id)]
-    assert lemmas == ["apple", "absolutely", "bank", "cat"] and all(r["kind"] == "extra" for r in items_of(conn, b.id)[2:])
+    assert lemmas == ["apple", pool[0], "bank", "cat"] and all(r["kind"] == "extra" for r in items_of(conn, b.id)[2:])
     r2 = batches.add_more(conn, user, b.id, "new", 10, NOW)
     assert r2.added == 1 and r2.extra_rounds == 2  # only `dog` is left; apple/bank/cat never duplicated
     r3 = batches.add_more(conn, user, b.id, "screen", 2, NOW)
     assert r3.added == 2 and r3.extra_rounds == 3
     screens = [r["lemma"] for r in items_of(conn, b.id) if r["kind"] == "screen"]
-    assert screens == ["absolutely", "axis", "ax"]  # existing screen word not repeated
+    assert screens == pool[:3]  # add_more continues the same order; the existing screen word is not repeated
     with pytest.raises(ApiError) as e:
         batches.add_more(conn, user, b.id, "new", 1, NOW)
     assert e.value.code == "rate_limited" and e.value.details["retry_after_s"] > 0

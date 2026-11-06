@@ -1,0 +1,165 @@
+# FINAL POLICY — reference simulation (purist + M1 M2 M3 + G5, packed key; M4 distance NULL→11)
+rows 9618; rank_rows 19.1 ms; keys NULL: 0; max key 13812400 (< 2·10^7: True)
+distinct (key, lemma): 9618 | distinct keys alone: 9480
+class counts: {'plain': 9191, 'adverb': 390, 'glued': 4, 'set': 19, 'interj': 14} | how: {'native': 8662, 'dealt': 529, 'adverb': 390, 'glued': 4, 'set': 19, 'interj': 14} | closed: 189
+
+## xs (n=600) — packed-key order == judge tuple-key order: False
+  first difference at 554 ['by', 'an', 'she', 'or', 'what', 'their'] ['an', 'by', 'she', 'or', 'what', 'their']
+  first 30: say go get make know one time year not think people take see come two want way look first new day use man find up give tell good physical education woman
+  31-60  : child work call world school try last ask feel three family so put old keep student let great big begin help talk turn hand show place week out hear question
+  comp first 30 / 100 / 300: {'closed': 0, 'adverb': 2, 'interj': 0, 'phrase': 1, 'frq_null': 1} {'closed': 1, 'adverb': 6, 'interj': 1, 'phrase': 2, 'frq_null': 2} {'closed': 3, 'adverb': 18, 'interj': 2, 'phrase': 2, 'frq_null': 15}
+  first FACTS-closed at 64 | first adverb at 9 | longest frq-NULL run 7
+  months  : {'january': 243, 'february': 244, 'march': 245, 'april': 246, 'may': 247, 'june': 248, 'july': 249, 'august': 250, 'september': 251, 'october': 252, 'november': 253, 'december': 254}
+  weekdays: {'monday': 343, 'tuesday': 344, 'wednesday': 345, 'thursday': 346, 'friday': 347, 'saturday': 348, 'sunday': 349}
+  grammar : {'the': 526, 'a': 533, 'an': 555, 'be': 527, 'am': 528, 'are': 529, 'is': 530, 'do': 545, 'does': 546, 'have': 536, 'i': 538, 'you': 541, 'in': 534, 'on': 544, 'like': 575}
+  speech  : {'hello': 329, 'hi': 191, 'yes': 64, 'no': 580, 'goodbye': 463, 'bye': 514, 'ok': 436, 'please': 469, 'sorry': 278, 'thank': 158}
+  adverbs : {'not': 9, 'very': 172, 'here': 139, 'too': 222, 'up': 25, 'so': 42, 'out': 58, 'now': 75, 'then': 107, 'also': 123, 'how': 91, 'well': 156}
+  no-frq  : {'colour': 195, 'schoolbag': 498, 'mr.': 198, 'mrs.': 265, 'ms.': 322, 'p.e.': 385, 'email': 142, 'ice cream': 85, 'ping-pong': 441, 'physical education': 29}
+  numbers : {'one': 6, 'two': 15, 'three': 40, 'four': 88, 'five': 108, 'ten': 226, 'first': 19, 'second': 137, 'hundred': 189}
+  concrete: {'cat': 357, 'dog': 216, 'apple': 399, 'book': 83, 'pen': 431, 'red': 181, 'blue': 227, 'mother': 76, 'father': 97, 'teacher': 135}
+  closed block starts at 526 | last 12: much where every before must under behind whose half near front beside
+  ACCEPT months contiguous & calendar order: True | weekdays contiguous: True
+
+## zk-new (n=1949) — packed-key order == judge tuple-key order: False
+  first difference at 425 ['stage', 'france', 'on the other hand', 'compare', 'design', 'take part in'] ['france', 'stage', 'on the other hand', 'compare', 'design', 'take part in']
+  first 30: other thing have to life need state become go in for high leave just mean go on group seem country problem get on start american part get on with case company system program get to government number point
+  31-60  : have got to more believe hold happen in all large area national fact be made of different business london be made up of side provide service important get up power only line end from time to time lose member pay law in time
+  comp first 30 / 100 / 300: {'closed': 0, 'adverb': 1, 'interj': 0, 'phrase': 6, 'frq_null': 6} {'closed': 0, 'adverb': 5, 'interj': 0, 'phrase': 21, 'frq_null': 24} {'closed': 0, 'adverb': 15, 'interj': 0, 'phrase': 64, 'frq_null': 71}
+  first FACTS-closed at 901 | first adverb at 11 | longest frq-NULL run 3
+  phrases first 50 / 200: 11 / 42 | per 100: [21, 21, 22, 21, 21, 22, 21, 21, 21, 21, 21, 22, 21, 21, 20, 14, 20, 22, 8, 0]
+  first 12 phrases: have to | go in for | go on | get on | get on with | get to | have got to | in all | be made of | be made up of | get up | from time to time | in time | on time | and so on | so that | think about | think of | take up | go out | out of | take out | come from |
+  grammar : {'as': 1873, 'if': 1874, 'would': 1875, 'could': 1877, 'although': 1905, 'unless': 1932, 'whether': 1900, 'since': 1894, 'during': 1890, 'without': 1891}
+  adverbs : {'just': 11, 'only': 52, 'even': 72, 'still': 93, 'really': 113}
+  phrases : {'have to': 3, 'go in for': 8, 'get up': 50, 'look after': 294, 'would like': 121, 'because of': 224, 'be good at': 271, 'such as': 445, 'kung fu': 1842, 'according to': 1734, 'be made of': 41}
+  british/proper: {'london': 44, 'britain': 103, 'england': 129, 'centre': 78, 'programme': 100, 'grey': 1867, 'favour': 1855, 'honour': 1858, 'queen': 1868}
+
+## gk-new (n=1255) — packed-key order == judge tuple-key order: True
+  first 30: issue political guy policy economic rate drug leader military tax site court image data source evidence billion thus opportunity administration campaign current involve defense security seek author represent agency movement
+  31-60  : concern series significant factor decade scene career treatment approach organisation fund occur individual identify determine indicate region election sex professor financial crime indeed authority sort strategy claim remove legal cell
+  comp first 30 / 100 / 300: {'closed': 0, 'adverb': 1, 'interj': 0, 'phrase': 0, 'frq_null': 0} {'closed': 0, 'adverb': 3, 'interj': 0, 'phrase': 0, 'frq_null': 3} {'closed': 0, 'adverb': 9, 'interj': 0, 'phrase': 1, 'frq_null': 5}
+  first FACTS-closed at 1248 | first adverb at 18 | longest frq-NULL run 2
+
+## cet4-new (n=1726) — packed-key order == judge tuple-key order: True
+  first 30: federal republican congress stock media growth analysis democratic executive simply entire religious management statement employee production sexual agent consumer shot senate relation effective troop investigation researcher particularly argument possibility define
+  31-60  : soviet presence reader christian willing understanding contribute protection additional associate critic intelligence connection generally learning hell democracy colleague writing expression reading married emotional well-known supreme poll teaching trail code jury
+  comp first 30 / 100 / 300: {'closed': 0, 'adverb': 2, 'interj': 0, 'phrase': 0, 'frq_null': 0} {'closed': 0, 'adverb': 6, 'interj': 0, 'phrase': 0, 'frq_null': 1} {'closed': 0, 'adverb': 17, 'interj': 0, 'phrase': 0, 'frq_null': 3}
+  first FACTS-closed at 854 | first adverb at 10 | longest frq-NULL run 1
+  overlap first 100 with today: 90 | oh / simply / particularly / due / via: {'oh': 854, 'simply': 10, 'particularly': 27, 'due': 1707, 'via': 1710}
+
+## cet6-new (n=3850) — packed-key order == judge tuple-key order: False
+  first difference at 2147 ['sweetness', 'paralyse', 'override', 'perish', 'vicinity', 'pleasing'] ['paralyse', 'sweetness', 'override', 'perish', 'vicinity', 'pleasing']
+  first 30: environmental democrat cultural attorney participant concerned involved voter assessment presidential regional analyst investor hearing jesus currently catholic aids producer regime perception opposition judgment christ abortion sector fishing curriculum assistance asset
+  31-60  : proceeding creation funding therapy existing well-off planning cop participation album coalition negotiation investigator suicide enforcement marketing congressional specifically involvement championship spending evaluation deficit ally confront peer designer immigration supporter retirement
+  comp first 30 / 100 / 300: {'closed': 0, 'adverb': 1, 'interj': 0, 'phrase': 0, 'frq_null': 2} {'closed': 0, 'adverb': 3, 'interj': 0, 'phrase': 0, 'frq_null': 6} {'closed': 0, 'adverb': 10, 'interj': 0, 'phrase': 0, 'frq_null': 9}
+  first FACTS-closed at 642 | first adverb at 16 | longest frq-NULL run 3
+  yeah / alas / currently: {'yeah': 642, 'alas': 1922, 'currently': 16}
+
+## 课标外 (n=238) — packed-key order == judge tuple-key order: True
+  first 30: scotland dr passer-by ireland works arab mexican man-made viewer moscow shooting irish part-time pc taxpayer totally egypt korean kind-hearted korea hey sidewalk traveler greece waiting-room mexico f workplace switzerland computer game
+  31-60  : belgium disturbing pence smoking check-out nursing vanilla tokyo settler middle east firefighter modem fairness unbelievable night-club firmly bookstore flashlight cleaner delighted human being overweight smoker paperwork sunglasses english-speaking daytime franc chick ha
+  comp first 30 / 100 / 300: {'closed': 1, 'adverb': 1, 'interj': 1, 'phrase': 1, 'frq_null': 16} {'closed': 3, 'adverb': 3, 'interj': 3, 'phrase': 6, 'frq_null': 34} {'closed': 7, 'adverb': 8, 'interj': 6, 'phrase': 6, 'frq_null': 73}
+  first FACTS-closed at 21 | first adverb at 16 | longest frq-NULL run 4
+
+## cross-check summary: stages whose order differs from the judge's tuple key: 3
+
+## 词库 全部 (sort=freq) — stage prefix = stage_distance(stage_min, cur=1) ≡ COALESCE(stage_min, 6), then the key
+  first 30: say go get make know one time year not think people take see come two want way look first new day use man find up give tell good physical education woman
+  positions: {'the': 526, 'is': 530, 'hello': 329, 'just': 611, 'other': 601, 'have to': 603, 'bookshelf': 9489, 'monday': 343} | 课标外 starts at 9381
+  key-only order (prewarm stage=all shape) first 30: say go get make know one time year not think people take see come other two want way look first new day use man find up thing have to give tell
+  词库 初中 tab (stage_zk=1, cur=2) first 20: other thing have to life need state become go in for high leave just mean go on group seem country problem get on start american | first 小学 word at 1950
+
+## acceptance numbers (full_seed assertions)
+{"closed_in_first_30_every_stage": {"xs": 0, "zk-new": 0, "gk-new": 0, "cet4-new": 0, "cet6-new": 0}, "xs_adverbs_first_30": 2, "xs_months_contiguous": [243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254], "zk_phrases_first_200": 42, "longest_frq_null_run": {"xs": 7, "zk-new": 3, "gk-new": 2, "cet4-new": 1, "cet6-new": 3}, "stage_words_with_null_key": 0, "cet4_first100_overlap_today": 90}
+
+## per-stage statistics (what kv.learn_order.stats carries; derived, never typed into docs)
+  xs: n=600 native=533 from_bnc=2 dealt=9 set=19 glued=4 adverb=31 interj=4 closed=75 p10/p50/p90=63/767/5059 first8=say go get make know one time year
+  zk-new: n=1949 native=1458 from_bnc=50 dealt=399 set=0 glued=0 adverb=92 interj=0 closed=77 p10/p50/p90=432/1683/6301 first8=other thing have to life need state become go in for
+  gk-new: n=1255 native=1213 from_bnc=20 dealt=6 set=0 glued=0 adverb=36 interj=0 closed=8 p10/p50/p90=1163/2928/7365 first8=issue political guy policy economic rate drug leader
+  cet4-new: n=1726 native=1610 from_bnc=18 dealt=16 set=0 glued=0 adverb=99 interj=1 closed=20 p10/p50/p90=2597/5387/11674 first8=federal republican congress stock media growth analysis democratic
+  cet6-new: n=3850 native=3669 from_bnc=91 dealt=54 set=0 glued=0 adverb=124 interj=3 closed=8 p10/p50/p90=4265/8728/18512 first8=environmental democrat cultural attorney participant concerned involved voter
+  课标外: n=238 native=179 from_bnc=27 dealt=45 set=0 glued=0 adverb=8 interj=6 closed=1 p10/p50/p90=3964/12109/28258 first8=scotland dr passer-by ireland works arab mexican man-made
+
+## B. scratch copy: ADD COLUMN + UPDATE + SQL differential (stage distance NULL → 11)
+  ADD COLUMN 0.4 ms; UPDATE 9618 rows 15.6 ms; NULL learn_rank rows: 0; updated_at distinct 16
+  词库 全部 (cur=1 prefix): SQL == Python: True (9618 rows, 5.08 ms)
+  词库 小学 tab: SQL == Python: True (600 rows, 0.84 ms)
+  词库 初中 tab: SQL == Python: True (2549 rows, 1.60 ms)
+  筛词 auto xs+zk+gk, 主攻 xs: SQL == Python: True (3804 rows, 2.41 ms)
+  prewarm all (key only): SQL == Python: True (9380 rows, 4.56 ms)
+  difficulty sort: 9618 rows in 4.95 ms (no Python twin; first 10: go get make know one time year not think people)
+  plan 词库 全部: SEARCH w USING INDEX ix_words_public (is_public=?) | USE TEMP B-TREE FOR ORDER BY
+  C10 trap row (stage_xs=1, stage_min NULL, learn_rank NULL) in a 小学 筛词 list: position 601 of 601 (was 1 of 601 today)
+  same row under TODAY's _STAGE_DISTANCE (NULL first): position 1
+  fail-soft (all ranks NULL) == today's frq order: True | first 8: the be and of a in to have
+
+## C. mini seed (backend/tests/fixtures/mini_seed.jsonl) imported with wd.seed.import_seed into a fresh migrated DB
+  imported 62 records, 62 inserted, 107 forms
+  packed == judge tuple order: True | NULL keys: 0
+  GOLDEN DIGEST sha256(json.dumps(sorted (lemma, learn_rank)), separators=(',',':')): 8ba429d756f62e54a58a5aa11561eb702fd73511a28f64106eb00f5597aa91ef
+  table: lemma | stage_min | class/how | frq | bnc | learn_rank
+    go                   2     native       35     44     3500
+    take                 1     native       63     51     6300
+    good                 1     native       110    73     11000
+    child                1     native       115    114    11500
+    run                  1     native       202    208    20200
+    water                1     native       226    236    22600
+    email                1     dealt        None   None   22620
+    study                1     native       240    270    24000
+    book                 1     native       241    235    24100
+    house                1     native       257    148    25700
+    person               2     native       345    308    34500
+    teacher              1     native       371    486    37100
+    better               2     native       452    704    45200
+    decide               2     native       456    375    45600
+    receive              2     native       497    372    49700
+    base                 2     native       536    514    53600
+    a.m.                 2     dealt        None   None   53620
+    data                 3     native       559    552    55900
+    recent               2     native       567    630    56700
+    computer             1     native       589    580    58900
+    bank                 2     native       663    406    66300
+    color                2     native       697    24372  69700
+    tv                   1     native       730    1457   73000
+    happy                1     native       747    777    74700
+    dog                  1     native       753    819    75300
+    ability              2     native       783    946    78300
+    analysis             3     native       811    707    81100
+    glass                1     native       820    844    82000
+    ice cream            1     dealt        None   None   82020
+    mountain             2     native       1240   1402   124000
+    basis                3     native       1307   694    130700
+    clothes              1     native       1434   1315   143400
+    cat                  1     native       1775   1712   177500
+    aids                 3     native       1793   3757   179300
+    abandon              3     native       2182   2057   218200
+    absence              3     native       2524   1585   252400
+    negotiate            3     native       2541   2586   254100
+    apple                1     native       2695   2446   269500
+    absorb               3     native       3120   2879   312000
+    absolute             3     native       3165   2420   316500
+    running              3     native       3252   3269   325200
+    abstract             3     native       4007   3729   400700
+    axis                 4     native       5598   5787   559800
+    absolutely           4     adverb       1149   1619   559840
+    absurd               3     native       5901   5676   590100
+    abundant             3     native       6223   7823   622300
+    receipt              3     native       6517   3633   651700
+    abolish              3     native       7490   3736   749000
+    china                1     native       7946   1973   794600
+    abnormal             3     native       8241   6548   824100
+    absorption           5     native       8596   5819   859600
+    ought to             5     dealt        None   None   859620
+    abrupt               3     native       8703   8560   870300
+    bookshelf            None  native       11170  22136  1117000
+    ax                   4     native       11322  28327  1132200
+    axe                  5     native       11388  7056   1138800
+    be                   1     native       2      2      10000200
+    is                   1     glued:be     None   24648  10000201
+    a                    1     native       5      5      10000500
+    an                   3     native       None   30     10003000
+    some                 1     native       60     53     10006000
+    aboard               3     native       4984   7625   10498400
+  test_vocab 全部 first 10 (cur=1 prefix): take good child run water email study book house teacher
+  test_screen cet6 主攻 (stage_min=5) first 3: ['absorption', 'ought to', 'axe'] | zk tab cur=2 first 3: ['go', 'person', 'better']
+  test_batches 主攻 cet4 screens first 2: ['axis', 'absolutely']
+  test_vocab xs first 5: ['take', 'good', 'child', 'run', 'water']

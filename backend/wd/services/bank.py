@@ -213,7 +213,7 @@ def current_stage_index(settings_row: Mapping[str, Any]) -> int:
     ``None`` / a missing key → :data:`DEFAULT_CURRENT_STAGE`. Written as an explicit ``is None`` test rather than
     ``int(x or DEFAULT)`` on purpose: no stage index is 0 today, but a falsy index must never be silently replaced by the
     default should the numbering ever change again (PLAN R-1 / SM D-16). screen.py and batches.py call this for the
-    ``_STAGE_DISTANCE`` ordering.
+    ``learn_order.stage_distance_sql`` ordering.
     """
     cur = settings_row.get("current_stage")
     return DEFAULT_CURRENT_STAGE if cur is None else int(cur)

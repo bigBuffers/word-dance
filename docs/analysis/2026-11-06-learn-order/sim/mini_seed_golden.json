@@ -1,0 +1,254 @@
+{
+ "policy": "lo-1",
+ "digest": "8ba429d756f62e54a58a5aa11561eb702fd73511a28f64106eb00f5597aa91ef",
+ "rows": [
+  {
+   "lemma": "a",
+   "learn_rank": 10000500
+  },
+  {
+   "lemma": "a.m.",
+   "learn_rank": 53620
+  },
+  {
+   "lemma": "abandon",
+   "learn_rank": 218200
+  },
+  {
+   "lemma": "ability",
+   "learn_rank": 78300
+  },
+  {
+   "lemma": "abnormal",
+   "learn_rank": 824100
+  },
+  {
+   "lemma": "aboard",
+   "learn_rank": 10498400
+  },
+  {
+   "lemma": "abolish",
+   "learn_rank": 749000
+  },
+  {
+   "lemma": "abrupt",
+   "learn_rank": 870300
+  },
+  {
+   "lemma": "absence",
+   "learn_rank": 252400
+  },
+  {
+   "lemma": "absolute",
+   "learn_rank": 316500
+  },
+  {
+   "lemma": "absolutely",
+   "learn_rank": 559840
+  },
+  {
+   "lemma": "absorb",
+   "learn_rank": 312000
+  },
+  {
+   "lemma": "absorption",
+   "learn_rank": 859600
+  },
+  {
+   "lemma": "abstract",
+   "learn_rank": 400700
+  },
+  {
+   "lemma": "absurd",
+   "learn_rank": 590100
+  },
+  {
+   "lemma": "abundant",
+   "learn_rank": 622300
+  },
+  {
+   "lemma": "aids",
+   "learn_rank": 179300
+  },
+  {
+   "lemma": "an",
+   "learn_rank": 10003000
+  },
+  {
+   "lemma": "analysis",
+   "learn_rank": 81100
+  },
+  {
+   "lemma": "apple",
+   "learn_rank": 269500
+  },
+  {
+   "lemma": "ax",
+   "learn_rank": 1132200
+  },
+  {
+   "lemma": "axe",
+   "learn_rank": 1138800
+  },
+  {
+   "lemma": "axis",
+   "learn_rank": 559800
+  },
+  {
+   "lemma": "bank",
+   "learn_rank": 66300
+  },
+  {
+   "lemma": "base",
+   "learn_rank": 53600
+  },
+  {
+   "lemma": "basis",
+   "learn_rank": 130700
+  },
+  {
+   "lemma": "be",
+   "learn_rank": 10000200
+  },
+  {
+   "lemma": "better",
+   "learn_rank": 45200
+  },
+  {
+   "lemma": "book",
+   "learn_rank": 24100
+  },
+  {
+   "lemma": "bookshelf",
+   "learn_rank": 1117000
+  },
+  {
+   "lemma": "cat",
+   "learn_rank": 177500
+  },
+  {
+   "lemma": "child",
+   "learn_rank": 11500
+  },
+  {
+   "lemma": "china",
+   "learn_rank": 794600
+  },
+  {
+   "lemma": "clothes",
+   "learn_rank": 143400
+  },
+  {
+   "lemma": "color",
+   "learn_rank": 69700
+  },
+  {
+   "lemma": "computer",
+   "learn_rank": 58900
+  },
+  {
+   "lemma": "data",
+   "learn_rank": 55900
+  },
+  {
+   "lemma": "decide",
+   "learn_rank": 45600
+  },
+  {
+   "lemma": "dog",
+   "learn_rank": 75300
+  },
+  {
+   "lemma": "email",
+   "learn_rank": 22620
+  },
+  {
+   "lemma": "glass",
+   "learn_rank": 82000
+  },
+  {
+   "lemma": "go",
+   "learn_rank": 3500
+  },
+  {
+   "lemma": "good",
+   "learn_rank": 11000
+  },
+  {
+   "lemma": "happy",
+   "learn_rank": 74700
+  },
+  {
+   "lemma": "house",
+   "learn_rank": 25700
+  },
+  {
+   "lemma": "ice cream",
+   "learn_rank": 82020
+  },
+  {
+   "lemma": "is",
+   "learn_rank": 10000201
+  },
+  {
+   "lemma": "mountain",
+   "learn_rank": 124000
+  },
+  {
+   "lemma": "negotiate",
+   "learn_rank": 254100
+  },
+  {
+   "lemma": "ought to",
+   "learn_rank": 859620
+  },
+  {
+   "lemma": "person",
+   "learn_rank": 34500
+  },
+  {
+   "lemma": "receipt",
+   "learn_rank": 651700
+  },
+  {
+   "lemma": "receive",
+   "learn_rank": 49700
+  },
+  {
+   "lemma": "recent",
+   "learn_rank": 56700
+  },
+  {
+   "lemma": "run",
+   "learn_rank": 20200
+  },
+  {
+   "lemma": "running",
+   "learn_rank": 325200
+  },
+  {
+   "lemma": "some",
+   "learn_rank": 10006000
+  },
+  {
+   "lemma": "study",
+   "learn_rank": 24000
+  },
+  {
+   "lemma": "take",
+   "learn_rank": 6300
+  },
+  {
+   "lemma": "teacher",
+   "learn_rank": 37100
+  },
+  {
+   "lemma": "tv",
+   "learn_rank": 73000
+  },
+  {
+   "lemma": "water",
+   "learn_rank": 22600
+  }
+ ]
+}

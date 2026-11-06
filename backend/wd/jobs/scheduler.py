@@ -15,8 +15,11 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   ``bank_suggestions`` → ``expired`` for every user — ``consolidate.expire_stale_suggestions``);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
 * 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, the failed-image retry sweep
-  (``images.retry_failed_studied``: ≤ 50 studied ``failed`` words, 6 h apart, ≤ 3 per 30 days — PLAN §5.1 C7), one
-  requeue of dead content/lookup jobs, claude-logs pruning, ``PRAGMA optimize`` + WAL checkpoint;
+  (``images.retry_failed_studied``: ≤ 50 studied ``failed`` words, 6 h apart, ≤ 3 per 30 days — PLAN §5.1 C7), the
+  learning-order self-heal (``learn_order.ensure_current``: words and forms a learner's lookup created re-deal the 课标外
+  group's and — through phrase-token resolution — a stage group's dealt rows until this compare rewrites them; DESIGN §2.4
+  and the learn_order module docstring), one requeue of dead content/lookup jobs, claude-logs pruning,
+  ``PRAGMA optimize`` + WAL checkpoint;
 * ``kv.last_tick_at``; a ``downtime`` event with ``{"from","to"}`` when the gap since the last tick exceeds 10 min.
 
 ``prefetch`` reads ``wd.ai.budget.spent_today(conn, cfg, now)`` / ``wd.ai.budget.ai_enabled(conn, cfg)`` (WP5).
@@ -40,7 +43,7 @@ from typing import Any, Mapping, Sequence
 from .. import db
 from ..ai import budget, consolidate
 from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, parse_push_time, to_iso, zone
-from ..services import bank, batches
+from ..services import bank, batches, learn_order
 from . import lease, queue
 from .registry import JobContext
 from .worker import REVIVE_CONTENT_WORD_SQL
@@ -378,8 +381,8 @@ def retry_failed_images(conn: sqlite3.Connection, now: datetime, *, cfg: Any) ->
 
 
 def maintenance(conn: sqlite3.Connection, now: datetime, *, cfg: Any, result: TickResult) -> bool:
-    """03:30 ``WD_TZ`` once per day (``kv maintenance.last_date``): prefetch → failed-image retries → dead requeue → log
-    pruning → PRAGMAs."""
+    """03:30 ``WD_TZ`` once per day (``kv maintenance.last_date``): prefetch → failed-image retries → learning-order
+    self-heal → dead requeue → log pruning → PRAGMAs."""
     local = now.astimezone(zone(cfg.tz))
     if local.time() < MAINTENANCE_AT:
         return False
@@ -395,6 +398,10 @@ def maintenance(conn: sqlite3.Connection, now: datetime, *, cfg: Any, result: Ti
         result.image_retries = retry_failed_images(conn, now, cfg=cfg)
     except Exception:
         log.exception("maintenance: failed-image retry sweep failed")
+    try:
+        learn_order.ensure_current(conn, now=to_iso(now), trigger="maintenance")  # never raises; the guard is for symmetry
+    except Exception:
+        log.exception("maintenance: learning-order recompute failed")
     try:
         requeued = requeue_dead_once(conn, now)
         if requeued:

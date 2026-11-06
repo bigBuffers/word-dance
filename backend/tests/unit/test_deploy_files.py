@@ -250,7 +250,7 @@ def test_install_sh_dry_run_prints_every_step_and_changes_nothing(tmp_path):
     assert "dry run complete — nothing was changed" in out
     plus = [l for l in out.splitlines() if l.startswith("+ ")]
     assert len(plus) >= 10
-    for needle in ("+ install -d -m 0700", "pip install --quiet -r", "npm ci --silent && npm run build --silent", "/.venv/bin/wd migrate", "/.venv/bin/wd import-seed", "/.venv/bin/wd claude-check", "/.venv/bin/wd create-admin --if-none", f"+ cp {DEPLOY}/env.example {data}/.env"):
+    for needle in ("+ install -d -m 0700", "pip install --quiet -r", "npm ci --silent && npm run build --silent", "/.venv/bin/wd migrate", "/.venv/bin/wd import-seed", "/.venv/bin/wd learn-order", "/.venv/bin/wd claude-check", "/.venv/bin/wd create-admin --if-none", f"+ cp {DEPLOY}/env.example {data}/.env"):
         assert any(needle in l for l in plus), needle
     assert not data.exists()  # nothing created
     assert not (REPO / ".venv").exists() or True  # the worktree may or may not have a venv; the dry run must not create one

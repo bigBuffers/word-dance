@@ -14,7 +14,7 @@ from wd import db, schemas
 from wd.clock import parse_iso, to_iso
 from wd.errors import ApiError
 from wd.jobs import queue
-from wd.services import ecdict, words
+from wd.services import ecdict, learn_order, words
 from wd.services.ecdict import EcdictEntry
 from wd.services.words import (
     Normalised,
@@ -136,6 +136,7 @@ def test_unknown_string_becomes_a_private_provisional_word_with_one_debounced_lo
     assert (row["source"], row["is_public"], row["is_valid_english"], row["safe_for_sharing"]) == ("user", 0, None, None)
     assert row["created_by_user_id"] == user and row["stage_min"] is None
     assert (row["display"], row["kind"]) == ("abandonned", "word")
+    assert row["learn_rank"] is None  # no frequency yet: the next recompute (start / nightly) deals it into the 课标外 group
     assert res.is_public == 0 and res.is_valid_english is None
     js = jobs(seeded)
     assert len(js) == 1 and js[0]["id"] == res.job_id
@@ -279,6 +280,8 @@ def test_ordinary_ecdict_row_is_public_valid_and_enqueues_nothing(seeded, user, 
     assert (row["stage_cet6"], row["stage_min"], row["exam_tags"], row["ecdict_id"], row["sources"]) == (1, schemas.stage_to_index("cet6"), "gre", 777, "ecdict")
     assert (row["stage_xs"], row["stage_zk"], row["stage_gk"], row["stage_cet4"]) == (0, 0, 0, 0)
     assert json.loads(row["exchange_json"]) == {"s": "ubiquitouses"}
+    # the learning-order key is exact at insert time for a natively ranked row (DESIGN §2.4 "runtime insert"): frq 100, not closed
+    assert row["learn_rank"] == learn_order.best_effort_rank(row) == learn_order.pack(False, 100, learn_order.SUB_NATIVE) == 10000
     assert jobs(seeded) == []
     assert calls == ["ubiquitous"]
     again = resolve_text(seeded, "ubiquitous", user)

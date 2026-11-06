@@ -6,8 +6,10 @@ SPA fallback, ``/assets`` immutable), one pure-ASGI middleware (``X-Request-Id``
 log line per request) and the lifespan:
 
     migrate (with the pre-migrate snapshot hook) → seed import when kv.seed_version ≠ content sha256 of WD_SEED_PATH (never fatal)
-    (warn-and-continue when the file is missing) → kv.public_url_guess → registry.load_handlers() → take
-    kv.worker_lease and start the Claude worker(s), the I/O worker and the scheduler when WD_WORKER_ENABLED.
+    (warn-and-continue when the file is missing) → learn_order.ensure_current (the learning-order keys words.learn_rank:
+    stored vs computed, changed rows only; never fatal — a `learn_order_failed` event and the lists serve the fail-soft order)
+    → kv.public_url_guess → registry.load_handlers() → take kv.worker_lease and start the Claude worker(s), the I/O worker
+    and the scheduler when WD_WORKER_ENABLED.
 
 It refuses to run under more than one uvicorn worker (the single-process invariant, DESIGN §0.2).
 """
@@ -66,6 +68,7 @@ from .routers import (
     words,
 )
 from .seed import import_seed, seed_digest
+from .services import learn_order
 
 log = logging.getLogger("wd.main")
 http_log = logging.getLogger("wd.http")
@@ -490,6 +493,7 @@ def startup(app: FastAPI) -> None:
         for version, name in result.applied:
             log.info("applied migration %04d_%s", version, name, extra={"event": "migration"})
         seed_check(conn, cfg)
+        learn_order.ensure_current(conn, now=now_iso(app.state.clock))  # fills / repairs words.learn_rank (0014); never raises
         guess = first_non_loopback_ipv4()
         if guess:
             db.kv_set(conn, "public_url_guess", f"http://{guess}:{cfg.port}")

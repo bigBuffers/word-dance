@@ -752,7 +752,7 @@ make smoke                                                           # 假 claud
 2. 2025 修订版课标的教育部印发文号未找到（P3 的 `provisional` 标记）。
 3. `PLA Day`、`Mount Huangshan`、`Mount Taishan` 三个附表词 ECDICT 无条目（需同时自写音标，本轮跳过入 `stats.skipped`）；39 条词组模板（`agree with sb.`）的归一规则——下一版种子。
 4. `a.m`/`a.m.`、`ice cream`/`ice-cream`、`e-mail`/`email`、`miss`/`miss.` 并存的合并需要 `merged_into_word_id` 流程（WLC 阶段 C）；`I` 的 `kind='proper_noun'`（`derive_kind` 副作用）不在本轮改。
-5. 小学页签仍按成人 `frq` 排序（前 15 词几乎全是功能词）；教材/年级/单元顺序种子无字段；具体性常模（Lancaster CC BY 4.0）另起任务。
+5. 已解决（2026-11-06，docs/analysis/2026-11-06-learn-order/DESIGN.md）：小学页签曾按成人 `frq` 排序（前 15 词几乎全是功能词），现按派生列 `words.learn_rank`（迁移 0014，`docs/releases/2026-11-learn-order.md`）；教材/年级/单元顺序种子无字段；具体性常模（Lancaster CC BY 4.0）另起任务。
 6. 生产机（Lighthouse）SQLite 版本与 `legacy_alter_table` 默认未知——部署前在目标机跑 `scripts/rehearse_migration.py`。
 7. 即时重试挂点（P20）、`images-prune` 对导入来源的识别、「不合适」举报阈值 1 → N 个不同用户（WLC 阶段 C，K-12 邀请前必须完成）。
 8. 配图二期的前提：智谱 BigModel 账号/key 由谁申请、放哪台机器（东京 Lighthouse 或进程环境无 `HTTP(S)_PROXY` 的 Mac）；5–8 名小学生看图说义 + 24 h 回忆小样本是否做（监护人书面同意）；《人工智能生成合成内容标识办法》下本应用的主体定性与 GB 45438-2025 元数据字段名（公网上线前法务核对）。

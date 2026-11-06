@@ -169,7 +169,7 @@ Acceptance (every number is read from `data/seed/stats.json` — nothing is hand
 ```
 .venv/bin/wd migrate && time .venv/bin/wd import-seed                 # < 20 s ; second run prints "seed up to date (content sha256 …)" and changes nothing
 .venv/bin/wd import-seed --dry-run --report /tmp/dry.json             # read-only plan; on the database just imported: inserted 0, updated 0, orphans []
-.venv/bin/wd check db                                                 # invariant stage_min_consistent / xs_subset_zk / stages_json_known / seed_version_matches_file: ok
+.venv/bin/wd check db                                                 # invariant stage_min_consistent / xs_subset_zk / stages_json_known / seed_version_matches_file / learn_rank_present / learn_order_current / learn_rank_matches_policy / calendar_words_in_xs: ok
 $PY - <<'EOF'
 import json, os, sqlite3
 from wd.schemas import STAGE_ORDER, stage_to_index

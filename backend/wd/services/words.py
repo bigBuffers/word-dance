@@ -28,7 +28,7 @@ from ..clock import now_iso, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
 from ..schemas import STAGE_ORDER
-from . import ecdict
+from . import ecdict, learn_order
 
 log = logging.getLogger("wd.words")
 
@@ -588,11 +588,12 @@ def _word_defaults() -> dict[str, Any]:
     }
 
 
-# the columns of a words row the resolver writes, in DDL order; the five stage flags follow STAGE_ORDER (0011)
+# the columns of a words row the resolver writes, in DDL order; the five stage flags follow STAGE_ORDER (0011); learn_rank is
+# the appended 0014 column (ADD COLUMN) — computed per row by learn_order.best_effort_rank in _insert_word, not defaulted
 _INSERT_WORD_COLUMNS: tuple[str, ...] = (
     "lemma", "display", "kind", "phonetic", "translation", "definition", "pos", "collins", "oxford", "exam_tags", "bnc", "frq",
     "exchange_json", *(f"stage_{s}" for s in STAGE_ORDER), "stage_min", "cet6_star", "sources", "ecdict_id", "source",
-    "is_public", "is_valid_english", "safe_for_sharing", "difficulty", "created_by_user_id",
+    "is_public", "is_valid_english", "safe_for_sharing", "difficulty", "created_by_user_id", "learn_rank",
 )  # fmt: skip
 _INSERT_WORD_SQL = (
     f"INSERT INTO words({', '.join(_INSERT_WORD_COLUMNS)}, created_at, updated_at) "
@@ -602,8 +603,14 @@ _INSERT_WORD_SQL = (
 
 
 def _insert_word(conn: sqlite3.Connection, cols: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Insert a ``words`` row unless its lemma exists (UNIQUE lemma race-safe); returns ``(row, created)``."""
-    cur = conn.execute(_INSERT_WORD_SQL, dict(cols))
+    """Insert a ``words`` row unless its lemma exists (UNIQUE lemma race-safe); returns ``(row, created)``.
+
+    ``learn_rank`` (DESIGN §2.4 "runtime insert") is ``learn_order.best_effort_rank`` of the columns unless the caller set
+    it: exact for a natively ranked row (an ECDICT hit with ``frq``), NULL for a provisional row until the next recompute.
+    """
+    params = dict(cols)
+    params.setdefault("learn_rank", learn_order.best_effort_rank(params))
+    cur = conn.execute(_INSERT_WORD_SQL, params)
     created = cur.rowcount == 1
     row = word_by_lemma(conn, str(cols["lemma"]))
     if row is None:  # pragma: no cover - the lemma was just inserted or already existed

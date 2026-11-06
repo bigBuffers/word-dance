@@ -1,8 +1,9 @@
 """wd/seed.py — import_seed on the mini seed (WP1, PLAN §4.7): column mapping, kind derivation, the five stage flags and
 stage_min (incl. the 课标外 NULL), cet6_star, word_forms guards / kind priority / seed aliases, idempotency (second run /
 --force), user data and content pointers untouched, .jsonl.gz and .jsonl inputs sharing one content digest, atomicity,
-kv.seed_version, --dry-run (zero writes, the plan), unknown stage codes counted, lemma mismatches counted, and the
-`wd import-seed` command."""
+kv.seed_version, --dry-run (zero writes, the plan), unknown stage codes counted, lemma mismatches counted, the in-transaction
+learning-order recompute (docs/analysis/2026-11-06-learn-order/DESIGN.md §2.4 / §4.1 item 22: the group-ripple rule, the
+event detail, a policy failure is fail-soft), and the `wd import-seed` command."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import pytest
 from wd import db, seed
 from wd.schemas import STAGE_ORDER, stage_to_index
 from wd.seed import SeedPlan, SeedStats, format_stats, import_seed, plan_import, seed_digest, seed_row, sha256_file
+from wd.services import learn_order
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 MINI_SEED = FIXTURES / "mini_seed.jsonl"
@@ -299,6 +301,108 @@ def test_changed_record_updates_only_that_row(conn, tmp_path):
     assert db.kv_get(conn, "seed_version") == seed_digest(modified) != seed_digest(MINI_SEED)
 
 
+def test_changed_record_may_rerank_only_dealt_words_of_its_stage_groups(conn, tmp_path):
+    """The group-ripple rule (DESIGN §2.1 / §2.4): a record change re-ranks at most the non-native (dealt / set / adverb /
+    interjection / glued) rows of the (stage_min, closed) groups it touches — a natively ranked word's key depends on no other
+    row, so `apple` is unchanged INCLUDING learn_rank and `updated_at` moves only for the changed record itself."""
+
+    def ranks() -> dict[str, int | None]:
+        return {str(r[0]): r[1] for r in conn.execute("SELECT lemma, learn_rank FROM words")}
+
+    def stamps() -> dict[str, str]:
+        return {str(r[0]): str(r[1]) for r in conn.execute("SELECT lemma, updated_at FROM words")}
+
+    def non_native_of(groups: set[tuple[int | None, bool]]) -> set[str]:
+        result = learn_order.rank_rows(*learn_order.load_inputs(conn))
+        return {rr.lemma for rr in result.rows.values() if (rr.stage_min, rr.closed) in groups and rr.how != learn_order.HOW_NATIVE}
+
+    import_seed(conn, str(MINI_SEED))
+    conn.execute("UPDATE words SET updated_at = '2020-01-01T00:00:00Z'")  # so a rewritten row is visible whatever the clock's second
+    zk, gk = stage_to_index("zk"), stage_to_index("gk")
+    assert word(conn, "abandon")["stage_min"] == gk
+    before_ranks, before_stamps, apple_before = ranks(), stamps(), word(conn, "apple")
+    # (1) the DESIGN's modification: abandon joins 初中 (gk → zk) — the key encodes no stage, so abandon's own key stays
+    recs = records()
+    for r in recs:
+        if r["word"] == "abandon":
+            r["translation"] = ["vt. 新释义"]
+            r["stages"] = ["zk", "gk", "cet4", "cet6"]
+            r["cet6_star"] = True
+    stats = import_seed(conn, str(write_seed(tmp_path / "modified.jsonl", recs)))
+    assert (stats.inserted, stats.updated, stats.up_to_date) == (0, 1, False)
+    after_ranks, after_stamps = ranks(), stamps()
+    changed = {lemma for lemma in before_ranks if before_ranks[lemma] != after_ranks[lemma]}
+    assert word(conn, "apple") == apple_before  # unchanged including learn_rank
+    assert {lemma for lemma in before_stamps if before_stamps[lemma] != after_stamps[lemma]} == {"abandon"}
+    assert after_ranks["abandon"] == before_ranks["abandon"] == learn_order.pack(False, word(conn, "abandon")["frq"], learn_order.SUB_NATIVE)
+    assert changed <= non_native_of({(zk, False), (gk, False)}) and stats.learn_rank_changed == len(changed)
+    assert json.loads(events(conn)[-1][1])["learn_order"] == {"version": learn_order.LEARN_ORDER_VERSION, "changed": len(changed)}
+    # (2) a host change that provably ripples: abandon takes a 初中-sized frequency and becomes an earlier 初中 host, so the dealt
+    # 初中 word `a.m.` (frequency-less) lands on another host — nothing outside the touched group moves, updated_at only for abandon
+    conn.execute("UPDATE words SET updated_at = '2020-01-01T00:00:00Z'")
+    before_ranks, before_stamps = ranks(), stamps()
+    for r in recs:
+        if r["word"] == "abandon":
+            r["frq"] = 400
+    stats = import_seed(conn, str(write_seed(tmp_path / "modified2.jsonl", recs)))
+    assert (stats.inserted, stats.updated) == (0, 1)
+    after_ranks, after_stamps = ranks(), stamps()
+    changed = {lemma for lemma in before_ranks if before_ranks[lemma] != after_ranks[lemma]}
+    assert "abandon" in changed and "a.m." in changed and after_ranks["abandon"] == learn_order.pack(False, 400, 0)
+    assert after_ranks["a.m."] % learn_order.RANK_SCALE == learn_order.SUB_DEALT and after_ranks["a.m."] != before_ranks["a.m."]
+    assert changed - {"abandon"} <= non_native_of({(zk, False)}) and stats.learn_rank_changed == len(changed)
+    assert {lemma for lemma in before_stamps if before_stamps[lemma] != after_stamps[lemma]} == {"abandon"}
+    assert word(conn, "apple") == apple_before
+    assert learn_order.stale_count(conn, stage_only=False) == 0  # the stored column equals the policy after every import
+
+
+def test_seed_import_event_carries_learn_order_detail(conn):
+    stats = import_seed(conn, str(MINI_SEED))
+    assert stats.learn_rank_changed == N  # the first import ranks every row
+    detail = json.loads(events(conn)[-1][1])
+    assert detail["learn_order"] == {"version": learn_order.LEARN_ORDER_VERSION, "changed": N}
+    assert events(conn) == [("seed_imported", events(conn)[0][1])]  # the import path writes no learn_order_recomputed event
+    assert f"{N} learn ranks changed" in format_stats(stats)
+    assert db.kv_get(conn, learn_order.KV_SEED) == db.kv_get(conn, "seed_version") == stats.content_sha256
+    assert db.kv_get(conn, learn_order.KV_VERSION) == learn_order.LEARN_ORDER_VERSION
+    assert q(conn, "SELECT COUNT(*) FROM words WHERE learn_rank IS NULL") == 0
+    forced = import_seed(conn, str(MINI_SEED), force=True)
+    assert forced.learn_rank_changed == 0 and json.loads(events(conn)[-1][1])["learn_order"] == {"version": learn_order.LEARN_ORDER_VERSION, "changed": 0}
+    assert "0 learn ranks changed" in format_stats(forced)
+
+
+def test_policy_failure_does_not_roll_the_import_back(conn, monkeypatch, caplog):
+    """A policy exception is fail-soft: the import commits (words, forms, kv.seed_version), ranks stay as they were (NULL on a
+    first import), one learn_order_failed event before the seed_imported event; a database error in the write phase rolls
+    the whole import back like any other statement."""
+
+    def boom(rows, forms):
+        raise RuntimeError("policy exploded")
+
+    monkeypatch.setattr(learn_order, "rank_rows", boom)
+    caplog.set_level(logging.ERROR, logger="wd.seed")
+    stats = import_seed(conn, str(MINI_SEED))
+    assert (stats.records, stats.inserted, stats.learn_rank_changed) == (N, N, 0) and not conn.in_transaction
+    assert q(conn, "SELECT COUNT(*) FROM words") == N and db.kv_get(conn, "seed_version") == stats.content_sha256
+    assert q(conn, "SELECT COUNT(*) FROM words WHERE learn_rank IS NOT NULL") == 0
+    assert [kind for kind, _ in events(conn)] == ["learn_order_failed", "seed_imported"]
+    assert json.loads(events(conn)[0][1]) == {"trigger": "seed_import", "error": "RuntimeError: policy exploded"}
+    assert json.loads(events(conn)[1][1])["learn_order"] == {"version": learn_order.LEARN_ORDER_VERSION, "changed": None}
+    assert db.kv_get(conn, learn_order.KV_VERSION) is None  # nothing computed, nothing stamped
+    assert any(r.levelno == logging.ERROR and getattr(r, "event", None) == "learn_order_failed" and r.exc_info for r in caplog.records)
+    assert "0 learn ranks changed" in format_stats(stats)
+    monkeypatch.undo()
+    assert import_seed(conn, str(MINI_SEED), force=True).learn_rank_changed == N  # the next import fills the column
+    # a database fault in the write phase (an UPDATE of learn_rank is refused) propagates and rolls the import back
+    conn.execute("UPDATE words SET learn_rank = NULL WHERE lemma = 'apple'")  # so the next import has a rank to write
+    conn.execute("CREATE TRIGGER refuse_rank BEFORE UPDATE OF learn_rank ON words BEGIN SELECT RAISE(ABORT, 'no rank writes'); END")
+    before = dump(conn)
+    with pytest.raises(sqlite3.IntegrityError, match="no rank writes"):
+        import_seed(conn, str(MINI_SEED), force=True)
+    assert not conn.in_transaction and dump(conn) == before  # the import rolled back with the fault
+    conn.execute("DROP TRIGGER refuse_rank")
+
+
 def test_provisional_user_word_is_promoted_to_a_seed_word(conn):
     user = conn.execute("INSERT INTO users(username, password_hash) VALUES ('alice','x')").lastrowid
     conn.execute("INSERT INTO words(lemma, display, kind, source, is_public, created_by_user_id) VALUES ('apple','Apple','proper_noun','user',0,?)", (user,))
@@ -329,15 +433,20 @@ def test_dry_run_writes_nothing(conn):
     assert stats.plan.orphans == [] and stats.plan.matrix[f"new→{XS}"] == sum(1 for r in records() if "xs" in r["stages"]) and stats.plan.matrix["new→none"] == 1
     assert dump(conn) == before and conn.total_changes == changes and not conn.in_transaction
     assert db.kv_get(conn, "seed_version") is None and q(conn, "SELECT COUNT(*) FROM words") == 0 and events(conn) == []
+    assert q(conn, "SELECT COUNT(*) FROM kv WHERE key LIKE 'learn_order.%'") == 0  # the learning order is not computed either
     text = format_stats(stats)
     assert text.startswith("dry run: insert 62 / update 0 / unchanged 0; orphans 0;") and f"stage_min new→{XS}" in text and "stageless 1" in text
     # after a real import the dry run of the same file says "up to date" and shows that --force would rewrite nothing
     import_seed(conn, str(MINI_SEED))
+    conn.execute("UPDATE words SET learn_rank = NULL WHERE lemma = 'go'")  # a dry run must not touch the learning order either
     snapshot = dump(conn)
+    learn_kv = [tuple(r) for r in conn.execute("SELECT key, value FROM kv WHERE key LIKE 'learn_order.%' ORDER BY key")]
     again = import_seed(conn, str(MINI_SEED), dry_run=True)
     assert again.up_to_date is True and again.plan is not None and (again.plan.inserted, again.plan.updated, again.plan.unchanged) == (0, 0, N)
     assert "seed up to date" in format_stats(again) and "--force would insert 0 / update 0 / unchanged 62" in format_stats(again)
-    assert dump(conn) == snapshot
+    assert dump(conn) == snapshot and again.learn_rank_changed == 0  # dump() carries every words column, learn_rank included
+    assert [tuple(r) for r in conn.execute("SELECT key, value FROM kv WHERE key LIKE 'learn_order.%' ORDER BY key")] == learn_kv
+    assert q(conn, "SELECT learn_rank FROM words WHERE lemma = 'go'") is None
 
 
 def test_dry_run_reports_orphans_flag_changes_and_matrix(conn, tmp_path):
@@ -482,6 +591,7 @@ def test_import_is_atomic(conn, monkeypatch):
         import_seed(conn, str(MINI_SEED))
     assert q(conn, "SELECT COUNT(*) FROM words") == 0 and db.kv_get(conn, "seed_version") is None
     assert events(conn) == [] and not conn.in_transaction
+    assert q(conn, "SELECT COUNT(*) FROM kv WHERE key LIKE 'learn_order.%'") == 0  # ranks and their stamps roll back with the import
     monkeypatch.undo()
     assert import_seed(conn, str(MINI_SEED)).inserted == N  # the connection is usable afterwards
 
@@ -569,10 +679,11 @@ def test_cli_import_seed_refuses_a_database_behind_the_code_schema(conn, capsys,
     finally:
         c.close()
     monkeypatch.setenv("WD_DB_PATH", str(behind))
+    newer = [f.path.name for f in db.list_migration_files() if f.version > 10]  # 0011 … the latest shipped file (0014 since the learning order)
     for argv in (["import-seed", "--file", str(MINI_SEED), "--dry-run"], ["import-seed", "--file", str(MINI_SEED)]):
         assert run_cli(argv) == 1
         captured = capsys.readouterr()
-        assert "3 pending migration(s)" in captured.err and "0011_primary_stage.sql" in captured.err and "run `wd migrate` first" in captured.err
+        assert f"{len(newer)} pending migration(s) ({', '.join(newer)})" in captured.err and "0011_primary_stage.sql" in captured.err and "run `wd migrate` first" in captured.err
         assert "Traceback" not in captured.err and captured.out == ""
     c = db.connect(behind)
     try:
@@ -646,3 +757,27 @@ def test_full_seed_acceptance_numbers():
     assert g("select count(*) from word_forms where kind not in ('p','d','i','3','s','r','t','alt','alias')") == 0
     assert g("select lemma from words where display='a.m.'") == "a.m." and g("select kind from words where lemma='a.m.'") == "abbreviation"
     assert g("select count(*) from words w, json_each('[\"' || replace(w.sources,' ','\",\"') || '\"]') j where w.sources is not null and j.value in ('zk','gk')") == 0
+    # the learning order (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.3): the column is filled and current, the committed
+    # report data/seed/learn_order.json (written by `wd learn-order --report` on the rehearsal copy) describes this seed, and the
+    # §1.6 acceptance counts hold when computed from the database — the five stage codes only, never the 课标外 group
+    report = json.loads((Path(__file__).resolve().parents[3] / "data" / "seed" / "learn_order.json").read_text(encoding="utf-8"))
+    assert g("select count(*) from words where stage_min is not null and learn_rank is null and merged_into_word_id is null") == 0
+    assert learn_order.stale_count(c) == 0
+    assert c.execute("select value from kv where key = ?", (learn_order.KV_VERSION,)).fetchone()[0] == learn_order.LEARN_ORDER_VERSION == report["policy"]
+    assert report["seed"] == stats["content_sha256"] == c.execute("select value from kv where key = 'seed_version'").fetchone()[0]
+    assert report["generated_by"] == "wd learn-order --report" and set(report["stages"]) == set(STAGE_ORDER) | {"none"}
+    calendar = (*learn_order.MONTHS, *learn_order.WEEKDAYS)
+    assert g(f"select count(*) from words where stage_xs = 1 and stage_min = 1 and lemma in ({', '.join(repr(l) for l in calendar)})") == len(calendar) == 19
+    for form in ("am", "is", "are", "does"):
+        assert "inherit:" in (c.execute("select sources from words where lemma = ?", (form,)).fetchone()[0] or ""), form
+    live = learn_order.report(c)
+    for code in STAGE_ORDER:
+        assert live["stages"][code]["first"][:8] == report["stages"][code]["first"][:8], code
+        assert live["acceptance"]["closed_in_first_30"][code] == 0 == report["acceptance"]["closed_in_first_30"][code], code
+        assert live["acceptance"]["longest_frq_null_run"][code] <= 7, code
+        assert live["stages"][code]["n"] == stats["first_stage"][code], code
+    assert live["acceptance"]["xs_adverbs_first_30"] <= 2
+    months = live["acceptance"]["xs_months_positions"]
+    assert None not in months and months == list(range(months[0], months[0] + 12))  # 12 consecutive positions, january first
+    assert live["acceptance"]["zk_phrases_first_200"] >= 40
+    assert {k: live["acceptance"][k] for k in report["acceptance"]} == report["acceptance"]

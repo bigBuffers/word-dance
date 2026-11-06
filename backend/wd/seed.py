@@ -28,7 +28,13 @@ unchanged). The import is an idempotent upsert keyed by ``words.lemma``:
 * ``kv.seed_version`` = sha256 of the DECOMPRESSED content (:func:`seed_digest`, what ``main.seed_check`` compares) and
   ``kv.seed_imported_at`` are set and a ``system_events('seed_imported')`` row is written — all inside one
   ``BEGIN IMMEDIATE`` transaction. Hashing the content rather than the ``.gz`` bytes means a seed re-packed by another
-  gzip implementation (``gzip -9 -n`` on a Mac vs. Linux) is still "up to date" (PLAN R-9).
+  gzip implementation (``gzip -9 -n`` on a Mac vs. Linux) is still "up to date" (PLAN R-9);
+* ``words.learn_rank`` (the learning order, DESIGN §3.2, migration 0014) is recomputed for every row inside the same
+  transaction through ``services.learn_order.recompute`` (``trigger='seed_import'``, stamped with this file's digest; the
+  count is ``SeedStats.learn_rank_changed`` and the event's ``learn_order`` detail); a dry run computes nothing; a seed change
+  may re-rank the frequency-less / dealt words of the touched stages, ``updated_at`` never moves for a rank; a policy failure
+  is logged, recorded as ``system_events('learn_order_failed')`` and never rolls the import back (the ranks stay as they were
+  until the next service start) — a database error in the write does, as for any other statement of the import.
 
 A second run with the same content is a no-op ("seed up to date") unless ``--force``. ``--dry-run`` (``dry_run=True``)
 reads the file and the ``words`` table, returns the :class:`SeedPlan` an import would carry out — inserts, updates,
@@ -57,6 +63,7 @@ from . import db
 from .clock import now_iso
 from .config import ConfigError, Settings, ensure_dirs
 from .schemas import STAGE_ORDER, stage_to_index
+from .services import learn_order
 from .services.words import derive_kind, normalise_input, normalise_lemma
 
 log = logging.getLogger("wd.seed")
@@ -152,6 +159,7 @@ class SeedStats:
     aliases: int = 0
     forms_skipped_empty: int = 0
     forms_skipped_headword: int = 0
+    learn_rank_changed: int = 0  # words whose learning-order key the in-transaction recompute rewrote (0 on a policy failure)
     up_to_date: bool = False
     dry_run: bool = False
     seconds: float = 0.0
@@ -474,6 +482,20 @@ def import_seed(conn, path: str, *, force: bool = False, dry_run: bool = False) 
         conn.executemany(_UPSERT_SQL, list(rows.values()))
         stats.updated = max(0, conn.total_changes - before - stats.inserted)
         _rebuild_forms(conn, rows, stats)
+        # the learning order (DESIGN §2.4): ranks and kv.seed_version land in one transaction; the digest is passed because the
+        # kv row is written one statement later. A policy failure is fail-soft (event, ranks stay as they were) — a database
+        # error (sqlite3.Error) out of the write phase propagates and rolls the import back like any other statement.
+        lo_detail: dict[str, Any] = {"version": learn_order.LEARN_ORDER_VERSION, "changed": None}
+        try:
+            lo = learn_order.recompute(conn, now=now, seed_version=digest, trigger=learn_order.TRIGGER_SEED_IMPORT)
+        except sqlite3.Error:
+            raise
+        except Exception as e:  # noqa: BLE001 - the policy must never cost the import
+            log.exception("seed import: learning-order recompute failed; the ranks stay as they were until the next `wd serve` start", extra={"event": learn_order.EVENT_FAILED})
+            learn_order.record_failure(conn, learn_order.TRIGGER_SEED_IMPORT, e, now=now)
+        else:
+            stats.learn_rank_changed = lo.changed
+            lo_detail["changed"] = lo.changed
         db.kv_set(conn, "seed_version", digest, now=now)
         db.kv_set(conn, "seed_imported_at", now, now=now)
         conn.execute(
@@ -496,6 +518,7 @@ def import_seed(conn, path: str, *, force: bool = False, dry_run: bool = False) 
                         "flag_added": stats.plan.flag_added,
                         "flag_removed": stats.plan.flag_removed,
                         "force": bool(force),
+                        "learn_order": lo_detail,
                     }
                 ),
                 now,
@@ -503,13 +526,14 @@ def import_seed(conn, path: str, *, force: bool = False, dry_run: bool = False) 
         )
     stats.seconds = time.monotonic() - t0
     log.info(
-        "seed imported: %d records, %d inserted, %d updated, %d forms (%d aliases), %d stageless (%.1f s)",
+        "seed imported: %d records, %d inserted, %d updated, %d forms (%d aliases), %d stageless, %d learn ranks changed (%.1f s)",
         stats.records,
         stats.inserted,
         stats.updated,
         stats.forms,
         stats.aliases,
         stats.stageless_records,
+        stats.learn_rank_changed,
         stats.seconds,
         extra={"event": "seed_imported"},
     )
@@ -548,7 +572,7 @@ def format_stats(stats: SeedStats) -> str:
     return (
         f"imported {stats.records} seed records from {stats.path}: {stats.inserted} inserted, {stats.updated} updated{extra}; "
         f"{stats.forms} word forms incl. {stats.aliases} aliases ({stats.forms_skipped_empty} empty and {stats.forms_skipped_headword} headword forms skipped); "
-        f"{stats.stageless_records} stageless; {stats.seconds:.1f} s"
+        f"{stats.stageless_records} stageless, {stats.learn_rank_changed} learn ranks changed; {stats.seconds:.1f} s"
     )
 
 

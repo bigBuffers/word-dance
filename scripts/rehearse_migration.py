@@ -26,7 +26,15 @@ designed):
   its CHECK, existing rows keep ``text_free = 0`` / ``prompt_version NULL`` when the file ran here;
 * 0013 (whenever ``schema_migrations`` holds 13): ``word_forms`` admits ``'alias'`` and still rejects an unknown kind, keeps
   every row, its index and ``WITHOUT ROWID``;
-* the ``wd check db`` stage invariants hold on the migrated copy; a second run applies nothing; an empty database
+* 0014 (whenever ``schema_migrations`` holds 14; docs/analysis/2026-11-06-learn-order/DESIGN.md §2.9): ``words.learn_rank`` is a
+  nullable INTEGER without default or index, ``words`` / ``v_bank`` keep their rows, the column is all NULL right after the file;
+  then the learning order is RECOMPUTED ON THE COPY (``learn_order.recompute``): 0 stage words unranked, ``kv.learn_order.version``
+  is the code's policy, ``stale_count`` 0, a second recompute changes 0 rows, ``MAX(updated_at)`` is unchanged, every stage's
+  first 30 words hold 0 FACTS-closed words (the §1.6 acceptance count, computed here); ``[info]`` prints the 小学 and 初中新增
+  first 15 and a per-stage summary — the operator sees the order before touching production; ``UPDATE words SET learn_rank = NULL``
+  is accepted (NULL is a legal state);
+* the ``wd check db`` stage invariants hold on the migrated copy and, from 0014, the four learning-order lines
+  (``learn_order.check_lines`` — the same code ``wd check db`` runs); a second run applies nothing; an empty database
   migrates from 0001 to the same version with 25 tables and the ``v_bank`` view;
 * informational: elapsed time, page / freelist counts and file size (PLAN §8 step 9 runs ``ANALYZE`` + ``VACUUM`` afterwards).
 
@@ -48,10 +56,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from wd import db
-from wd.diag import STAGE_INVARIANTS, STAGE_INVARIANTS_FROM_VERSION
+from wd.diag import LEARN_ORDER_INVARIANTS_FROM_VERSION, STAGE_INVARIANTS, STAGE_INVARIANTS_FROM_VERSION
 from wd.schemas import STAGE_ORDER
+from wd.services import learn_order
 
-EXPECTED_TABLE_COUNT = 25  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0013 (rebuilds in place)
+EXPECTED_TABLE_COUNT = 25  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0014 (rebuilds in place, 0014 adds a column)
 BOOKKEEPING_TABLES = frozenset({"schema_migrations", "kv", "system_events"})  # the only tables a migration may grow/shrink
 STAGE_COLUMNS = tuple(f"stage_{code}" for code in STAGE_ORDER)  # the 0011 column order (seed.SEED_COLUMNS order)
 WORD_IMAGES_META_COLUMNS = ("prompt_version", "model", "text_free", "eval_json")  # 0012
@@ -155,6 +164,10 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         snap["v_bank"] = int(scalar(conn, "SELECT COUNT(*) FROM v_bank"))
     if "word_forms" in snap["counts"]:
         snap["word_forms_kinds"] = {str(r[0]): int(r[1]) for r in conn.execute("SELECT kind, COUNT(*) FROM word_forms GROUP BY kind")}
+    if "words" in snap["counts"]:
+        snap["has_learn_rank"] = has_column(conn, "words", "learn_rank")
+        if snap["has_learn_rank"]:
+            snap["learn_rank_nonnull"] = int(scalar(conn, "SELECT COUNT(*) FROM words WHERE learn_rank IS NOT NULL"))
     return snap
 
 
@@ -288,8 +301,50 @@ def check_0013(rep: Report, conn: sqlite3.Connection, before: dict[str, Any]) ->
     rep.check("every stored kind is in the 0013 list", allowed <= set(WORD_FORMS_KINDS_0013), ", ".join(sorted(allowed - set(WORD_FORMS_KINDS_0013))) or "ok")
 
 
+def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """words.learn_rank, the learning order recomputed on the copy (DESIGN §2.9; docs/analysis/2026-11-06-learn-order/DESIGN.md)."""
+    cols = {r["name"]: r for r in columns(conn, "words")}
+    col = cols.get("learn_rank")
+    rep.check("words.learn_rank INTEGER, nullable, no default", col is not None and col["type"] == "INTEGER" and col["notnull"] == 0 and col["dflt_value"] is None, str(tuple(col)) if col else "missing")
+    rep.check("no ix_words_learn_rank (the learning-order ORDER BYs sort in a temp B-tree after a CASE / COALESCE term)", scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'ix_words_learn_rank'") == 0)
+    n_words = int(scalar(conn, "SELECT COUNT(*) FROM words"))
+    rep.check("words row count unchanged (no rebuild)", n_words == before["counts"].get("words", n_words), f"{n_words} rows")
+    rep.check("v_bank unchanged", int(scalar(conn, "SELECT COUNT(*) FROM v_bank")) == before.get("v_bank", -1), f"{before.get('v_bank')} rows")
+    if ran_here:
+        nonnull = int(scalar(conn, "SELECT COUNT(*) FROM words WHERE learn_rank IS NOT NULL"))
+        rep.check("learn_rank is NULL everywhere right after the file (the fill is the code path's job)", nonnull == 0, f"{nonnull} non-NULL")
+    # recompute on the copy — the same code the service start / `wd learn-order` run; nothing here touches production
+    max_updated_before = scalar(conn, "SELECT MAX(updated_at) FROM words")
+    t0 = time.perf_counter()
+    result = learn_order.recompute(conn, trigger="rehearsal")
+    rep.info("learn_order.recompute on the copy", f"{learn_order.format_result(result)} ({(time.perf_counter() - t0) * 1000:.0f} ms incl. the write)")
+    rep.check("0 stage words unranked after the recompute", learn_order.unranked_stage_words(conn) == 0, f"{learn_order.unranked_stage_words(conn)} unranked")
+    rep.check(f"kv.learn_order.version == {learn_order.LEARN_ORDER_VERSION}", db.kv_get(conn, learn_order.KV_VERSION) == learn_order.LEARN_ORDER_VERSION, str(db.kv_get(conn, learn_order.KV_VERSION)))
+    stale = learn_order.stale_count(conn)
+    rep.check("stored keys equal the policy (stale_count 0)", stale == 0, f"{stale} stale")
+    second = learn_order.recompute(conn, trigger="rehearsal")
+    rep.check("a second recompute changes 0 rows", second.changed == 0, f"{second.changed} changed")
+    rep.check("MAX(updated_at) unchanged by the recompute", scalar(conn, "SELECT MAX(updated_at) FROM words") == max_updated_before, str(max_updated_before))
+    report = learn_order.report(conn)
+    closed = report["acceptance"]["closed_in_first_30"]
+    rep.check("0 FACTS-closed words in every stage's first 30 (DESIGN §1.6)", all(n == 0 for n in closed.values()), str(closed))
+    rep.info("acceptance (computed on the copy)", str({k: v for k, v in report["acceptance"].items() if k != "closed_in_first_30"}))
+    for code, label in (("xs", "小学"), ("zk", "初中新增")):
+        head = learn_order.show(conn, code, 15)
+        rep.info(f"{label} order (first 15)", " ".join(f"{r.position}:{r.lemma}" for r in head) or "(no rows)")
+    for code, s in report["stages"].items():
+        rep.info(f"stage {code}", f"n {s['n']} · ranked {s['ranked']} · dealt {s['dealt']} · closed {s['closed']} · first 8: {' '.join(s['first'][:8]) or '-'}")
+    word_id = conn.execute("SELECT MIN(id) FROM words").fetchone()[0]
+    if word_id is None:
+        rep.skip("learn_rank NULL probe", "no rows in words")
+    else:
+        ok, detail = accepted(conn, "UPDATE words SET learn_rank = NULL WHERE id = ?", (word_id,))
+        rep.check("learn_rank = NULL storable (NULL is a legal state: not computed yet)", ok, detail[:60])
+
+
 def check_invariants(rep: Report, conn: sqlite3.Connection) -> None:
-    """The `wd check db` stage invariants (diag.STAGE_INVARIANTS) hold already before the seed re-import."""
+    """The `wd check db` stage invariants (diag.STAGE_INVARIANTS) hold already before the seed re-import; from 0014 the four
+    learning-order lines come from the same function `wd check db` runs (learn_order.check_lines), so script and command agree."""
     for name, sql in STAGE_INVARIANTS:
         try:
             n = int(scalar(conn, sql))
@@ -297,6 +352,13 @@ def check_invariants(rep: Report, conn: sqlite3.Connection) -> None:
             rep.skip(f"invariant {name}", f"query failed ({e}) — this SQLite build lacks the function; `wd check db` reports the same")
             continue
         rep.check(f"invariant {name}", n == 0, "ok" if n == 0 else f"{n} violation(s)")
+    if db.current_version(conn) >= LEARN_ORDER_INVARIANTS_FROM_VERSION:
+        for line, violated in learn_order.check_lines(conn):
+            name, _, rest = line[len("invariant ") :].partition(": ")
+            if rest.startswith("query failed"):
+                rep.skip(f"invariant {name}", rest)
+            else:
+                rep.check(f"invariant {name}", not violated, rest)
 
 
 def check_empty_database(rep: Report, target: Path, keep: bool) -> None:
@@ -372,6 +434,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0013(rep, conn, before)
         else:
             rep.skip("0013 checks", "not recorded in schema_migrations")
+        if 14 in recorded:
+            check_0014(rep, conn, before, ran_here=14 in applied_versions)
+        else:
+            rep.skip("0014 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

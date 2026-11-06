@@ -1,12 +1,16 @@
-"""``wd check db`` stage-model invariants (PLAN §6 S6; stage-model SYNTHESIS §3.9 D-13 / D-22).
+"""``wd check db`` stage-model invariants (PLAN §6 S6; stage-model SYNTHESIS §3.9 D-13 / D-22) and the learning-order
+invariants (docs/analysis/2026-11-06-learn-order/DESIGN.md §2.7, §4.1 item 24).
 
 From schema 0011 on ``diag.check_db`` appends four ``invariant <name>: ok | N violation(s)`` lines — ``stage_min_consistent``,
-``xs_subset_zk``, ``stages_json_known``, ``seed_version_matches_file`` — and any violation flips the check to FAIL (exit 1
-through ``wd check db``). Each test here breaks exactly one rule on the migrated mini-seed database and reads the count
-back; the last ones pin the edge cases the operators rely on: no invariant lines before 0011, a failing query (an SQLite
-build without ``json_each``) is reported but neither raised nor counted, a missing seed file is skipped, an unreadable one
-(truncated, or a corrupt deflate body — ``zlib.error`` is no ``OSError``) is a violation rather than a traceback, and the
-rendered SQL is the literal of PLAN §6 S6 (the enum lives in ``schemas.STAGE_ORDER`` only).
+``xs_subset_zk``, ``stages_json_known``, ``seed_version_matches_file`` — and from schema 0014 four more — ``learn_rank_present``,
+``learn_order_current``, ``learn_rank_matches_policy``, ``calendar_words_in_xs`` (rendered by ``learn_order.check_lines``) — and
+any violation flips the check to FAIL (exit 1 through ``wd check db``). Each test here breaks exactly one rule on the migrated
+mini-seed database and reads the count back; the last ones pin the edge cases the operators rely on: no invariant lines before
+0011 and none of the learning-order lines before 0014, a failing query (an SQLite build without ``json_each``) is reported but
+neither raised nor counted, a missing seed file is skipped, an unreadable one (truncated, or a corrupt deflate body —
+``zlib.error`` is no ``OSError``) is a violation rather than a traceback, and the rendered SQL is the literal of PLAN §6 S6 (the
+enum lives in ``schemas.STAGE_ORDER`` only). The kv block carries ``kv.learn_order.version`` and the rendered
+``kv.learn_order.stats`` line BEFORE ``kv.backup.last``, so every line after it is an invariant.
 """
 
 from __future__ import annotations
@@ -23,8 +27,11 @@ from wd import cli, db, diag
 from wd.config import Settings
 from wd.schemas import STAGE_ORDER
 from wd.seed import seed_digest
+from wd.services import learn_order
 
-INVARIANT_NAMES = ("stage_min_consistent", "xs_subset_zk", "stages_json_known", "seed_version_matches_file")
+STAGE_INVARIANT_NAMES = ("stage_min_consistent", "xs_subset_zk", "stages_json_known", "seed_version_matches_file")
+LEARN_ORDER_INVARIANT_NAMES = ("learn_rank_present", "learn_order_current", "learn_rank_matches_policy", "calendar_words_in_xs")
+INVARIANT_NAMES = (*STAGE_INVARIANT_NAMES, *LEARN_ORDER_INVARIANT_NAMES)  # the `diag` order — ops.md / TASKS.md list them so (test_docs_contract)
 
 
 def invariant_lines(result: diag.CheckResult) -> dict[str, str]:
@@ -46,15 +53,27 @@ def has_json_each(conn: sqlite3.Connection) -> bool:
 
 
 # ------------------------------------------------------------------------------------------ the happy path
-def test_check_db_reports_the_four_invariants_ok_after_a_seed_import(settings, seeded):
-    """The mini seed (62 v2 records) satisfies every rule and ``kv.seed_version`` is the content digest of ``WD_SEED_PATH``."""
+def test_check_db_reports_the_eight_invariants_ok_after_a_seed_import(settings, seeded):
+    """The mini seed (62 v2 records) satisfies every rule, ``kv.seed_version`` is the content digest of ``WD_SEED_PATH`` and the
+    import ranked every row (``learn_order.recompute`` inside the import transaction)."""
     result = diag.check_db(settings)
     assert result.ok, result.render()
     lines = invariant_lines(result)
-    assert tuple(lines) == INVARIANT_NAMES  # all four, in the PLAN §6 S6 order, after the kv.* lines
+    assert tuple(lines) == INVARIANT_NAMES and len(lines) == 8  # four stage + four learning-order lines, in the diag order, after the kv.* lines
     assert all(v == "ok" for v in lines.values()), lines
     kv_index = next(i for i, line in enumerate(result.lines) if line.startswith("kv.backup.last"))
     assert all(line.startswith("invariant ") for line in result.lines[kv_index + 1 :])
+    # the learning-order kv lines sit before kv.backup.last (so the rule above holds) and carry the stored stamps
+    assert f"kv.learn_order.version: {learn_order.LEARN_ORDER_VERSION}" in result.lines[:kv_index]
+    stats_line = next(line for line in result.lines[:kv_index] if line.startswith("kv.learn_order.stats: "))
+    assert stats_line == learn_order.stats_line(seeded) and stats_line.startswith("kv.learn_order.stats: xs n=") and "· dealt drift 0 · 课标外 drift 0 · label-pos 0" in stats_line
+    assert result.lines.index(stats_line) == kv_index - 1
+
+
+def test_learn_order_invariants_start_at_schema_14_and_are_exported():
+    assert diag.LEARN_ORDER_INVARIANTS_FROM_VERSION == learn_order.LEARN_ORDER_FROM_VERSION == 14
+    assert "LEARN_ORDER_INVARIANTS_FROM_VERSION" in diag.__all__ and "STAGE_INVARIANTS_FROM_VERSION" in diag.__all__
+    assert [name for name, _ in diag.STAGE_INVARIANTS] == list(INVARIANT_NAMES[:3])  # STAGE_INVARIANTS stays the PLAN literal
 
 
 # ------------------------------------------------------------------------------------- one broken rule each
@@ -80,6 +99,7 @@ def test_check_db_counts_a_primary_word_missing_from_the_junior_list(settings, s
     lemma = seeded.execute("SELECT lemma FROM words WHERE stage_xs = 0 AND stage_zk = 0 AND stage_cet6 = 1 ORDER BY lemma LIMIT 1").fetchone()[0]
     # a 初中 word the senior lists dropped (the release note's 544 rows) is the designed state: four ok lines, no fifth rule
     seeded.execute("UPDATE words SET stage_zk = 1, stage_gk = 0, stage_min = 2 WHERE lemma = ?", (lemma,))
+    learn_order.recompute(seeded)  # the stage move re-groups the word: keep the stored keys equal to the policy (not this test's rule)
     result = diag.check_db(settings)
     assert result.ok, result.render()
     assert tuple(invariant_lines(result)) == INVARIANT_NAMES
@@ -151,7 +171,130 @@ def test_check_db_flags_a_seed_file_with_a_corrupt_gzip_body(settings, seeded, t
     assert cli.main(["check", "db"]) == 1  # exit 1 like any violation, no traceback
 
 
+# ------------------------------------------------------------------------- one broken learning-order rule each (§2.7)
+def test_check_db_counts_a_stage_word_without_learn_rank(settings, seeded):
+    """NULL = "not computed yet": a stage word without a key is the first learning-order line (the next start fills it); the
+    stored column then also differs from the policy, so the matches-policy line counts the same row."""
+    seeded.execute("UPDATE words SET learn_rank = NULL WHERE lemma = 'apple'")
+    result = diag.check_db(settings)
+    assert not result.ok
+    lines = invariant_lines(result)
+    assert lines["learn_rank_present"] == "1 violation(s) (stage words without learn_rank — the next `wd serve` start or `wd learn-order` fills them)"
+    assert lines["learn_rank_matches_policy"] == "1 violation(s) (stored learn_rank of stage words differs from learn_order.rank_rows(); run `wd learn-order`)"
+    assert lines["learn_order_current"] == "ok" and lines["calendar_words_in_xs"] == "ok" and all(lines[n] == "ok" for n in STAGE_INVARIANT_NAMES)
+    seeded.execute("UPDATE words SET learn_rank = NULL WHERE lemma = 'bookshelf'")  # a 课标外 word is not a stage word
+    assert invariant_lines(diag.check_db(settings))["learn_rank_present"].startswith("1 violation(s)")
+    learn_order.recompute(seeded)  # the repair every path runs
+    assert diag.check_db(settings).ok
+
+
+def test_check_db_flags_a_stale_policy_version_seed_stamp_or_no_compute(settings, seeded):
+    db.kv_set(seeded, learn_order.KV_VERSION, "lo-0")
+    result = diag.check_db(settings)
+    assert not result.ok
+    assert invariant_lines(result)["learn_order_current"] == f"1 violation(s) (kv.learn_order.version lo-0 ≠ code {learn_order.LEARN_ORDER_VERSION}; run `wd learn-order`)"
+    db.kv_set(seeded, learn_order.KV_VERSION, learn_order.LEARN_ORDER_VERSION)
+    db.kv_set(seeded, "seed_version", "deadbeef" * 8)  # an older server imported another seed: the stamp no longer matches
+    rest = invariant_lines(diag.check_db(settings))["learn_order_current"]
+    stamp = seed_digest(Path(settings.seed_path))[:12]
+    assert rest == f"1 violation(s) (computed for seed {stamp}… ≠ kv.seed_version deadbeefdead…; run `wd learn-order`)"
+    db.kv_set(seeded, "seed_version", seed_digest(Path(settings.seed_path)))
+    db.kv_delete(seeded, learn_order.KV_VERSION)
+    assert invariant_lines(diag.check_db(settings))["learn_order_current"] == "1 violation(s) (never computed; run `wd learn-order`)"
+    learn_order.recompute(seeded)
+    assert diag.check_db(settings).ok
+
+
+def test_check_db_counts_a_hand_edited_stage_key_but_only_reports_课标外_drift(settings, seeded):
+    seeded.execute("UPDATE words SET learn_rank = learn_rank + 1 WHERE lemma = 'apple'")
+    result = diag.check_db(settings)
+    assert not result.ok
+    lines = invariant_lines(result)
+    assert lines["learn_rank_matches_policy"] == "1 violation(s) (stored learn_rank of stage words differs from learn_order.rank_rows(); run `wd learn-order`)"
+    assert lines["learn_rank_present"] == "ok" and lines["learn_order_current"] == "ok"
+    seeded.execute("UPDATE words SET learn_rank = learn_rank - 1 WHERE lemma = 'apple'")
+    seeded.execute("UPDATE words SET learn_rank = 7 WHERE lemma = 'bookshelf'")  # 课标外 drift (A8): informational, in the stats line after the next compare
+    result = diag.check_db(settings)
+    assert result.ok, result.render()
+    learn_order.recompute(seeded)
+    assert any(line.endswith("课标外 drift 1 · label-pos 0") for line in diag.check_db(settings).lines)
+
+
+def test_check_db_counts_a_calendar_word_outside_xs(settings, seeded):
+    """The mini seed carries no month / weekday; an inserted one must be a 小学 word (stage_xs = 1, stage_min = 1)."""
+    seeded.execute("INSERT INTO words(lemma, display, kind, source, stage_zk, stage_min) VALUES ('january', 'January', 'proper_noun', 'seed', 1, 2)")
+    learn_order.recompute(seeded)  # rank it, so only the calendar rule is broken
+    result = diag.check_db(settings)
+    assert not result.ok
+    lines = invariant_lines(result)
+    assert lines["calendar_words_in_xs"] == "1 violation(s) (month/weekday rows without stage_xs = 1 / stage_min = 1)"
+    assert lines["learn_rank_present"] == "ok" and lines["learn_rank_matches_policy"] == "ok" and lines["stage_min_consistent"] == "ok"
+    seeded.execute("UPDATE words SET stage_xs = 1, stage_min = 1 WHERE lemma = 'january'")
+    learn_order.recompute(seeded)
+    result = diag.check_db(settings)
+    assert result.ok, result.render()
+    assert learn_order.CALENDAR_INVARIANT_SQL.count("'") == 2 * 19  # rendered from MONTHS / WEEKDAYS
+
+
+def test_check_db_reports_a_failing_learn_order_query_without_raising(settings, seeded, monkeypatch):
+    monkeypatch.setattr(learn_order, "CALENDAR_INVARIANT_SQL", "SELECT COUNT(*) FROM words_gone")
+    result = diag.check_db(settings)
+    assert result.ok  # unverifiable ≠ violated
+    assert invariant_lines(result)["calendar_words_in_xs"].startswith("query failed (no such table: words_gone")
+
+
+def test_check_db_reports_a_raising_policy_without_a_traceback(settings, seeded, monkeypatch):
+    """A bug inside `rank_rows` must not take `wd check db` down: the policy line says `query failed (RuntimeError: …)` and is not
+    counted, the seven other lines stand (learn_order.check_lines catches every exception, not only sqlite3.OperationalError)."""
+
+    def boom(rows, forms):
+        raise RuntimeError("policy exploded")
+
+    monkeypatch.setattr(learn_order, "rank_rows", boom)
+    result = diag.check_db(settings)
+    lines = invariant_lines(result)
+    assert result.ok and tuple(lines) == INVARIANT_NAMES
+    assert lines["learn_rank_matches_policy"] == "query failed (RuntimeError: policy exploded)"
+    assert all(lines[name] == "ok" for name in INVARIANT_NAMES if name != "learn_rank_matches_policy")
+
+
+def test_check_db_stays_ok_when_a_runtime_word_redeals_stage_phrases(settings, seeded):
+    """A learner's lookup creates `cream`; R3 now resolves `ice cream`'s token and the 小学 dealt rows swap hosts (F-1). That is
+    `Drift.dealt`, informational — the gate stays `ok`, the next recompute settles the rows and reports them as `dealt drift`."""
+    cream = {"lemma": "cream", "display": "cream", "kind": "word", "pos": "n:100", "frq": 20000, "source": "ecdict"}
+    seeded.execute("INSERT INTO words(lemma, display, kind, pos, frq, source, learn_rank) VALUES (:lemma, :display, :kind, :pos, :frq, :source, :learn_rank)", {**cream, "learn_rank": learn_order.best_effort_rank(cream)})
+    assert learn_order.drift(seeded) == learn_order.Drift(policy=0, dealt=2, none=0)
+    result = diag.check_db(settings)
+    assert result.ok and invariant_lines(result)["learn_rank_matches_policy"] == "ok"
+    learn_order.recompute(seeded)
+    result = diag.check_db(settings)
+    assert result.ok and any("· dealt drift 2 · 课标外 drift 0 ·" in line for line in result.lines)
+
+
 # ------------------------------------------------------------------------------------------------ edge cases
+def test_check_db_has_no_learn_order_invariants_before_schema_0014(settings, tmp_path: Path, monkeypatch):
+    """A schema-13 database (the live file before this release) prints the four stage lines and none of the learning-order
+    lines; the kv block still shows `kv.learn_order.version: -`."""
+    upto13 = tmp_path / "upto13"
+    upto13.mkdir()
+    for mf in db.list_migration_files():
+        if mf.version <= 13:
+            shutil.copy(mf.path, upto13 / mf.path.name)
+    monkeypatch.setattr(db, "MIGRATIONS_DIR", upto13)
+    c = db.connect(settings.db_path)
+    try:
+        assert db.run_migrations(c).applied[-1] == (13, "word_forms_alias")
+        db.kv_set(c, "seed_version", seed_digest(Path(settings.seed_path)))  # as if the seed were imported by the previous version
+    finally:
+        c.close()
+    result = diag.check_db(settings)
+    assert result.ok, result.render()
+    lines = invariant_lines(result)
+    assert tuple(lines) == STAGE_INVARIANT_NAMES and all(v == "ok" for v in lines.values())
+    assert "kv.learn_order.version: -" in result.lines and "kv.learn_order.stats: -" in result.lines
+    assert any(line.startswith("schema version: 13 (") for line in result.lines)
+
+
 def test_check_db_has_no_stage_invariants_before_schema_0011(settings, tmp_path: Path, monkeypatch):
     """A 0001-baseline database (four flags, indexes 1..4) is checked as before: no ``invariant`` line, ok."""
     baseline = tmp_path / "baseline"
@@ -193,11 +336,18 @@ def test_stage_invariant_sql_is_the_plan_literal_rendered_from_the_enum():
 
 # ---------------------------------------------------------------------------------------------------- the CLI
 def test_wd_check_db_exit_code_follows_the_invariants(settings, seeded, capsys):
-    """Runbook step 8 (PLAN §8): ``wd check db`` exits 0 with four ok lines and 1 as soon as one invariant is violated."""
+    """Runbook step 8 (PLAN §8; learn-order release §4.3): ``wd check db`` exits 0 with eight ok lines and 1 as soon as one
+    invariant is violated."""
     assert cli.main(["check", "db"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("[ok] db") and out.count("\n    invariant ") == 4
+    assert out.startswith("[ok] db") and out.count("\n    invariant ") == 8 and out.count(": ok") >= 8
+    assert "\n    kv.learn_order.version: lo-1\n    kv.learn_order.stats: " in out and out.index("kv.learn_order.stats: ") < out.index("kv.backup.last")
     seeded.execute("UPDATE words SET stage_min = 4 WHERE lemma = (SELECT lemma FROM words WHERE stage_xs = 1 ORDER BY lemma LIMIT 1)")
     assert cli.main(["check", "db"]) == 1
     out = capsys.readouterr().out
     assert out.startswith("[FAIL] db") and "invariant stage_min_consistent: 1 violation(s)" in out
+    seeded.execute("UPDATE words SET stage_min = 1 WHERE lemma = (SELECT lemma FROM words WHERE stage_xs = 1 ORDER BY lemma LIMIT 1)")
+    seeded.execute("UPDATE words SET learn_rank = NULL WHERE stage_min = 1")
+    assert cli.main(["check", "db"]) == 1
+    out = capsys.readouterr().out
+    assert "invariant learn_rank_present: " in out and "violation(s) (stage words without learn_rank" in out

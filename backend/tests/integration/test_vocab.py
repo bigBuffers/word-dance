@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from reference_order import facts_closed, reference_order
 from wd import db
 from wd.deps import hash_token
 from wd.schemas import STAGE_ORDER, stage_to_index
@@ -43,6 +44,15 @@ def q1(settings, sql: str, params=()):
     conn = db.connect(settings.db_path)
     try:
         return conn.execute(sql, params).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def qmap(settings, sql: str, params=()) -> dict:
+    """``{first column: second column}`` of a two-column query."""
+    conn = db.connect(settings.db_path)
+    try:
+        return {r[0]: r[1] for r in conn.execute(sql, params)}
     finally:
         conn.close()
 
@@ -90,19 +100,23 @@ def test_requires_login(client: TestClient):
 
 
 # ---------------------------------------------------------------------------------------------- vocab
-def test_vocab_default_is_everything_sorted_by_frequency(client: TestClient, settings, alice):
+def test_vocab_default_is_everything_in_learning_order(client: TestClient, settings, alice):
     r = client.get("/api/vocab")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["total"] == N and body["page"] == 1 and body["page_size"] == 50 and len(body["items"]) == 50
-    lemmas = [i["lemma"] for i in body["items"]]
-    assert lemmas[0] == "be"  # frq 2
-    frqs = [i["frq"] for i in body["items"] if i["frq"]]
-    assert frqs == sorted(frqs)
     page2 = client.get("/api/vocab?page=2").json()
-    assert len(page2["items"]) == N - 50 and page2["items"][-1]["frq"] is None  # NULL/0 frequency sorts last
-    shelf = next(i for i in page2["items"] if i["lemma"] == "bookshelf")
-    assert shelf["stages"] == [] and shelf["stage_min"] is None  # a 课标外 word is listed under 全部 (PLAN P6)
+    assert len(page2["items"]) == N - 50
+    items = body["items"] + page2["items"]
+    # 全部 under the default sort (学习顺序, API.md 20): the 小学 course first (cur 1 → the stage distance is COALESCE(stage_min, 6)
+    # ascending), inside a distance group the stored learn_rank with the frequency tail — pinned against the column through
+    # reference_order, never against a lemma list of the seed (the mechanism, not the policy; the policy has its golden table)
+    assert [i["lemma"] for i in items] == reference_order(settings, "is_public = 1 AND merged_into_word_id IS NULL", cur=1)
+    tiers = [6 if i["stage_min"] is None else i["stage_min"] for i in items]
+    assert tiers == sorted(tiers) and tiers[0] == 1
+    last = items[-1]
+    assert last["stages"] == [] and last["stage_min"] is None  # the 课标外 word (distance 11) is listed under 全部 (PLAN P6) and closes it
+    # the WordBrief key set is unchanged: learn_rank is an ordering key, not a wire field
     assert set(body["items"][0]) == {
         "id", "lemma", "display", "kind", "phonetic", "translation_short", "stages", "stage_min", "cet6_star", "frq", "collins", "oxford",
         "difficulty", "is_public", "is_valid_english", "my_state", "content_state", "image_state",
@@ -171,7 +185,13 @@ def test_vocab_sort_alpha_and_difficulty(client: TestClient, settings, alice):
     order = [i["lemma"] for i in items]
     assert order.index("absorption") < order.index("abandon") < order.index("absolutely") < order.index("ought to") < order.index("bookshelf")
     assert order[-1] == "bookshelf" and items[-1]["stage_min"] is None
-    sort_key = lambda i: (i["difficulty"] + 1 if i["difficulty"] else i["stage_min"] or 6, i["frq"] is None or i["frq"] == 0, i["frq"] or 0, i["lemma"])
+    # within a tier the learning order (API.md 20): the stored learn_rank read per lemma from the DB (NULL last), then the frequency tail
+    ranks = qmap(settings, "SELECT lemma, learn_rank FROM words")
+    sort_key = lambda i: (
+        i["difficulty"] + 1 if i["difficulty"] else i["stage_min"] or 6,
+        ranks[i["lemma"]] is None, ranks[i["lemma"]] or 0,
+        i["frq"] is None or i["frq"] == 0, i["frq"] or 0, i["lemma"],
+    )
     keys = [sort_key(i) for i in items]
     assert keys == sorted(keys) and keys[0][0] == 1  # the 小学 words (stage_min 1) open the list
     again = [i["lemma"] for i in client.get("/api/vocab?sort=difficulty&page_size=100").json()["items"]]
@@ -233,7 +253,8 @@ def test_admin_sees_private_words(client: TestClient, settings, alice):
 @pytest.mark.full_seed
 def test_cet6_new_only_on_the_full_seed(settings, frozen_clock):
     """``stage=cet6&new_only=1`` → the CET-6 increment (``stats.json.first_stage.cet6``, PLAN R-17: numbers come from the builder's
-    stats, never hand-typed) and the sort/filter performance on the full seed."""
+    stats, never hand-typed), the sort/filter performance on the full seed, and the learning order of the 小学 tab / 筛词 against
+    ``data/seed/learn_order.json`` and the stored column (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.3)."""
     import json
     from dataclasses import replace
 
@@ -258,6 +279,22 @@ def test_cet6_new_only_on_the_full_seed(settings, frozen_clock):
         assert [i["total"] for i in items] == [stats["per_stage"][s] for s in STAGE_ORDER]
         assert [i["new_only_total"] for i in items] == [stats["first_stage"][s] for s in STAGE_ORDER]
         assert c.get("/api/vocab?stage=xs&new_only=1").json()["total"] == stats["first_stage"]["xs"]
+        # DESIGN §4.3: the 小学 tab opens with the first lemmas of data/seed/learn_order.json (`wd learn-order --report` on the rehearsal
+        # copy) and of the stored column; a fresh pupil's first 30 筛词 cards hold no FACTS-closed word (function pos, aux/modal form
+        # or inherited form — DESIGN §1.6), checked on the DB rows of the returned ids
+        report = json.loads((seed_dir / "learn_order.json").read_text(encoding="utf-8"))
+        xs_tab = [i["lemma"] for i in c.get("/api/vocab?stage=xs").json()["items"]]
+        assert xs_tab[:8] == report["stages"]["xs"]["first"][:8] == reference_order(cfg, "stage_xs = 1 AND is_public = 1 AND merged_into_word_id IS NULL", cur=1)[:8]
+        r = c.get("/api/screen/next?stage=xs&count=30")
+        assert r.status_code == 200, r.text
+        ids = [int(i["word"]["id"]) for i in r.json()["items"]]
+        assert len(ids) == 30
+        conn = db.connect(cfg.db_path)
+        try:
+            rows = conn.execute(f"SELECT lemma, pos, sources FROM words WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 30 and [row["lemma"] for row in rows if facts_closed(row)] == []
         import time
 
         t = time.perf_counter()

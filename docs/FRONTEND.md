@@ -144,7 +144,7 @@ Headword + phonetic + 🔊 only. 认识 (key 1 / swipe right) · 不熟悉 (key 
 
 ### 5.5 Vocabulary browser (`/vocab`)
 
-`GET /api/vocab?stage=&new_only=&q=&status=&sort=&letter=&page=&page_size=50`. Tabs reset the page; `仅本阶段新增` toggle appears for a specific stage above the lowest one (on 小学 it would be an identity filter — `stage_min = 1` ⇔ the xs flag — so it is hidden and ignored; label for 初中: 仅初中新增（不含小学）, for 六级: 仅六级新增（不含四级）). A word outside every official list (`stages = []`) shows the dashed 课标外 chip and is listed only under 全部 or by search. Search: English prefix (also matches inflected forms) or Chinese substring, debounced 250 ms. Row buttons call `POST /api/words/{id}/mark {action, context:'browse'}` and patch `my_state` in place with a 5-s 撤销 toast whose action is the server undo `mark {action:'restore', context:'browse'}` (API.md 26 — valid for 15 minutes, so the toast never lies). Desktop bulk mode: checkboxes + 「标记所选为不熟悉 / 认识」 → `POST /api/words/batch-mark`. `aria-live` count 「共 4 722 个词」. Row tap → detail.
+`GET /api/vocab?stage=&new_only=&q=&status=&sort=&letter=&page=&page_size=50` (default sort 学习顺序 = `sort=freq`, the learning order of API.md 20: the tab's own stage first, grammar words after the content words of a stage; 字母 = `alpha`; 难度 = `difficulty`). Tabs reset the page; `仅本阶段新增` toggle appears for a specific stage above the lowest one (on 小学 it would be an identity filter — `stage_min = 1` ⇔ the xs flag — so it is hidden and ignored; label for 初中: 仅初中新增（不含小学）, for 六级: 仅六级新增（不含四级）). A word outside every official list (`stages = []`) shows the dashed 课标外 chip and is listed only under 全部 or by search. Search: English prefix (also matches inflected forms) or Chinese substring, debounced 250 ms. Row buttons call `POST /api/words/{id}/mark {action, context:'browse'}` and patch `my_state` in place with a 5-s 撤销 toast whose action is the server undo `mark {action:'restore', context:'browse'}` (API.md 26 — valid for 15 minutes, so the toast never lies). Desktop bulk mode: checkboxes + 「标记所选为不熟悉 / 认识」 → `POST /api/words/batch-mark`. `aria-live` count 「共 4 722 个词」. Row tap → detail.
 
 ### 5.6 Add words (`/bank/add`)
 
@@ -251,7 +251,7 @@ export const zh = {
   screen: { title: '筛词', subtitle: '快速筛一筛，不熟悉的会进入生词库', remaining: (n: number) => `本阶段还剩 ${n} 个未筛`, screenedCount: (n: number) => `本次已筛 ${n} 个`, another: '再筛 30 个', peek: '显示释义',
             addedBank: '已加入生词库', addedToday: '已加入生词库，今天就学', addedTomorrow: '已加入生词库，明天开始学', markedKnown: (w: string) => `${w} · 已认识`, allDone: '这个阶段的词都筛完了 🎉' },
   vocab: { title: '词库', searchPlaceholder: '搜索英文或中文', status: { all: '全部', unmarked: '未标记', unfamiliar: '不熟悉', known: '已认识', mastered: '已掌握' },
-           sort: { freq: '词频', alpha: '字母', difficulty: '难度' }, markUnfamiliar: '不熟悉', markKnown: '认识', inBank: '已在生词库', addedToBank: '已加入生词库',
+           sort: { freq: '学习顺序', alpha: '字母', difficulty: '难度' }, markUnfamiliar: '不熟悉', markKnown: '认识', inBank: '已在生词库', addedToBank: '已加入生词库',
            bulk: '批量选择', bulkUnfamiliar: '标记所选为不熟悉', bulkKnown: '标记所选为认识', selected: (n: number) => `已选 ${n} 个`,
            notFound: (q: string) => `没有找到“${q}”。想把它加入生词库？`, letters: '字母索引' },
   word: { title: '单词详情', forms: '词形', examTags: '考试标签', actions: '操作', reset: '重置进度', remove: '移除', changeImage: '换一张', flagImage: '不合适',
