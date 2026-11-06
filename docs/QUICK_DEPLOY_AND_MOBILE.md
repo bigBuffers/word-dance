@@ -174,6 +174,7 @@ E=/home/sqin/word-dance-data/.env
 sed -i 's|^WD_AI_ENABLED=.*|WD_AI_ENABLED="0"|' $E                          # 先关 AI，claude-check 通过后再开，避免 30 分钟暂停与误导横幅
 sed -i 's|^WD_AI_MODEL=.*|WD_AI_MODEL="claude-sonnet-5-5"|' $E               # 固定内容验证时用的模型（别名 sonnet 自 2.1.284 起即它）
 sed -i 's|^WD_AI_DAILY_BUDGET_USD=.*|WD_AI_DAILY_BUDGET_USD="6.00"|; s|^WD_AI_MONTHLY_BUDGET_USD=.*|WD_AI_MONTHLY_BUDGET_USD="100.00"|' $E
+sed -i 's|^WD_IMAGE_KID_STAGES=.*|WD_IMAGE_KID_STAGES="xs"|' $E                       # 小学词卡用儿童绘本风格（2026-11-06 负责人确认；代码默认为空 = 关，Mac 线上已设）
 grep -nE '^WD_(HOST|PUBLIC_URL|TRUST_PROXY|REGISTRATION_MODE|DEV|AI_SVG_DAILY_BUDGET_USD|AI_HOURLY_CALL_CAP|ECDICT_DB_PATH)=' $E   # 127.0.0.1 / https://DOMAIN / 1 / invite / 0 / 0.50 / 60 / …stardict.db
 sudo systemctl restart word-dance && sleep 3 && curl -fsS http://127.0.0.1:8000/api/health
 ```
