@@ -332,6 +332,12 @@ dialog.confirm::backdrop {
   pointer-events: none;
 }
 
+/* a sticky grade / verdict bar (StudyCard, ScreenCard) publishes its reach as --bottom-bar-h through
+   hooks/useBottomBarOffset: the toasts stack above the buttons instead of covering known / unfamiliar */
+html.has-bottom-bar .toast-viewport {
+  bottom: calc(var(--bottom-bar-h, 0px) + var(--space-3));
+}
+
 .toast {
   position: relative;
   overflow: hidden;

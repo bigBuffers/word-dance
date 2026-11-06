@@ -43,7 +43,7 @@ Status legend: **AUTO** = covered by `npm test` in this package (vitest, jsdom);
 - [ ] PENDING-MANUAL — search (250 ms debounce): `aband` finds abandon, `abandoned` finds abandon through forms, `放弃` finds abandon; status filter 未标记 / 不熟悉 / 已认识 / 已掌握; sort 学习顺序 / 字母 / 难度 (学习顺序 is the default: 全部 opens with 小学 words and the 小学 tab's first screen shows no 冠词 / 代词 / 介词); A–Z rail (sticky on ≥ 1024 px, chips below) filters by letter, letters without words disabled, keyboard arrows move between letters.
 - [ ] PENDING-MANUAL — inline 不熟悉 / 认识: the row's badge changes at once (未标记 → 待学 / 已认识), the 5-s 撤销 toast calls `POST /api/words/{id}/mark {action:'restore', context:'browse'}` and the row returns to 未标记; wait 16 minutes and press 撤销 → 「撤销时间已过，可在「已掌握」中重新加入」; a word already in the bank shows 已在生词库 → sheet 已掌握 / 移除; a mastered word offers 不熟悉 (re-add).
 - [ ] PENDING-MANUAL — 1280 px bulk mode: 批量选择 → checkboxes, 「已选 N 个」, 标记所选为不熟悉 / 认识 → one `POST /api/words/batch-mark`; the bulk controls are hidden at 360 px.
-- [ ] PENDING-MANUAL — empty search 「没有找到“xxx”。想把它加入生词库？」 → 添加生词 opens `/bank/add?prefill=xxx`; pager: numeric on desktop, 加载更多 (append) on phone.
+- [ ] PENDING-MANUAL — empty search 「没有找到“xxx”。想把它加入生词库？」 → 添加生词 opens `/bank/add?prefill=xxx`; pager: numeric on desktop, 上一页 / 下一页 on phone (each replaces the page and scrolls to the top; no 加载更多 anywhere on /vocab).
 - AUTO — `WordRow`, `LetterIndex`, `Pager`/`usePagedList`, `optimisticState` / `markToast` / `markUndoable`.
 
 ## 5. 添加生词 (`/bank/add`)

@@ -35,6 +35,8 @@ shows a requeued card 30 s after its intermediate grade instead of waiting for t
 Keyboard: Space = 显示释义 · 1 / 2 / 3 = 不熟悉 / 模糊 / 记住了 · 4 = 已掌握 · S = 跳过 · P = 发音 · Z = 译 · H = 提示 ·
 U = 撤销 the last 推荐词 verdict (while its toast is visible).
 
+- [ ] Every toast on /study (bare route, no tab bar) and /screen/run (tab bar on phones) sits ABOVE the grade / verdict bar — 不熟悉 / 认识 stay visible and tappable while the 5-s undo toast or 「10 分钟后再见」 is up, on phone and desktop (the bar publishes its height through `useBottomBarOffset`).
+
 - [ ] Full session on the phone by tapping and on the desktop **with the keyboard only**.
 - [ ] Front: headword, phonetic, 🔊 (auto-pronounce when `settings.auto_pronounce`), stage chips, kind badge;
       提示 (H) shows the first example with the headword/forms replaced by `___`; tap / Space / 显示释义 reveals.

@@ -1,6 +1,8 @@
-// Pager — numeric pager on desktop, load more on phones (FRONTEND §4). `onChange(page, mode)`: the
-// desktop pager replaces the list (`'replace'`), the phone button appends the next page (`'append'`).
-// Both variants are rendered; CSS shows one per breakpoint.
+// Pager — numeric pager on desktop, previous / next buttons around the page-of-pages label on phones (FRONTEND §4). Every control
+// calls `onChange(page, 'replace')`: the list shows that page and scrolls to the top. The phone variant used to
+// append the next page (the load-more button), which made the vocab page grow without bound; `'append'` stays in `PagerMode`
+// / `usePagedList` for callers that accumulate rows, but no shipped pager emits it. Both variants are rendered;
+// CSS shows one per breakpoint.
 import { useCallback, useEffect, useRef, useState, type DependencyList, type Dispatch, type SetStateAction } from 'react';
 import type { ApiError } from '@/api/client';
 import type { Page } from '@/api/types';
@@ -14,7 +16,7 @@ import './list.css';
 export type PagerMode = 'replace' | 'append';
 
 export interface PagedList<T, R extends Page<T>> {
-  /** Accumulated rows (appended pages on phones, the current page on desktop). */
+  /** The current page's rows (accumulated pages only after an explicit `'append'`). */
   items: T[];
   total: number;
   page: number;
@@ -22,7 +24,7 @@ export interface PagedList<T, R extends Page<T>> {
   error: ApiError | null;
   /** The latest raw response (e.g. `BankResponse.counts`). */
   data: R | null;
-  /** Pager callback: `'replace'` shows that page, `'append'` adds it below the current rows. */
+  /** Pager callback: `'replace'` shows that page (and scrolls to the top), `'append'` adds it below the current rows. */
   goTo: (page: number, mode: PagerMode) => void;
   /** Back to page 1 with a fresh list (call when a filter changes). */
   reset: () => void;
@@ -162,14 +164,15 @@ export function Pager({ page, pageSize, total, onChange, loading = false, classN
           <ChevronIcon />
         </button>
       </nav>
-      <div className={cx('pager', 'pager--phone', className)}>
+      <nav className={cx('pager', 'pager--phone', className)} aria-label={zh.common.pageOf(page, pages)}>
+        <Button variant="secondary" disabled={page <= 1 || loading} onClick={() => onChange(page - 1, 'replace')}>
+          {zh.common.prevPage}
+        </Button>
         <span className="pager__info">{zh.common.pageOf(page, pages)}</span>
-        {hasMore && (
-          <Button variant="secondary" block loading={loading} onClick={() => onChange(page + 1, 'append')}>
-            {zh.common.loadMore}
-          </Button>
-        )}
-      </div>
+        <Button variant="secondary" disabled={!hasMore || loading} onClick={() => onChange(page + 1, 'replace')}>
+          {zh.common.nextPage}
+        </Button>
+      </nav>
     </>
   );
 }

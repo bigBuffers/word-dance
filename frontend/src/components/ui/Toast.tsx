@@ -1,5 +1,7 @@
 // Toast — provider + bottom-centre viewport (FRONTEND §3): ≤ 3 visible (the rest queue), optional
 // action button with a countdown and progress bar (undo toasts: 8 s for mastered, 5 s for list toggles).
+// On a page with a sticky grade / verdict bar the viewport sits above the bar (`html.has-bottom-bar` +
+// `--bottom-bar-h`, published by hooks/useBottomBarOffset) so a toast never covers the known / unfamiliar buttons.
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { DEFAULT_TOAST_MS, ERROR_TOAST_MS, MAX_VISIBLE_TOASTS, ToastContext, type ToastApi, type ToastItem, type ToastOptions } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';

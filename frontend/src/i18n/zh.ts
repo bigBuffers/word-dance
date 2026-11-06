@@ -8,7 +8,7 @@ export const zh = {
   nav: { today: '今日', vocab: '词库', bank: '生词库', history: '记录', me: '我的', admin: '管理', about: '关于' },
   common: { save: '保存', saved: '已保存', cancel: '取消', confirm: '确定', back: '返回', retry: '重试', undo: '撤销', close: '关闭',
             loading: '加载中…', more: '更多', search: '搜索', all: '全部', none: '无', yes: '是', no: '否', delete: '删除', keep: '保留', undone: '已撤销',
-            copy: '复制', copied: '已复制', loadMore: '加载更多', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页`,
+            copy: '复制', copied: '已复制', loadMore: '加载更多', prevPage: '上一页', nextPage: '下一页', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页`,
             backToToday: '回到今日', sort: '排序', status: '状态' },
   errors: { network: '网络开小差了，请稍后重试', unauthorized: '请先登录', forbidden: '没有权限', notFound: '找不到这个页面',
             rateLimited: '操作太频繁，请稍后再试', server: '服务器出了点问题，请稍后重试', csrf: '请求已过期，请刷新页面',

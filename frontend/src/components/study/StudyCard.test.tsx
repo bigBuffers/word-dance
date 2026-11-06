@@ -232,3 +232,27 @@ describe('StudyCard', () => {
     expect(resultLabel(null)).toBeNull();
   });
 });
+
+describe('bottom bar offset (toasts stack above the grade bar)', () => {
+  it('the grade bar publishes --bottom-bar-h on <html> while mounted; a read-only replay and an unmounted card do not', () => {
+    const root = document.documentElement;
+    // jsdom lays nothing out: pretend every measured element is a 96 px bar flush with the bottom of the viewport
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return { top: window.innerHeight - 96, height: 96, bottom: window.innerHeight, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    const { unmount } = renderCard({ revealed: true });
+    expect(root.classList.contains('has-bottom-bar')).toBe(true);
+    expect(root.style.getPropertyValue('--bottom-bar-h')).toMatch(/^\d+px$/);
+    unmount();
+    expect(root.classList.contains('has-bottom-bar')).toBe(false);
+    expect(root.style.getPropertyValue('--bottom-bar-h')).toBe('');
+
+    const screenCard = renderCard({ item: item({ kind: 'screen' }) });
+    expect(root.classList.contains('has-bottom-bar')).toBe(true);
+    screenCard.unmount();
+
+    renderCard({ readOnly: true, item: item({ result: 'good' }) });
+    expect(root.classList.contains('has-bottom-bar')).toBe(false);
+    rect.mockRestore();
+  });
+});

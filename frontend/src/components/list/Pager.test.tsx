@@ -21,21 +21,31 @@ describe('Pager', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('desktop numbers replace the page, the phone button appends the next one', () => {
+  it('desktop numbers and the phone previous / next buttons all replace the page (never append)', () => {
     const onChange = vi.fn();
-    render(<Pager page={1} pageSize={50} total={120} onChange={onChange} />);
-    fireEvent.click(screen.getByRole('button', { name: zh.common.pageOf(2, 3) }));
-    expect(onChange).toHaveBeenLastCalledWith(2, 'replace');
-    fireEvent.click(screen.getByRole('button', { name: zh.common.loadMore }));
-    expect(onChange).toHaveBeenLastCalledWith(2, 'append');
-    expect(screen.getByRole('button', { name: zh.common.pageOf(1, 3) }).getAttribute('aria-current')).toBe('page');
+    render(<Pager page={2} pageSize={50} total={120} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: zh.common.pageOf(3, 3) }));
+    expect(onChange).toHaveBeenLastCalledWith(3, 'replace');
+    fireEvent.click(screen.getByRole('button', { name: zh.common.nextPage }));
+    expect(onChange).toHaveBeenLastCalledWith(3, 'replace');
+    fireEvent.click(screen.getByRole('button', { name: zh.common.prevPage }));
+    expect(onChange).toHaveBeenLastCalledWith(1, 'replace');
+    expect(onChange.mock.calls.every((c) => c[1] === 'replace')).toBe(true);
+    expect(screen.queryByRole('button', { name: zh.common.loadMore })).toBeNull();
+    expect(screen.getByRole('button', { name: zh.common.pageOf(2, 3) }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getAllByText(zh.common.pageOf(2, 3)).length).toBeGreaterThan(0); // the phone page-of-pages label
   });
 
-  it('hides load-more on the last page and disables the previous arrow on the first', () => {
-    render(<Pager page={3} pageSize={50} total={120} onChange={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: zh.common.loadMore })).toBeNull();
+  it('disables next (button and arrow) on the last page and previous (button and arrow) on the first', () => {
+    const { unmount } = render(<Pager page={3} pageSize={50} total={120} onChange={vi.fn()} />);
+    expect((screen.getByRole('button', { name: zh.common.nextPage }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: zh.common.prevPage }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole('button', { name: `${zh.common.more} ${zh.common.pageOf(4, 3)}` }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: `${zh.common.back} ${zh.common.pageOf(2, 3)}` }) as HTMLButtonElement).disabled).toBe(false);
+    unmount();
+    render(<Pager page={1} pageSize={50} total={120} onChange={vi.fn()} />);
+    expect((screen.getByRole('button', { name: zh.common.prevPage }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: zh.common.nextPage }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

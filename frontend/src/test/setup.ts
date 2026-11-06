@@ -28,6 +28,11 @@ if (typeof HTMLDialogElement !== 'undefined') {
   }
 }
 
+// jsdom's window.scrollTo only logs "Not implemented" (usePagedList scrolls to the top on every page change).
+if (typeof window !== 'undefined') {
+  window.scrollTo = () => undefined;
+}
+
 if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
   window.matchMedia = (query: string): MediaQueryList =>
     ({

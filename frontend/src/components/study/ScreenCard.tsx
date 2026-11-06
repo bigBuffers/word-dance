@@ -5,6 +5,7 @@ import type { ScreenVerdict, WordBrief } from '@/api/types';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { WordHeader } from '@/components/word/WordHeader';
+import { useBottomBarOffset } from '@/hooks/useBottomBarOffset';
 import type { Accent } from '@/hooks/useSpeech';
 import { zh } from '@/i18n/zh';
 import './study.css';
@@ -31,6 +32,7 @@ export function ScreenCard({ word, onVerdict, onPeek, peeked, busy = false, acce
   const [dx, setDx] = useState(0);
   const [dragging, setDragging] = useState(false);
   const startX = useRef<number | null>(null);
+  const barRef = useBottomBarOffset<HTMLDivElement>(); // toasts stack above the verdict bar, never over the known / unfamiliar buttons
   useEffect(() => {
     setLocalPeek(false);
     setDx(0);
@@ -99,7 +101,7 @@ export function ScreenCard({ word, onVerdict, onPeek, peeked, busy = false, acce
           </button>
         )}
       </div>
-      <div className="screen-card__bar">
+      <div className="screen-card__bar" ref={barRef}>
         <Button variant="primary" tone="good" size="lg" disabled={busy} onClick={() => onVerdict('known')}>
           {zh.study.known}
           <kbd className="study-kbd" aria-hidden="true">

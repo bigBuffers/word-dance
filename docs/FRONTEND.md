@@ -22,7 +22,7 @@ frontend/
     ├── api/endpoints.ts            # typed functions per endpoint (getToday(), gradeItem(id, body), …)
     ├── auth/AuthContext.tsx        # {user, settings, server, loading, login(), logout(), refresh(), updateSettings()} ; <RequireAuth/>, <RequireOnboarded/>, <RequireAdmin/>
     ├── i18n/zh.ts                  # all UI strings (Section 8) — the only place Chinese UI copy lives
-    ├── hooks/                      # useApi, useToast, useLocalPref, useSpeech, useKeyboard, usePolling, useDebounce
+    ├── hooks/                      # useApi, useToast, useLocalPref, useSpeech, useKeyboard, usePolling, useDebounce, useBottomBarOffset
     ├── utils/                      # normalizeInput.ts (mirrors backend §5.1), srsPreview.ts (mirrors srs.py, consumes srs_trajectory.json in tests), highlight.ts, date.ts, format.ts
     ├── study/queue.ts              # pure reducer for the in-session queue (Section 5.2)
     ├── components/                 # Section 4 — FIXED sub-tree; every import path uses these directories (owners in brackets, TASKS)
@@ -73,7 +73,7 @@ Navigation: phone (< 768 px) bottom tab bar 今日 · 词库 · 生词库 · 记
 * **Study session**: `study/queue.ts` pure reducer (Section 5.2) + `StudyPage` effect that flushes pending grades. Pending grade events (with their `client_event_id`) are mirrored to `localStorage['wd.pendingGrades']` and flushed on reload before refetching `/api/today`.
 * **Per-viewer conveniences in `localStorage` (never authoritative, all access try/catch)**: last 词库 tab, 译 toggle state, last 筛词 stage, pending grades.
 * **Polling**: `usePolling(fn, intervalMs, {enabled, max})` — `/api/today` every 30 s while `pending_content > 0` and the tab is visible; `GET /api/words/{id}/content` every 5 s (max 24) for the visible card **only while `content_deferred_until` is null** (a non-null value — budget deferral / AI paused — stops polling and switches the card to the 「明天补齐」 copy, §5.1.5); `GET /api/words/{id}` every 3 s (max 30) for 待校验 / 重新校验中 custom words.
-* **Toasts**: `useToast()` global queue, bottom-centre, ≤ 3 visible; undo toasts carry an action and a countdown (8 s for 已掌握, 5 s for list toggles).
+* **Toasts**: `useToast()` global queue, bottom-centre, ≤ 3 visible; undo toasts carry an action and a countdown (8 s for 已掌握, 5 s for list toggles). On a page with a sticky grade / verdict bar (`StudyCard`, `ScreenCard`) the bar publishes its reach through `useBottomBarOffset` (`--bottom-bar-h` + `html.has-bottom-bar`) and the toasts stack above the buttons instead of covering 认识 / 不熟悉.
 
 ## 4. Components (`src/components/<dir>/`, directories fixed in §1)
 
@@ -92,7 +92,7 @@ Navigation: phone (< 768 px) bottom tab bar 今日 · 词库 · 生词库 · 记
 | `list/WordRow` | `word: WordBrief, mine?, onMark(action), selectable?, selected?, onlyStages?` | list row: display · phonetic · translation_short · chips · state badge · quick buttons 不熟悉 / 认识 (或 已在生词库 → sheet 已掌握 / 移除) · checkbox in bulk mode |
 | `list/LetterIndex` | `letters: {letter,count}[], active, onPick` | desktop sticky right rail; phone horizontal chips |
 | `list/SearchBox` | `value, onChange (debounced 250 ms), placeholder` | — |
-| `list/Pager` | `page, pageSize, total, onChange` | numeric pager on desktop, 加载更多 on phone |
+| `list/Pager` | `page, pageSize, total, onChange` | numeric pager on desktop; 上一页 / 「第 p / t 页」 / 下一页 on phone — every control replaces the page and scrolls to the top (the former phone 加载更多 appended pages and made the 词库 list grow without bound) |
 | `stats/ProgressRing` | `done, total` | SVG ring, animated once |
 | `stats/HeatStrip` | `days: {date, graded, goal_met}[]` | 12 × 7 squares, 5 intensity levels, tooltip 「10月12日 · 学习 32 个」 |
 | `ui/Sheet` / `ConfirmDialog` / `Toast` / `Tabs` / `Segmented` / `Switch` / `Field` / `EmptyState` / `Skeleton` / `Button` | — | primitives; `ConfirmDialog` uses `<dialog>`; `Sheet` slides from the bottom on phones, modal on desktop |
@@ -214,7 +214,7 @@ export const zh = {
   nav: { today: '今日', vocab: '词库', bank: '生词库', history: '记录', me: '我的', admin: '管理', about: '关于' },
   common: { save: '保存', saved: '已保存', cancel: '取消', confirm: '确定', back: '返回', retry: '重试', undo: '撤销', close: '关闭',
             loading: '加载中…', more: '更多', search: '搜索', all: '全部', none: '无', yes: '是', no: '否', delete: '删除', keep: '保留', undone: '已撤销',
-            copy: '复制', copied: '已复制', loadMore: '加载更多', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页`,
+            copy: '复制', copied: '已复制', loadMore: '加载更多', prevPage: '上一页', nextPage: '下一页', total: (n: number) => `共 ${n} 个词`, pageOf: (p: number, t: number) => `第 ${p} / ${t} 页`,
             backToToday: '回到今日', sort: '排序', status: '状态' },
   errors: { network: '网络开小差了，请稍后重试', unauthorized: '请先登录', forbidden: '没有权限', notFound: '找不到这个页面',
             rateLimited: '操作太频繁，请稍后再试', server: '服务器出了点问题，请稍后重试', csrf: '请求已过期，请刷新页面',

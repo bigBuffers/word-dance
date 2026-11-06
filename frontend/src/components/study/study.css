@@ -367,10 +367,13 @@
 }
 
 .screen-card__bar {
+  position: sticky; /* like .study-bar: stays flush with the viewport bottom when the page overflows (desktop TopNav), so the toast offset never goes stale */
+  bottom: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-2);
   padding: var(--space-3) 0 calc(var(--space-3) + var(--safe-bottom) + var(--tabbar-h));
+  background: var(--bg);
 }
 
 .screen-card__bar .btn--ghost {

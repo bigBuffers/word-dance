@@ -2,7 +2,8 @@
 // Front: headword, phonetic, 🔊, stage chips, kind badge, hint (cloze of the first example), reveal.
 // Back: meaning (Claude `meaning_zh`, else the ECDICT translation), image, highlighted examples,
 // collocations, mnemonic, confusable chips, collapsible dictionary, SRS line and the "next-due" preview; grade bar
-// unfamiliar · hard · good + mastered (primary with suggested badge when `mastery_suggested`) · skip.
+// unfamiliar · hard · good + mastered (primary with suggested badge when `mastery_suggested`) · skip. The grade bar
+// publishes its height through `useBottomBarOffset`, so toasts stack above the buttons instead of covering them.
 // `screen` items show screen card with known / unfamiliar / skip directly (reveal peeks). Content states (§5.1.5):
 // queued & not deferred → skeleton + zh.study.contentPending; `content_deferred_until` set → budget-deferred copy,
 // no skeleton, no generateExamples; none/failed → dictionary copy + generateExamples. Buttons disable while a grade is in flight.
@@ -14,6 +15,7 @@ import { cx } from '@/components/ui/cx';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { KindBadge } from '@/components/word/KindBadge';
 import { WordHeader } from '@/components/word/WordHeader';
+import { useBottomBarOffset } from '@/hooks/useBottomBarOffset';
 import type { Accent } from '@/hooks/useSpeech';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
@@ -137,6 +139,8 @@ export function StudyCard({
   className,
 }: StudyCardProps) {
   const { word, content, mine } = item;
+  // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
+  const barRef = useBottomBarOffset<HTMLDivElement>();
   const isScreen = item.kind === 'screen';
   const forms = [word.lemma, word.display, ...word.forms];
   const firstExample = content?.examples.find((ex) => containsForm(ex.en, forms)) ?? content?.examples[0] ?? null;
@@ -185,7 +189,7 @@ export function StudyCard({
           )}
         </div>
         {!readOnly && (
-          <div className="study-bar study-bar--screen">
+          <div className="study-bar study-bar--screen" ref={barRef}>
             <Button variant="primary" tone="good" size="lg" disabled={busy} onClick={() => onGrade('known')}>
               {zh.study.known}
               <Key>1</Key>
@@ -363,7 +367,7 @@ export function StudyCard({
         )}
       </div>
       {!readOnly && (
-        <div className="study-bar">
+        <div className="study-bar" ref={barRef}>
           <div className="study-bar__grades">
             <Button variant="primary" tone="again" size="lg" disabled={busy} onClick={() => onGrade('again')} aria-describedby={undefined}>
               <span className="study-bar__label">
