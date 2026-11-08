@@ -47,6 +47,7 @@ ImageProviderName = Literal["wikimedia", "openverse", "pixabay", "pexels", "clau
 Difficulty = Literal[1, 2, 3, 4, 5]
 FlagTier = Literal[0, 1]
 AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI or ai/providers/openai_http.py (CLAUDE_INTEGRATION §10)
+DanceMode = Literal["full", "form_only", "off"]  # user_settings.dance_mode — 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): P1 plays the same for full and form_only
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
 # frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
@@ -179,6 +180,7 @@ class Settings(Model):
     zh_examples: Literal["tap", "always"]
     auto_pronounce: bool
     accent: Literal["en-US", "en-GB"]
+    dance_mode: DanceMode
     email_enabled: bool
     webhook_enabled: bool
     webhook_url: str | None
@@ -399,6 +401,7 @@ class SettingsUpdateRequest(Model):
     zh_examples: Literal["tap", "always"] | None = None
     auto_pronounce: bool | None = None
     accent: Literal["en-US", "en-GB"] | None = None
+    dance_mode: DanceMode | None = None
     email_enabled: bool | None = None
     webhook_enabled: bool | None = None
     webhook_url: str | None = None
@@ -601,6 +604,24 @@ class WordForm(Model):
     kind: str
 
 
+class DanceMarks(Model):
+    """Letter indexes into the display form (API.md §9 ``DanceSpec.marks``): doubled letters jump together, silent letters stay."""
+
+    double: list[tuple[int, int]]
+    silent: list[int]
+
+
+class DanceSpec(Model):
+    """API.md §9 ``DanceSpec`` — the 「单词之舞」 P1 data derived by ``wd.dance.spec_for`` from the display form and the phonetic:
+    syllable chunks (``"".join(letters) == display``), the primary-stressed chunk, letter marks. Never stored."""
+
+    version: Literal[1]
+    letters: list[str]
+    stress: int | None
+    marks: DanceMarks
+    source: Literal["rule"]
+
+
 class WordDetailWord(WordBrief):
     definition: str | None
     translation: str | None
@@ -610,6 +631,7 @@ class WordDetailWord(WordBrief):
     forms: list[WordForm]
     source: WordSource
     confusables: list[str]
+    dance: DanceSpec | None
 
 
 class ReviewLogItem(Model):
@@ -763,6 +785,7 @@ class StudyItemWord(WordBrief):
     pos: str | None
     forms: list[str]
     confusables: list[str]
+    dance: DanceSpec | None
 
 
 class StudyItem(Model):

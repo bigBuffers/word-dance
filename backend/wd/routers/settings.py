@@ -65,7 +65,7 @@ CURATED_TIMEZONES: tuple[str, ...] = (
 )
 _NOT_ZONES = frozenset({"Factory", "localtime"})
 
-SCALAR_COLUMNS = ("timezone", "push_time", "daily_new_count", "daily_screen_count", "max_reviews", "zh_examples", "accent", "webhook_format")
+SCALAR_COLUMNS = ("timezone", "push_time", "daily_new_count", "daily_screen_count", "max_reviews", "zh_examples", "accent", "dance_mode", "webhook_format")
 
 
 def _field_error(field: str, message_zh: str) -> ApiError:

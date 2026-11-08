@@ -55,7 +55,7 @@ const mine = (over: Partial<UserWord> = {}): UserWord => ({
   ...over,
 });
 const detail = (w: WordBrief, m: UserWord | null): WordDetail => ({
-  word: { ...w, definition: null, translation: null, pos: null, exam_tags: [], bnc: null, forms: [], source: 'user', confusables: [] },
+  word: { ...w, definition: null, translation: null, pos: null, exam_tags: [], bnc: null, forms: [], source: 'user', confusables: [], dance: null },
   content: null,
   content_state: 'none',
   content_deferred_until: null,

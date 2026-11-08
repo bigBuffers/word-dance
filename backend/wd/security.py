@@ -617,6 +617,7 @@ def settings_row_to_dto(row: Mapping[str, Any]) -> dict[str, Any]:
         "zh_examples": row["zh_examples"],
         "auto_pronounce": bool(int(row["auto_pronounce"])),
         "accent": row["accent"],
+        "dance_mode": row.get("dance_mode") or "full",  # 0015 column; the DDL default when a row predates the migration
         "email_enabled": bool(int(row["email_enabled"])),
         "webhook_enabled": bool(int(row["webhook_enabled"])),
         "webhook_url": row["webhook_url"],

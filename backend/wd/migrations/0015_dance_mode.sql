@@ -1,0 +1,13 @@
+-- 0015_dance_mode.sql — user_settings.dance_mode: the learner's 「单词之舞」 setting (docs/WORD_DANCE_DESIGN.md §6.3; API.md 15 and §9
+-- `Settings.dance_mode`; docs/releases/2026-11-word-dance-p1.md).
+--
+-- Additive only, the 0012_word_images_meta.sql / 0014_learn_rank.sql precedent: ONE ADD COLUMN with a NOT NULL default and a CHECK
+-- list, no table rebuild, no index (the row is read by primary key once per request). v_bank names its columns explicitly (0011) and
+-- no view, trigger or foreign key reads user_settings' other columns, so the file is safe under `deploy/install.sh --no-restart` and
+-- a plain `launchctl kickstart -k` on the Mac; existing rows get the default and keep every other value. The runner wraps this file
+-- in BEGIN IMMEDIATE and records schema_migrations(15, 'dance_mode') itself (SCHEMA.sql §1) — nothing else belongs here.
+-- docs/SCHEMA.sql stays the 0001 baseline byte for byte (test_db.py). Rollback = `git checkout` alone: the old code never reads the
+-- column and the DDL default keeps it valid.
+-- Values: 'full' (every dance the build has — P1: the spelling and stress dances) · 'form_only' (reserved for P2: spelling and
+-- stress only, no semantic dance; P1 treats it like 'full') · 'off' (the headword renders as before).
+ALTER TABLE user_settings ADD COLUMN dance_mode TEXT NOT NULL DEFAULT 'full' CHECK (dance_mode IN ('full','form_only','off'));

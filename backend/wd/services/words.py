@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, ClassVar, Iterable, Literal, Mapping
 
-from .. import db, images
+from .. import dance, db, images
 from ..clock import now_iso, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
@@ -520,6 +520,7 @@ def word_detail(conn: sqlite3.Connection, word_id: int, user_id: int, *, now: st
             "forms": forms_with_kind(conn, wid),
             "source": final["source"],
             "confusables": confusables_for(conn, user_id, str(final["lemma"])),
+            "dance": dance.spec_for(final.get("display") or final.get("lemma"), final.get("phonetic")),
         }
     )
     content_state = final.get("content_state") or "none"

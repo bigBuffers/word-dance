@@ -17,6 +17,7 @@ export type ReportReason = 'wrong_meaning' | 'unnatural_example' | 'bad_translat
 export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bark';
 export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
 export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Claude CLI or the fallback HTTP provider (CLAUDE_INTEGRATION §10)
+export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = every dance the build has, form_only = spelling + stress only (reserved for P2), off
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -36,6 +37,7 @@ export interface Settings {
   daily_new_count: number; daily_screen_count: number; max_reviews: number;
   stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–5 index (§9.1)
   show_images: boolean; zh_examples: 'tap' | 'always'; auto_pronounce: boolean; accent: 'en-US' | 'en-GB';
+  dance_mode: DanceMode;                // 单词之舞; P1 plays the spelling + stress dances for both full and form_only
   email_enabled: boolean; webhook_enabled: boolean; webhook_url: string | null; webhook_format: WebhookFormat;
   next_push_at: string | null;          // read-only
   email_verified: boolean;              // read-only
@@ -66,6 +68,12 @@ export interface UserWord {
   srs: Srs; times_pushed: number; times_added: number;
   added_at: string; first_added_at: string; mastered_at: string | null;
 }
+export interface DanceSpec {                                 // 单词之舞 P1 (docs/WORD_DANCE_DESIGN.md §4.1–4.2): derived by backend/wd/dance.py from display + phonetic at serialisation time, never stored
+  version: 1; letters: string[];                            // display cut into syllable chunks, letters.join('') === display; one chunk when the rules cannot split the word
+  stress: number | null;                                     // index into letters of the primary-stressed chunk (an unmarked split word takes its first non-schwa chunk); null only when the word stays one chunk with two or more nuclei
+  marks: { double: [number, number][]; silent: number[] };   // letter indexes into display: doubled letters jump together, silent letters stay put (night's gh, knife's k, the magic e)
+  source: 'rule';                                            // P2 adds 'claude' (corrected chunks, semantic primitive)
+}
 export interface Example { en: string; zh: string }
 export interface Content {
   word: string; valid: boolean; meaning_zh: string; meaning_en: string;
@@ -90,6 +98,7 @@ export interface WordDetail {
     definition: string | null; translation: string | null; pos: string | null; exam_tags: string[];
     bnc: number | null; forms: { form: string; kind: string }[]; source: 'seed' | 'ecdict' | 'claude' | 'user';
     confusables: string[];                                    // 易混 chips: this user's accepted confusable_group rows containing the lemma, minus the lemma (§9.1)
+    dance: DanceSpec | null;                                  // null for phrases, abbreviations and words without a phonetic (§9.1)
   };
   content: Content | null; content_state: ContentState;
   content_deferred_until: string | null;                      // == GET /api/words/{id}/content.deferred_until (budget deferral / AI paused → no polling, 「明天补齐」 copy)
@@ -141,7 +150,7 @@ export interface TodayCounts {
 export interface StudyItem {
   item_id: number; kind: ItemKind; position: number; result: string | null; skip_count: number;   // result: FINAL grade only (null while the card sits in the 10-minute step)
   requeue_at: string | null;                                  // learning step due (UTC) → client re-inserts the card; always paired with result === null
-  word: WordBrief & { definition: string | null; translation: string | null; pos: string | null; forms: string[]; confusables: string[] };
+  word: WordBrief & { definition: string | null; translation: string | null; pos: string | null; forms: string[]; confusables: string[]; dance: DanceSpec | null };
   mine: UserWord | null; content: Content | null; content_state: ContentState; content_deferred_until: string | null; image: ImageMeta;
 }
 export interface Batch {

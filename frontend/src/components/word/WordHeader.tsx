@@ -1,7 +1,12 @@
-// WordHeader — display form (long words shrink), phonetic, SpeakButton, StageChips, KindBadge (FRONTEND §4).
-import type { ItemKind, Stage, WordBrief } from '@/api/types';
+// WordHeader — display form (long words shrink), phonetic, SpeakButton, StageChips, KindBadge (FRONTEND §4). With a `dance` spec
+// (word dance P1, §6.5) the display form is a DancingWord — the letters enter syllable by syllable and the syllables beat, the
+// stressed one highest — a row of syllable chips marks the stressed syllable, and 🔊 replays the dance together with the sound.
+import { useState } from 'react';
+import type { DanceSpec, ItemKind, Stage, WordBrief } from '@/api/types';
 import { cx } from '@/components/ui/cx';
 import type { Accent } from '@/hooks/useSpeech';
+import { zh } from '@/i18n/zh';
+import { DancingWord } from './DancingWord';
 import { KindBadge } from './KindBadge';
 import { SpeakButton } from './SpeakButton';
 import { StageChips } from './StageChips';
@@ -22,6 +27,15 @@ export interface WordHeaderProps {
   /** Heading element for the display form (`h1` on the detail page, `h2` on cards, `div` in lists). */
   as?: 'h1' | 'h2' | 'h3' | 'div';
   className?: string;
+  /**
+   * word dance: the word's `DanceSpec` (`null` = the word has no spec, the letters render plain); omitted = the feature is off for
+   * this view (`settings.dance_mode === 'off'`, lists, screening).
+   */
+  dance?: DanceSpec | null;
+  /** Replay counter driven by the page (key P); 🔊 adds its own replays on top. */
+  playToken?: number;
+  /** Play the dance once on mount, before the first paint (the card show of a word on its first exposures). */
+  autoplay?: boolean;
 }
 
 function lengthBucket(display: string): 'long' | 'xlong' | undefined {
@@ -31,19 +45,37 @@ function lengthBucket(display: string): 'long' | 'xlong' | undefined {
   return undefined;
 }
 
-export function WordHeader({ word, size = 'md', kind, accent, showStages = true, onlyStages, as: Tag = 'div', className }: WordHeaderProps) {
+export function WordHeader({ word, size = 'md', kind, accent, showStages = true, onlyStages, as: Tag = 'div', className, dance, playToken = 0, autoplay = false }: WordHeaderProps) {
+  const [replays, setReplays] = useState(0);
+  const dancing = dance !== undefined;
+  const chips = dance && dance.letters.length > 1 ? dance : null;
   // StageChips always renders something when shown (a stageless word gets the dashed outside-the-lists chip), so it counts as meta.
-  const hasMeta = Boolean(word.phonetic) || kind !== undefined || showStages;
+  const hasMeta = Boolean(word.phonetic) || kind !== undefined || showStages || chips !== null;
   return (
     <header className={cx('word-head', `word-head--${size}`, className)} data-len={lengthBucket(word.display)}>
       <div className="word-head__row">
-        <Tag className="word-head__display" lang="en">
-          {word.display}
+        {/* the letter spans are inline-block, so the heading names itself (otherwise screen readers spell r a b b i t) */}
+        <Tag className="word-head__display" lang="en" aria-label={dance ? word.display : undefined}>
+          {dancing ? <DancingWord text={word.display} spec={dance} playToken={playToken + replays} autoplay={autoplay} /> : word.display}
         </Tag>
-        <SpeakButton text={word.display} lang={accent} size={size === 'lg' ? 'lg' : size === 'sm' ? 'sm' : 'md'} />
+        <SpeakButton
+          text={word.display}
+          lang={accent}
+          size={size === 'lg' ? 'lg' : size === 'sm' ? 'sm' : 'md'}
+          onClick={dancing ? () => setReplays((n) => n + 1) : undefined}
+        />
       </div>
       {hasMeta && (
         <div className="word-head__meta">
+          {chips && (
+            <ol className="syl" aria-label={zh.word.syllables}>
+              {chips.letters.map((chunk, i) => (
+                <li key={i} className={cx('syl__chip', chips.stress === i && 'syl__chip--stressed')} lang="en">
+                  {chunk}
+                </li>
+              ))}
+            </ol>
+          )}
           {word.phonetic && (
             <span className="word-head__phonetic" lang="en">
               /{word.phonetic}/

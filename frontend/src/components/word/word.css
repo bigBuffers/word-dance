@@ -73,6 +73,59 @@
   letter-spacing: 0.01em;
 }
 
+/* ---------- DancingWord (单词之舞, FRONTEND §6.5) ---------- */
+.dword {
+  display: inline-block;
+  white-space: nowrap;
+  --dance-accent: var(--brand-ink); /* the stressed syllable's beat colour (read by DancingWord.play) */
+}
+
+.dword__l {
+  display: inline-block;
+  transform-origin: 50% 100%;
+}
+
+/* silent letters (night's gh, knife's k, the magic e) are muted (--muted keeps ≥ 4.5:1 on both grounds) and never beat */
+.dword__l--silent {
+  color: var(--muted);
+}
+
+/* no Web Animations API or prefers-reduced-motion: the stress mark becomes a static colour so the information survives */
+.dword--static .dword__l--stressed {
+  color: var(--brand-ink);
+}
+
+/* syllable chips under the headword: rab · bit, the stressed chunk filled */
+.syl {
+  display: inline-flex;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.syl__chip {
+  font-family: var(--font-word);
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.word-head--lg .syl__chip {
+  font-size: var(--text-md);
+}
+
+.syl__chip--stressed {
+  color: var(--brand-ink);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  background: var(--brand-soft);
+  font-weight: 600;
+}
+
 /* ---------- chips (StageChips) ---------- */
 .chips {
   display: inline-flex;

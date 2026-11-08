@@ -63,6 +63,7 @@ def test_get_settings_defaults(client: TestClient, alice):
         "zh_examples": "tap",
         "auto_pronounce": True,
         "accent": "en-US",
+        "dance_mode": "full",
         "email_enabled": False,
         "webhook_enabled": False,
         "webhook_url": None,
@@ -105,10 +106,11 @@ def test_settings_with_an_unknown_stage_code_fall_back_like_the_study_paths(clie
 
 
 def test_partial_update_recomputes_next_push_at(client: TestClient, alice, settings, frozen_clock):
-    r = client.put("/api/settings", json={"push_time": "21:00", "daily_new_count": 20, "zh_examples": "always", "accent": "en-GB", "show_images": False})
+    r = client.put("/api/settings", json={"push_time": "21:00", "daily_new_count": 20, "zh_examples": "always", "accent": "en-GB", "show_images": False, "dance_mode": "off"})
     assert r.status_code == 200, r.text
     st = r.json()
     assert st["push_time"] == "21:00" and st["daily_new_count"] == 20 and st["zh_examples"] == "always" and st["accent"] == "en-GB" and st["show_images"] is False
+    assert st["dance_mode"] == "off" and client.get("/api/settings").json()["dance_mode"] == "off"
     assert st["timezone"] == "Asia/Shanghai" and st["stages"] == ["xs", "zk"] and st["max_reviews"] == 60  # untouched
     assert st["next_push_at"] == "2026-10-14T13:00:00Z"  # 21:00 Shanghai later today
     frozen_clock.advance(minutes=5)
@@ -144,6 +146,7 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
         ({"stages": ["zk"]}, "current_stage"),  # stored current_stage xs would fall outside
         ({"current_stage": "gk"}, "current_stage"),  # stored stages are xs/zk
         ({"zh_examples": "never"}, "zh_examples"),
+        ({"dance_mode": "loud"}, "dance_mode"),
         ({"accent": "en-AU"}, "accent"),
         ({"webhook_format": "slack"}, "webhook_format"),
         ({"nickname": "x"}, "nickname"),

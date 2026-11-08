@@ -64,7 +64,7 @@ function item(id: number, over: Partial<StudyItem> = {}): StudyItem {
       translation: null,
       pos: null,
       forms: [],
-      confusables: [],
+      confusables: [], dance: null,
     },
     mine: null,
     content: null,

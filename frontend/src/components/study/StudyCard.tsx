@@ -9,7 +9,7 @@
 // no skeleton, no generateExamples; none/failed → dictionary copy + generateExamples. Buttons disable while a grade is in flight.
 import type { MouseEvent, ReactNode } from 'react';
 import { Link } from 'react-router';
-import type { Grade, ScreenVerdict, Stage, StudyItem } from '@/api/types';
+import type { DanceMode, Grade, ScreenVerdict, Stage, StudyItem } from '@/api/types';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { Skeleton } from '@/components/ui/Skeleton';
@@ -58,6 +58,12 @@ export interface StudyCardProps {
   onImageFlag?: () => void;
   imageRefreshing?: boolean;
   className?: string;
+  /** word dance (`settings.dance_mode`): omitted or 'off' → the plain headword; otherwise the DancingWord with the word's spec (§6.5). */
+  danceMode?: DanceMode;
+  /** Replay counter from the page (key P), see `WordHeader.playToken`. */
+  danceToken?: number;
+  /** Play the dance when the front face mounts (the page decides: first exposures only). */
+  danceAutoplay?: boolean;
 }
 
 /** Label of a stored grade / verdict (`push_items.result`). */
@@ -137,8 +143,13 @@ export function StudyCard({
   onImageFlag,
   imageRefreshing = false,
   className,
+  danceMode = 'off',
+  danceToken,
+  danceAutoplay = false,
 }: StudyCardProps) {
   const { word, content, mine } = item;
+  // screen items never dance (FRONTEND §5.1.1): the spec is withheld, so the header renders the plain headword
+  const dance = danceMode !== 'off' && item.kind !== 'screen' ? word.dance : undefined;
   // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
   const barRef = useBottomBarOffset<HTMLDivElement>();
   const isScreen = item.kind === 'screen';
@@ -211,7 +222,7 @@ export function StudyCard({
       <article className={cx('study-card', className)} role="group" aria-label={word.display}>
         {header}
         <div className="study-card__face study-card__front study-card__front--tappable" onClick={onReveal}>
-          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
+          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} autoplay={danceAutoplay} />
           {hint && hintText && (
             <p className="study-card__hint" lang="en">
               {hintText}
@@ -302,7 +313,7 @@ export function StudyCard({
     <article className={cx('study-card', 'study-card--revealed', className)} role="group" aria-label={word.display}>
       {header}
       <div className="study-card__face study-card__back">
-        <WordHeader word={word} size="md" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
+        <WordHeader word={word} size="md" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} />
         <p className="study-card__meaning" lang="zh-CN" aria-live="polite">
           {meaning}
         </p>

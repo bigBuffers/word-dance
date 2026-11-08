@@ -92,7 +92,7 @@ describe('push settings test buttons', () => {
       stages: ['cet4', 'cet6'],
       current_stage: 'cet4',
       show_images: true,
-      zh_examples: 'tap',
+      zh_examples: 'tap', dance_mode: 'full',
       auto_pronounce: true,
       accent: 'en-US',
       email_enabled: true,
@@ -219,5 +219,48 @@ describe('toggleStageSetting', () => {
     expect(toggleStageSetting(['cet4', 'cet6'], 'cet4', 'cet4')).toEqual({ stages: ['cet6'], current_stage: 'cet6' });
     expect(toggleStageSetting(['cet6'], 'cet6', 'cet6')).toEqual({ stages: ['cet6'], current_stage: 'cet6' });
     expect(toggleStageSetting(['zk'], 'zk', 'cet6')).toEqual({ stages: ['zk', 'cet6'], current_stage: 'zk' });
+  });
+});
+
+describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
+  beforeEach(() => {
+    calls = [];
+    settings = {
+      timezone: 'Asia/Shanghai',
+      push_time: '08:00',
+      push_enabled: true,
+      daily_new_count: 10,
+      daily_screen_count: 15,
+      max_reviews: 60,
+      stages: ['xs', 'zk'],
+      current_stage: 'xs',
+      show_images: true,
+      zh_examples: 'tap',
+      auto_pronounce: true,
+      accent: 'en-US',
+      dance_mode: 'full',
+      email_enabled: false,
+      webhook_enabled: false,
+      webhook_url: null,
+      webhook_format: 'generic',
+      next_push_at: null,
+      email_verified: true,
+      updated_at: '2026-11-08T00:00:00Z',
+    };
+    installFetch();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('the switch reflects dance_mode and saves off / full', async () => {
+    renderSettings();
+    const sw = (await screen.findByRole('switch', { name: zh.settings.dance })) as HTMLButtonElement;
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(zh.settings.danceHint)).toBeTruthy();
+    fireEvent.click(sw);
+    await waitFor(() => expect(settings.dance_mode).toBe('off'));
+    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ dance_mode: 'off' }]);
+    await waitFor(() => expect(screen.getByRole('switch', { name: zh.settings.dance }).getAttribute('aria-checked')).toBe('false'));
+    fireEvent.click(screen.getByRole('switch', { name: zh.settings.dance }));
+    await waitFor(() => expect(settings.dance_mode).toBe('full'));
   });
 });

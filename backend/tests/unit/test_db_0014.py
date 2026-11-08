@@ -66,7 +66,7 @@ def test_upgrade_0014_adds_a_nullable_column_without_rebuild(settings, tmp_path:
 
         result = db.run_migrations(c)  # the same call as `wd migrate` / the service startup
 
-        assert result.applied == [(14, "learn_rank")] and db.current_version(c) == 14
+        assert result.applied[0] == (14, "learn_rank") and db.current_version(c) >= 14  # later additive files (0015 …) ride along
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         cols = {r["name"]: r for r in c.execute("PRAGMA table_info(words)")}
         assert [r["name"] for r in c.execute("PRAGMA table_info(words)")] == [*before_cols, "learn_rank"]  # appended, nothing else moved

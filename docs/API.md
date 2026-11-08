@@ -157,7 +157,7 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 
 ## 4. Settings
 
-**14 `GET /api/settings`** → `Settings`. **15 `PUT /api/settings`** — any subset of the writable fields of `Settings` → full `Settings`. Validation: `timezone ∈ zoneinfo.available_timezones()`; `push_time` `^([01]\d|2[0-3]):[0-5]\d$`; counts within the CHECK ranges; `stages` non-empty ⊆ {xs,zk,gk,cet4,cet6} and `current_stage ∈ stages`; `webhook_url` https + public host (SSRF host check) required when `webhook_enabled`; `email_enabled=true` requires `email_verified` (409 `email_not_verified`) and server SMTP (409 `smtp_unconfigured`). Saving recomputes `next_push_at`.
+**14 `GET /api/settings`** → `Settings`. **15 `PUT /api/settings`** — any subset of the writable fields of `Settings` → full `Settings`. Validation: `timezone ∈ zoneinfo.available_timezones()`; `push_time` `^([01]\d|2[0-3]):[0-5]\d$`; counts within the CHECK ranges; `stages` non-empty ⊆ {xs,zk,gk,cet4,cet6} and `current_stage ∈ stages`; `dance_mode ∈ {full, form_only, off}` (§9 `DanceMode`); `webhook_url` https + public host (SSRF host check) required when `webhook_enabled`; `email_enabled=true` requires `email_verified` (409 `email_not_verified`) and server SMTP (409 `smtp_unconfigured`). Saving recomputes `next_push_at`.
 **16 `GET /api/settings/timezones?all=0|1`** → `{items: string[]}` — curated 30 (Asia/Shanghai first) or all zones.
 **17 `POST /api/settings/webhook/test`** → `200 {ok: boolean, http_status: number|null, error: string|null, reason: WebhookTestReason|null}` — sends the configured format with a test text synchronously (10 s timeout). `error` is the English transport diagnostic (`rejected: …` / `request failed: <Exception>: …` / `HTTP <code>`), the wording the admin job ledger keeps — never shown to users; `reason` is the closed set (§9 `WebhookTestReason`) the UI maps to zh copy, `null` when `ok`: `dns_failed` (the host has no address records), `host_not_public` (SSRF guard: IP literal, `localhost` / `.local`-style name, or a private / loopback / link-local / reserved resolved address), `connect_failed` (the connection failed or was dropped — also the fallback for any other transport error), `timeout` (connect / read / write timeout), `tls_failed` (TLS handshake or certificate verification failed), `http_error` (non-2xx answer; `http_status` carries the code), `invalid_url` (not https, credentials, no / malformed host or port). Example: `{"ok": false, "http_status": null, "error": "request failed: ConnectError: [Errno 111] Connection refused", "reason": "connect_failed"}`. 409 `webhook_unconfigured`, 429 (1 per 10 min).
 **18 `POST /api/settings/email/test`** → `202 {queued: true}`. Enqueues `send_email {"user_id": <me>, "test": true}` (no `batch_id`; dedupe key `email:test:<user_id>`, priority 10). The rendered test mail: subject `【word-Dance】测试邮件`, body 「这是一封测试邮件。你的下次推送时间：10月15日 08:00（Asia/Shanghai）」 + the public URL link (DESIGN §6.5; omitted when none is known); `push_batches.email_status` is untouched. 409 `email_not_verified`/`smtp_unconfigured`, 429 (1 per 10 min).
@@ -251,6 +251,7 @@ export type ReportReason = 'wrong_meaning' | 'unnatural_example' | 'bad_translat
 export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bark';
 export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
 export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Claude CLI or the fallback HTTP provider (CLAUDE_INTEGRATION §10)
+export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = every dance the build has, form_only = spelling + stress only (reserved for P2), off
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -270,6 +271,7 @@ export interface Settings {
   daily_new_count: number; daily_screen_count: number; max_reviews: number;
   stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–5 index (§9.1)
   show_images: boolean; zh_examples: 'tap' | 'always'; auto_pronounce: boolean; accent: 'en-US' | 'en-GB';
+  dance_mode: DanceMode;                // 单词之舞; P1 plays the spelling + stress dances for both full and form_only
   email_enabled: boolean; webhook_enabled: boolean; webhook_url: string | null; webhook_format: WebhookFormat;
   next_push_at: string | null;          // read-only
   email_verified: boolean;              // read-only
@@ -300,6 +302,12 @@ export interface UserWord {
   srs: Srs; times_pushed: number; times_added: number;
   added_at: string; first_added_at: string; mastered_at: string | null;
 }
+export interface DanceSpec {                                 // 单词之舞 P1 (docs/WORD_DANCE_DESIGN.md §4.1–4.2): derived by backend/wd/dance.py from display + phonetic at serialisation time, never stored
+  version: 1; letters: string[];                            // display cut into syllable chunks, letters.join('') === display; one chunk when the rules cannot split the word
+  stress: number | null;                                     // index into letters of the primary-stressed chunk (an unmarked split word takes its first non-schwa chunk); null only when the word stays one chunk with two or more nuclei
+  marks: { double: [number, number][]; silent: number[] };   // letter indexes into display: doubled letters jump together, silent letters stay put (night's gh, knife's k, the magic e)
+  source: 'rule';                                            // P2 adds 'claude' (corrected chunks, semantic primitive)
+}
 export interface Example { en: string; zh: string }
 export interface Content {
   word: string; valid: boolean; meaning_zh: string; meaning_en: string;
@@ -324,6 +332,7 @@ export interface WordDetail {
     definition: string | null; translation: string | null; pos: string | null; exam_tags: string[];
     bnc: number | null; forms: { form: string; kind: string }[]; source: 'seed' | 'ecdict' | 'claude' | 'user';
     confusables: string[];                                    // 易混 chips: this user's accepted confusable_group rows containing the lemma, minus the lemma (§9.1)
+    dance: DanceSpec | null;                                  // null for phrases, abbreviations and words without a phonetic (§9.1)
   };
   content: Content | null; content_state: ContentState;
   content_deferred_until: string | null;                      // == GET /api/words/{id}/content.deferred_until (budget deferral / AI paused → no polling, 「明天补齐」 copy)
@@ -375,7 +384,7 @@ export interface TodayCounts {
 export interface StudyItem {
   item_id: number; kind: ItemKind; position: number; result: string | null; skip_count: number;   // result: FINAL grade only (null while the card sits in the 10-minute step)
   requeue_at: string | null;                                  // learning step due (UTC) → client re-inserts the card; always paired with result === null
-  word: WordBrief & { definition: string | null; translation: string | null; pos: string | null; forms: string[]; confusables: string[] };
+  word: WordBrief & { definition: string | null; translation: string | null; pos: string | null; forms: string[]; confusables: string[]; dance: DanceSpec | null };
   mine: UserWord | null; content: Content | null; content_state: ContentState; content_deferred_until: string | null; image: ImageMeta;
 }
 export interface Batch {
@@ -466,5 +475,7 @@ export interface SystemEvent { id: number; kind: string; detail: Record<string, 
 * `StudyItem.requeue_at` is set when the item's `user_words.step=1` and `due_at` is in the future (10-minute step); such an item always has `result:null` (only final grades are stored, endpoint 45) and is listed among the ungraded items; the client keeps it in `order` (not `graded`), re-inserts the card ≥ 10 positions later or at the end, and shows it when `requeue_at ≤ now`. On reload the server lists it as remaining with `requeue_at` still set (or null once due).
 * `TodayResponse.goal_met` = every non-stale `review`/`new`/`extra` item of today's batch has `result IS NOT NULL` (final grade; stale and superseded items are excluded, endpoint 43). `TodayCounts.done`, `completed_at`, `item_already_graded` and `Stats.heatmap[].goal_met` (`completed_at IS NOT NULL` or that predicate) use the same predicate — the heat strip, `DayStats.batch_done/batch_total` and the 今日 page never disagree.
 * `confusables` (`StudyItem.word`, `WordDetail.word`) = for this user, the union of `payload.group` over `bank_suggestions` rows with `type='confusable_group' AND status='accepted'` whose group contains the word's lemma, minus the lemma itself, de-duplicated, ≤ 6, in insertion order (CLAUDE_INTEGRATION §6.6); `[]` when none. Served directly on the item/detail so the client never has to fetch and index the suggestions list.
+* `dance` (`StudyItem.word`, `WordDetail.word`) = the 「单词之舞」 P1 `DanceSpec` that `backend/wd/dance.py` derives from `display` + `phonetic` while the word is serialised (docs/WORD_DANCE_DESIGN.md §4.1–4.2; nothing is stored): `letters` is the display form cut into syllable chunks (`"".join(letters) == display`; the ECDICT transcription gives the syllable count — vowel nuclei plus syllabic consonants, an iə / uə read as two syllables when the spelling has i / u plus another vowel letter (se·ri·ous, Jan·u·a·ry), a schwa the transcription elides read back from the spelling (in·ter·est·ing) — and the vowel letters give the cuts: a stressed short vowel keeps the single consonant (vis·it), long vowels / ə / unstressed vowels leave it to the next chunk (pa·per, a·bout), r-coloured vowels and an unstressed er keep their r (or·ange, dif·fer·ent), digraphs and tch stay whole (tea·cher, moth·er, kitch·en), doubled consonants and s-clusters split (rab·bit, bas·ket), the ti / ci / si of /ʃ/ open their suffix (na·tion·al, spe·cial), -le / -ing / -ieth endings and the magic e are special-cased (ta·ble, meet·ing, twen·ti·eth, cre·ate)), `stress` the index of the chunk carrying the primary stress — with ECDICT's old double marks (`'fif'tiːn`) the last one, the 13–19 numerals always on -teen, an unmarked polysyllable (`ʌŋkl`) on its first non-schwa chunk —, `marks.double` the index pairs of doubled letters, `marks.silent` the indexes of letters the rules know to be silent (kn- wr- wh-/h- tw- -mb -mn -igh-/-ough, l in walk/half/would, t in listen/often/castle, w in answer, the magic e). Two ECDICT quirks are overridden by word (`august` = the month, `email` = ˈiːmeɪl). When the spelling and the transcription still disagree on the syllable count the word stays ONE chunk (`stress` 0 for a monosyllable, else `null`); a display that is not plain letters (phrases, `Mr.`, `o'clock`, `ping-pong`) or has no phonetic gets `null`. Reviewed against dictionary syllabification on all 600 小学 words (docs/WORD_DANCE_DESIGN.md §10); what the rules cannot know (suffix cuts such as teach·er, heteronyms such as record) is left to P2's `source: 'claude'` specs (corrected chunks, a semantic primitive) from a table.
+* `Settings.dance_mode` (`user_settings.dance_mode`, migration 0015): `full` (default; P1 = the spelling + stress dances) · `form_only` (reserved for P2's semantic dance; P1 plays it like `full`) · `off`. The client plays the dance when a card's front face mounts for `kind='new'` cards and for `review` / `extra` cards with `srs.repetitions < 3` (never 推荐词), and on 🔊 / key `P` at any time (FRONTEND §5.1.1, §6.5).
 * `UserWord` has no extra field for 仅收藏: the bank row shows that chip when `word.is_valid_english === false && !mine.needs_attention` (API 36 `attention:'keep'`), 待校验 when `is_valid_english === null && !needs_attention`, 重新校验中 when `needs_attention && attention_msg === null`.
 * `DayStats.offline` = the user has no batch that day **and** some `system_events(kind='downtime')` row with `detail_json = {"from", "to"}` (UTC, written by the scheduler on startup, DESIGN §6.4) satisfies `from ≤ day_start(date+1, tz) AND to ≥ day_start(date, tz)` — i.e. the recorded gap overlaps the user's local day.

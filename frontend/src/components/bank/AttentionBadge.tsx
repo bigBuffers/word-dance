@@ -21,8 +21,8 @@ export const ATTENTION_POLL_MAX = 30;
 
 /** `WordDetail.word` → its `WordBrief` part (drops the detail-only fields) — for patching list rows after a poll. */
 export function briefOf(word: WordDetail['word']): WordBrief {
-  const { confusables, definition, translation, pos, exam_tags, bnc, forms, source, ...brief } = word;
-  void [confusables, definition, translation, pos, exam_tags, bnc, forms, source];
+  const { confusables, dance, definition, translation, pos, exam_tags, bnc, forms, source, ...brief } = word;
+  void [confusables, dance, definition, translation, pos, exam_tags, bnc, forms, source];
   return brief;
 }
 

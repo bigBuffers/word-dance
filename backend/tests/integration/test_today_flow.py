@@ -434,3 +434,9 @@ def test_confusables_and_suggestions_open_on_today(client: TestClient, settings,
     assert today["suggestions_open"] == 1
     detail = client.get(f"/api/words/{w}").json()
     assert detail["word"]["confusables"] == card["word"]["confusables"]
+    # 单词之舞 P1: both DTOs carry the rule-derived DanceSpec of display + phonetic (API.md §9.1), never stored
+    from wd import dance
+
+    assert card["word"]["dance"] is not None
+    assert card["word"]["dance"] == dance.spec_for(card["word"]["display"], card["word"]["phonetic"]) == detail["word"]["dance"]
+    assert card["word"]["dance"]["letters"] == ["ab", "sorb"] and card["word"]["dance"]["stress"] == 1

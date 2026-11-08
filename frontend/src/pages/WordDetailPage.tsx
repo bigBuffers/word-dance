@@ -357,7 +357,7 @@ export default function WordDetailPage() {
       {data.redirected_from && <p className="word-detail__redirect muted">{zh.word.redirected(data.redirected_from)}</p>}
 
       <header className="word-detail__head">
-        <WordHeader word={word} size="lg" as="h1" accent={settings?.accent} />
+        <WordHeader word={word} size="lg" as="h1" accent={settings?.accent} dance={(settings?.dance_mode ?? 'full') !== 'off' ? word.dance : undefined} />
         <div className="word-detail__state">
           <StateBadge state={state} srs={mine?.srs ?? null} />
           {mine && mine.times_added > 1 && <span className="badge">{zh.study.addedTimes(mine.times_added)}</span>}

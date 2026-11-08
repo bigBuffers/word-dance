@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserWord, WordDetail } from '@/api/types';
 import { zh } from '@/i18n/zh';
 
-const h = vi.hoisted(() => ({ detail: null as unknown }));
+const h = vi.hoisted(() => ({ detail: null as unknown, settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap', dance_mode: 'full' as 'full' | 'off' } }));
 
 vi.mock('@/api/endpoints', () => ({
   getWord: vi.fn(() => Promise.resolve(h.detail)),
@@ -19,7 +19,13 @@ vi.mock('@/api/endpoints', () => ({
   requestWordContent: vi.fn(),
 }));
 vi.mock('@/auth/AuthContext', () => {
-  const fake = { settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap' }, counters: { suggestions_open: 0, attention: 0 }, refreshCounters: vi.fn(() => Promise.resolve()) };
+  const fake = {
+    get settings() {
+      return h.settings;
+    },
+    counters: { suggestions_open: 0, attention: 0 },
+    refreshCounters: vi.fn(() => Promise.resolve()),
+  };
   return { useAuth: () => fake, useOptionalAuth: () => fake };
 });
 
@@ -49,7 +55,7 @@ function mineRow(over: Partial<UserWord> = {}): UserWord {
   };
 }
 
-function detailOf(mine: UserWord | null): WordDetail {
+function detailOf(mine: UserWord | null, word: Partial<WordDetail['word']> = {}): WordDetail {
   return {
     word: {
       id: 1,
@@ -77,7 +83,8 @@ function detailOf(mine: UserWord | null): WordDetail {
       bnc: null,
       forms: [],
       source: 'seed',
-      confusables: [],
+      confusables: [], dance: null,
+      ...word,
     },
     content: null,
     content_state: 'none',
@@ -137,5 +144,31 @@ describe('WordDetailPage', () => {
     expect(screen.getByText(zh.study.srsNew)).toBeTruthy();
     expect(screen.queryByText(zh.study.srsLine(0, 0))).toBeNull();
     expect(screen.queryByText(zh.bank.sort.due, { selector: 'dt' })).toBeNull();
+  });
+});
+
+describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
+  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+  beforeEach(() => {
+    h.settings.dance_mode = 'full';
+  });
+
+  it('shows the syllable chips and a dancing headword named after the word', async () => {
+    h.detail = detailOf(mineRow(), { dance: spec });
+    const { container } = renderDetail();
+    await screen.findByRole('heading', { level: 1, name: 'abandon' });
+    const chips = within(screen.getByRole('list', { name: zh.word.syllables })).getAllByRole('listitem');
+    expect(chips.map((c) => c.textContent)).toEqual(['a', 'ban', 'don']);
+    expect(chips.map((c) => c.classList.contains('syl__chip--stressed'))).toEqual([false, true, false]);
+    expect(container.querySelector('.dword')).not.toBeNull();
+  });
+
+  it('dance_mode off → the plain headword without chips', async () => {
+    h.settings.dance_mode = 'off';
+    h.detail = detailOf(mineRow(), { dance: spec });
+    const { container } = renderDetail();
+    await screen.findByRole('heading', { level: 1 });
+    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    expect(container.querySelector('.dword')).toBeNull();
   });
 });

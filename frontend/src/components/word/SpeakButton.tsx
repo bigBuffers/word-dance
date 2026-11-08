@@ -1,5 +1,6 @@
 // SpeakButton — speaker icon button wrapping useSpeech() (FRONTEND §4); disabled with the
-// zh.word.speechUnsupported tooltip when speechSynthesis is absent. Defaults to the user's accent setting.
+// zh.word.speechUnsupported tooltip when speechSynthesis is absent — unless an `onClick` (the word dance replay, §6.5) is
+// passed: then the button stays usable with the zh.word.replayDance label and only skips the speech. Defaults to the user's accent setting.
 import type { MouseEvent } from 'react';
 import { useOptionalAuth } from '@/auth/AuthContext';
 import { Button, type ButtonSize } from '@/components/ui/Button';
@@ -22,7 +23,8 @@ export function SpeakButton({ text, lang, size = 'md', className, onClick }: Spe
   const auth = useOptionalAuth();
   const accent: Accent = lang ?? auth?.settings?.accent ?? 'en-US';
   const { supported, speaking, speak } = useSpeech(accent);
-  const label = supported ? zh.word.speak : zh.word.speechUnsupported;
+  const canAct = supported || onClick !== undefined;
+  const label = supported ? zh.word.speak : onClick ? zh.word.replayDance : zh.word.speechUnsupported;
 
   return (
     <Button
@@ -32,11 +34,11 @@ export function SpeakButton({ text, lang, size = 'md', className, onClick }: Spe
       className={cx('speak', speaking && 'is-speaking', className)}
       aria-label={label}
       title={label}
-      disabled={!supported}
+      disabled={!canAct}
       onClick={(e) => {
         e.stopPropagation(); // a card tap reveals the back; pronouncing must not
         onClick?.(e);
-        speak(text, accent);
+        if (supported) speak(text, accent);
       }}
     >
       <SpeakerIcon />

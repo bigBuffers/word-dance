@@ -205,6 +205,12 @@ export default function StudyPage() {
   const currentDisplay = current?.word.display ?? null;
   const autoPronounce = settings?.auto_pronounce ?? false;
   const accent = settings?.accent ?? 'en-US';
+  // word dance (FRONTEND §5.1.1, §6.5): a card plays the dance when its front face mounts on a word's first exposures —
+  // new / review / extra cards with srs.repetitions < 3, never screen items (`danceAutoplay`, played in the mount's layout
+  // phase so the word never flashes whole first); 🔊 (WordHeader) and key P (`danceToken`) replay it at any time
+  const danceMode = settings?.dance_mode ?? 'full';
+  const [danceToken, setDanceToken] = useState(0);
+  const danceAutoplay = danceMode !== 'off' && current !== null && current.kind !== 'screen' && (current.kind === 'new' || (current.mine?.srs.repetitions ?? 0) < 3);
   useEffect(() => {
     shownAt.current = Date.now();
     setHint(false);
@@ -554,7 +560,11 @@ export default function StudyPage() {
       '3': () => current && current.kind !== 'screen' && queue.revealed && onGrade(current, 'good'),
       '4': () => current && current.kind !== 'screen' && queue.revealed && onMaster(current),
       s: () => current && onSkip(current),
-      p: () => current && speak(current.word.display, accent),
+      p: () => {
+        if (!current) return;
+        speak(current.word.display, accent);
+        if (danceMode !== 'off' && current.kind !== 'screen') setDanceToken((t) => t + 1);
+      },
       z: () => setZhForced((v) => !v),
       h: () => setHint((v) => !v),
       u: () => {
@@ -637,6 +647,7 @@ export default function StudyPage() {
             zhForced={zhForced}
             accent={settings?.accent}
             onlyStages={settings?.stages}
+            danceMode={danceMode}
             position={Math.min(replayIndex + 1, list.length)}
             total={list.length}
           />
@@ -703,6 +714,9 @@ export default function StudyPage() {
           total={total}
           accent={settings?.accent}
           onlyStages={settings?.stages}
+          danceMode={danceMode}
+          danceToken={danceToken}
+          danceAutoplay={danceAutoplay}
           onRequestContent={() => void requestContent(current)}
           requestingContent={requestingContent}
         />

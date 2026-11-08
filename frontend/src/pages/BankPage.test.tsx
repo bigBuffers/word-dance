@@ -141,7 +141,7 @@ describe('briefOf', () => {
       bnc: 10,
       forms: [{ form: 'abandoned', kind: 'p' }],
       source: 'seed',
-      confusables: ['abundant'],
+      confusables: ['abundant'], dance: null,
     };
     const brief = briefOf(word);
     expect(brief).toEqual({

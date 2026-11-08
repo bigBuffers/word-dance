@@ -156,9 +156,11 @@ def test_word_brief_stage_min_spans_the_five_indexes():
 def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.WordBrief.model_fields) == {"id", "lemma", "display", "kind", "phonetic", "translation_short", "stages", "stage_min", "cet6_star", "frq", "collins", "oxford", "difficulty", "is_public", "is_valid_english", "my_state", "content_state", "image_state"}
     assert set(schemas.TodayCounts.model_fields) == {"total", "done", "review", "review_done", "new", "new_done", "screen", "screen_done", "extra", "extra_done", "pending_content", "deferred_reviews"}
-    assert set(schemas.Settings.model_fields) == {"timezone", "push_time", "push_enabled", "daily_new_count", "daily_screen_count", "max_reviews", "stages", "current_stage", "show_images", "zh_examples", "auto_pronounce", "accent", "email_enabled", "webhook_enabled", "webhook_url", "webhook_format", "next_push_at", "email_verified", "updated_at"}
+    assert set(schemas.Settings.model_fields) == {"timezone", "push_time", "push_enabled", "daily_new_count", "daily_screen_count", "max_reviews", "stages", "current_stage", "show_images", "zh_examples", "auto_pronounce", "accent", "dance_mode", "email_enabled", "webhook_enabled", "webhook_url", "webhook_format", "next_push_at", "email_verified", "updated_at"}
     assert set(schemas.StudyItem.model_fields) == {"item_id", "kind", "position", "result", "skip_count", "requeue_at", "word", "mine", "content", "content_state", "content_deferred_until", "image"}
     assert set(schemas.TodayResponse.model_fields) == {"status", "local_date", "push_time", "next_push_at", "can_build_now", "batch", "streak_days", "goal_met", "added", "previous_open_batch", "suggestions_open"}
     assert set(schemas.GradeResponse.model_fields) == {"item", "mine", "next_due_zh", "mastery_suggested", "today", "duplicate", "study_item"}
     assert "confusables" in schemas.WordDetailWord.model_fields and "confusables" in schemas.StudyItemWord.model_fields
+    assert "dance" in schemas.WordDetailWord.model_fields and "dance" in schemas.StudyItemWord.model_fields
+    assert set(schemas.DanceSpec.model_fields) == {"version", "letters", "stress", "marks", "source"} and set(schemas.DanceMarks.model_fields) == {"double", "silent"}
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}

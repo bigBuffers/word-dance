@@ -415,7 +415,7 @@ def test_upgrade_0011_renumbers_stages_and_rebuilds_two_tables(settings, tmp_pat
         if (14, "learn_rank") in result.applied:
             expected_cols.append("learn_rank")  # 0014_learn_rank.sql: one ADD COLUMN, appended after the 0011 layout (test_db_0014.py)
         assert words_cols == expected_cols
-        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_settings_cols
+        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == [*before_settings_cols, "dance_mode"]  # 0011 keeps the list; 0015 appends one column
         ddl = {r["name"]: r["sql"] for r in c.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}
         assert "CHECK (stage_min BETWEEN 1 AND 5)" in ddl["words"] and "CHECK (stage_xs   IN (0,1))" in ddl["words"]
         assert "CHECK (difficulty BETWEEN 1 AND 5)" in ddl["words"]  # unchanged scale

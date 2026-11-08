@@ -28,7 +28,7 @@ vi.mock('@/api/endpoints', () => ({
 }));
 vi.mock('@/auth/AuthContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/auth/AuthContext')>();
-  const fake = { user: { id: 1 }, settings: { timezone: 'UTC', auto_pronounce: false, accent: 'en-US', zh_examples: 'tap', show_images: false, stages: ['xs', 'cet6'] } };
+  const fake = { user: { id: 1 }, settings: { timezone: 'UTC', auto_pronounce: false, accent: 'en-US', zh_examples: 'tap', dance_mode: 'full', show_images: false, stages: ['xs', 'cet6'] } };
   return { ...actual, useAuth: () => fake, useOptionalAuth: () => fake };
 });
 vi.mock('@/components/layout/AppLayout', () => ({ setTodayUngraded: () => undefined }));
@@ -93,7 +93,7 @@ function item(id: number, over: Partial<StudyItem> = {}): StudyItem {
       translation: null,
       pos: null,
       forms: [],
-      confusables: [],
+      confusables: [], dance: null,
     },
     mine: mine(id),
     content: null,
@@ -301,5 +301,57 @@ describe('StudyPage', () => {
     renderStudy();
     await vi.waitFor(() => screen.getByRole('group', { name: 'w1' }));
     expect(chipTexts()).toEqual(expected);
+  });
+});
+
+describe('StudyPage word dance (FRONTEND §5.1.1, §6.5; element.animate stubbed)', () => {
+  const spec = { version: 1 as const, letters: ['w', '1'], stress: 0, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+  const danced = (id: number, over: Partial<StudyItem> = {}): StudyItem => {
+    const it = item(id, over);
+    it.word = { ...it.word, dance: spec };
+    return it;
+  };
+  let animate: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(new Date(T0));
+    window.localStorage.clear();
+    animate = vi.fn(() => ({ finished: Promise.resolve(), cancel: () => undefined }));
+    Object.defineProperty(Element.prototype, 'animate', { value: animate, configurable: true, writable: true });
+  });
+  afterEach(() => {
+    delete (Element.prototype as unknown as { animate?: unknown }).animate;
+    vi.useRealTimers();
+    window.localStorage.clear();
+  });
+
+  it('a new card dances on show (autoplay) and shows the syllable chips; key P replays it', async () => {
+    vi.mocked(getToday).mockResolvedValue(today([danced(1)]));
+    const { container } = renderStudy();
+    await vi.waitFor(() => expect(container.querySelector('.dword')).not.toBeNull());
+    expect(within(screen.getByRole('list', { name: zh.word.syllables })).getAllByRole('listitem').map((c) => c.textContent)).toEqual(['w', '1']);
+    const steps = animate.mock.calls.length;
+    expect(steps).toBeGreaterThan(0); // the mount-time autoplay of the first exposure
+    fireEvent.keyDown(window, { key: 'p' });
+    await flush();
+    expect(animate.mock.calls.length).toBe(2 * steps);
+  });
+
+  it('a review with three repetitions keeps the chips but does not dance on show; a screen item never dances', async () => {
+    vi.mocked(getToday).mockResolvedValue(today([danced(1, { kind: 'review', mine: mine(1, { state: 'learning', srs: { ...mine(1).srs, repetitions: 3, interval_days: 8 } }) })]));
+    const first = renderStudy();
+    await vi.waitFor(() => expect(first.container.querySelector('.dword')).not.toBeNull());
+    expect(screen.getByRole('list', { name: zh.word.syllables })).toBeTruthy();
+    expect(animate).not.toHaveBeenCalled();
+    first.unmount();
+
+    vi.mocked(getToday).mockResolvedValue(today([danced(2, { kind: 'screen' })]));
+    const second = renderStudy();
+    await vi.waitFor(() => expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('w2'));
+    expect(second.container.querySelector('.dword')).toBeNull();
+    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    fireEvent.keyDown(window, { key: 'p' });
+    await flush();
+    expect(animate).not.toHaveBeenCalled();
   });
 });

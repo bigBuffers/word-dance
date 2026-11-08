@@ -429,6 +429,9 @@ function LearnSection({ settings }: { settings: Settings }) {
         <Switch label={zh.settings.autoPronounce} checked={settings.auto_pronounce} onChange={(v) => void save({ auto_pronounce: v })} />
       </div>
       <div className="settings__row">
+        <Switch label={zh.settings.dance} description={zh.settings.danceHint} checked={settings.dance_mode !== 'off'} onChange={(v) => void save({ dance_mode: v ? 'full' : 'off' })} />
+      </div>
+      <div className="settings__row">
         <span id="settings-accent">{zh.settings.accent}</span>
         <Segmented
           size="sm"

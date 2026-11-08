@@ -42,7 +42,7 @@ function item(over: Partial<StudyItem> = {}): StudyItem {
       translation: 'v. give up; desert\nn. wild abandon',
       pos: 'n:4/v:96',
       forms: ['abandoned', 'abandoning', 'abandons'],
-      confusables: ['abundant'],
+      confusables: ['abundant'], dance: null,
     },
     mine: {
       id: 9,
@@ -254,5 +254,47 @@ describe('bottom bar offset (toasts stack above the grade bar)', () => {
     renderCard({ readOnly: true, item: item({ result: 'good' }) });
     expect(root.classList.contains('has-bottom-bar')).toBe(false);
     rect.mockRestore();
+  });
+});
+
+describe('StudyCard word dance (FRONTEND §5.1.1, §6.5)', () => {
+  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+
+  it('danceMode full → the headword dances and the syllable chips mark the stressed chunk on the front and on the back', () => {
+    const danced = item();
+    danced.word = { ...danced.word, dance: spec };
+    const { rerender, onReveal, onGrade, onMaster, onSkip, onRequestContent } = renderCard({ item: danced, danceMode: 'full', danceToken: 0 });
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('abandon');
+    const chips = within(screen.getByRole('list', { name: zh.word.syllables })).getAllByRole('listitem');
+    expect(chips.map((c) => c.textContent)).toEqual(['a', 'ban', 'don']);
+    expect(chips.map((c) => c.classList.contains('syl__chip--stressed'))).toEqual([false, true, false]);
+    rerender(
+      <MemoryRouter>
+        <StudyCard item={danced} revealed zhMode="tap" showImage={false} preview={preview} onReveal={onReveal} onGrade={onGrade} onMaster={onMaster} onSkip={onSkip} onRequestContent={onRequestContent} danceMode="full" danceToken={1} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('abandon');
+    expect(screen.getByRole('list', { name: zh.word.syllables })).toBeTruthy();
+  });
+
+  it('a screen item never dances: plain headword, no chips, even with danceMode full and a spec', () => {
+    const danced = item({ kind: 'screen' });
+    danced.word = { ...danced.word, dance: spec };
+    const { container } = renderCard({ item: danced, danceMode: 'full', danceToken: 1, danceAutoplay: true });
+    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    expect(container.querySelector('.dword')).toBeNull();
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('abandon');
+  });
+
+  it('danceMode off (the default) and a null spec render the plain headword without chips', () => {
+    const danced = item();
+    danced.word = { ...danced.word, dance: spec };
+    const first = renderCard({ item: danced });
+    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    expect(first.container.querySelector('.dword')).toBeNull();
+    first.unmount();
+    const second = renderCard({ danceMode: 'full' }); // item().word.dance is null
+    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    expect(second.container.querySelector('.dword')).toBeNull();
   });
 });

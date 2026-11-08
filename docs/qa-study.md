@@ -138,3 +138,12 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 - [ ] Dark mode (`prefers-color-scheme: dark`) keeps every text ≥ 4.5:1; focus rings visible on every control;
       every icon button has an `aria-label`; the study card is `role="group"`.
 - [ ] `prefers-reduced-motion`: no ring animation, no toast / sheet motion.
+
+## 7. 单词之舞（P1，FRONTEND §6.5）
+
+- [ ] 设置 → 学习设置 有「单词之舞」开关（默认开）和说明文字；关掉后 `PUT /api/settings {dance_mode:'off'}`，学习卡与详情页的词头是普通文字、没有音节芯片。
+- [ ] 开着时，新词卡出现：字母按音节依次入场，重读音节跳得最高并变色；词下方音节芯片（如 `rab · bit`）标出重读音节；单音节词没有芯片、只有一拍；不发音字母（night 的 gh、knife 的 k、magic e）颜色变浅、不跳。
+- [ ] 点 🔊 或按 `P`：再跳一次并朗读；翻面不重跳；`repetitions ≥ 3` 的复习卡出现时不自动跳；推荐词（筛词卡）不跳。
+- [ ] 系统「减弱动态效果」打开：不动，重读音节静态着色，信息不丢。
+- [ ] 手机 360px：长词（supermarket、grandmother）不换行、不溢出；整段动画不超过 2.5 s；低端 Android 上不卡顿。
+- [ ] 详情页：词头下有音节芯片，🔊 重放；词组（ice cream）、缩写（TV、Mr.）没有芯片，词头照旧。

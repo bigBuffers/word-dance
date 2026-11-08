@@ -22,7 +22,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
     stages: ['cet4'],
     current_stage: 'cet4',
     show_images: true,
-    zh_examples: 'tap',
+    zh_examples: 'tap', dance_mode: 'full',
     auto_pronounce: true,
     accent: 'en-US',
     email_enabled: false,
