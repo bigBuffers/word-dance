@@ -271,7 +271,7 @@
 ## 12. P3 第一批实现记录（2026-11-08 晚，sqin：「P3 加 hop 和 onto 两个原语，设置页开三档」）
 
 - **两个原语**：`hop`（jump / hop / skip：整词以脚底为变换原点蹲下 → 弹起 1.3 em → 落地压扁 → 再小跳一次 → 回到原样，1.3 s，没有舞台物件、没有姿态）和 `onto`（on / onto / upon：从左上方划一道弧落到台子顶上、落地时微微压扁、台子跟着沉一下，1.3 s；新舞台物件 `shelf`，台面在基线处，字母（含下伸部）画在台子前面）。库从 28 个到 30 个；枚举顺序 = 提示词舞步库顺序（hop 在 fall 之后，onto 在 arc 之后），`test_schemas` 把 `dance_v1.json`、`schemas.DancePrimitive`、`models.DanceItem` 与提示词的舞步库锁成一份，types.ts 由 `check_contract` 对齐，API.md §9 的 ts 块由 `test_docs_contract` 锁定为与 types.ts 逐字相同。
-- **提示词** `dance-v2`（`word_dances.prompt_version`）：只加两行舞步；已存的 `dance-v1` spec 全部有效（枚举只增不减），不重跑小学 600 词，只对评审确认的库空缺 `jump`、`on` 用 `wd dance-annotate --word jump --word on --force` 重标（和 worker / farmer 的切块重标一起受当日舞步子预算限制，排在 11-09 00:05 执行）。
+- **提示词** `dance-v2`（`word_dances.prompt_version`）：只加两行舞步；已存的 `dance-v1` spec 全部有效（枚举只增不减），不重跑小学 600 词，只对评审确认的库空缺 `jump`、`on` 用 `wd dance-annotate --word jump --word on --force` 重标（和 worker / farmer 的切块重标一起受当日舞步子预算限制，11-09 00:05 已执行：一次合并调用 $0.019，jump → hop、on → onto；worker / farmer 的切块仍是 wor·ker / far·mer——提示词第 1 条要模型「除非明显错误，否则保留规则层建议」，音节上的 VC·CV 切分并不「明显错误」，所以 -er 后缀切分要在规则层做，见下方「留给以后」）。
 - **设置页三档**：学习设置里的「单词之舞」从开关改为分段控件 全部 / 只拼读 / 关（`dance_mode` = `full` / `form_only` / `off`，和例句译文、口音同一控件），说明文字另起一行；文案 `settings.danceModes` + 改写的 `settings.danceHint`，FRONTEND §8 镜像。
 - **不变**：数据库（无迁移）、入队与预算、P1 / P2 的播放时机、`form_only` 的含义。
 - **测试**：`dances.test`（30 原语 ≤ 2.5 s；hop 整词起跳后回到原样；onto 从左上方进场、落定后回到原样，台子步不带效果级 easing、在落地偏移之后才下沉）、`DancingWord`（onto 画 shelf，台子步真的落在舞台物件上）、`test_docs_contract`（API.md §9 与 types.ts 逐字相同）、`SettingsPage`（三档保存 form_only / off / full，顺序 全部 / 只拼读 / 关）、`test_dance_annotate.build_spec`（hop / onto 不带参数，多余的 n / color 丢弃）、`test_schemas`（三份枚举与提示词同序）。

@@ -40,4 +40,12 @@
 ## 6 未决
 
 - 线索复习（P3 其余部分）、手势（P4）、初高中词缀舞（P5）按设计稿分期。
-- 规则层的 -er 后缀切分（work·er / farm·er）。
+- 规则层的 -er 后缀切分（work·er / farm·er）：11-09 00:05 的强制重标没有改掉它（§7）。提示词第 1 条要模型「除非明显错误，否则保留规则层建议」，而音节上的 VC·CV 切分 wor·ker 并不「明显错误」，所以这两个词要靠规则层做 -er 后缀切分（词干是已知词时保留词干：work·er、farm·er、teach·er），不是再喂一次模型。
+
+## 7 上线记录
+
+- 11-08 17:28 `bb2d1b5` 上线（`frontend-releases/bb2d1b5`，重启后 2 秒内健康，schema 16，`jobs` / `ai_calls` 行数不变）。
+- 11-09 00:05 四个强制重标任务（2890 worker、2891 farmer、2892 jump、2893 on）由 worker 在一次合并调用里完成：`ai_calls` 1 条 success、4 词、$0.019（每词 $0.004739）；`word_dances` 596 行 = 592 活动 + 4 作废，活动 spec 588 个 `dance-v1` + 4 个 `dance-v2`。
+- `jump` → `hop`（reason 跳跃的动作），`on` → `onto`（reason 在……上的位置），切块不变（jump / on 各一块）。`worker` / `farmer` 重标后与旧 spec 完全相同（wor·ker / far·mer，none，名词靠图），见 §6。
+- 00:06 看护脚本把 `WD_AI_DAILY_BUDGET_USD` 从临时的 6.00 改回 3.00 并重启，`.env` 里 TEMPORARY 行为 0；00:12 健康检查正常。
+- 审核页按重标结果重建并发布到原链接（hop / onto 各一组；脚注注明四个词于 11-09 00:05 用 dance-v2 重标）。
