@@ -21,12 +21,22 @@ def _clean_registry():
     registry._HANDLERS.update(saved)
 
 
+def _jobs_check_list() -> set[str]:
+    """The jobs.type CHECK list of the NEWEST migration that (re)creates `jobs` (0001, rebuilt by 0016_word_dances.sql)."""
+    import re
+    from pathlib import Path
+
+    files = sorted((Path(registry.__file__).resolve().parents[1] / "migrations").glob("*.sql"))
+    for path in reversed(files):
+        sql = path.read_text(encoding="utf-8")
+        m = re.search(r"CREATE TABLE jobs(?:_new)?\s*\(.*?type\s+TEXT NOT NULL CHECK \(type IN \(([^)]*)\)\)", sql, re.S)
+        if m:
+            return {t.strip().strip("'") for t in m.group(1).split(",")}
+    raise AssertionError("no migration creates jobs")
+
+
 def test_job_types_match_the_schema_check_list():
-    sql = (registry.__file__ and __import__("pathlib").Path(registry.__file__).resolve().parents[1] / "migrations" / "0001_init.sql").read_text(encoding="utf-8")
-    start = sql.index("CREATE TABLE jobs")
-    check = sql[start:].split("type         TEXT NOT NULL CHECK (type IN (")[1].split("))")[0]
-    in_schema = {t.strip().strip("'") for t in check.split(",")}
-    assert in_schema == set(JOB_TYPES)
+    assert _jobs_check_list() == set(JOB_TYPES)
 
 
 def test_register_and_registered_types():

@@ -89,7 +89,7 @@ def study_item_dict(conn: sqlite3.Connection, user_id: int, item_id: int, *, now
         "pos": word.get("pos") or None,
         "forms": words.forms_of(conn, wid),
         "confusables": words.confusables_for(conn, user_id, str(word["lemma"])),
-        "dance": dance.spec_for(word.get("display") or word.get("lemma"), word.get("phonetic")),
+        "dance": dance.spec_for_word(conn, word),
     }
     requeue_at = None
     if mine is not None and int(mine["srs"]["step"]) == 1 and mine["srs"]["due_at"] and str(mine["srs"]["due_at"]) > now:

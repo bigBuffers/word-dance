@@ -282,5 +282,6 @@ def test_run_once_fails_jobs_without_handler_and_crashing_handlers(conn, ctx):
 def test_limit_for(settings):
     assert queue.limit_for("generate_content", settings) == settings.ai_batch_size == 10
     assert queue.limit_for("lookup_word", settings) == 20
+    assert queue.limit_for("generate_dance", settings) == 20  # 单词之舞 annotations: 20 words per call (CLAUDE_INTEGRATION §6.2)
     for t in ("consolidate_bank", "generate_svg", "prewarm_plan", "fetch_image", "send_email", "send_webhook"):
         assert queue.limit_for(t, settings) == 1

@@ -31,8 +31,9 @@ def test_estimates_and_per_call_budgets(settings):
     assert budget.estimate("content", 1) == pytest.approx(0.0095)
     assert budget.estimate("lookup", 20) == pytest.approx(0.044)
     assert budget.estimate("consolidate", 80) == 0.05 and budget.estimate("svg") == 0.03 and budget.estimate("probe") == 0.01
-    assert [budget.budget_for(settings, k) for k in ("content", "lookup", "consolidate", "svg", "probe")] == [0.25, 0.15, 0.40, 0.10, 0.05]
-    assert [budget.timeout_for(settings, k) for k in ("content", "lookup", "consolidate", "svg", "probe")] == [180, 120, 240, 120, 60]
+    assert budget.estimate("dance", 20) == pytest.approx(0.07)  # 单词之舞 annotations, 20 words per call
+    assert [budget.budget_for(settings, k) for k in ("content", "lookup", "consolidate", "svg", "dance", "probe")] == [0.25, 0.15, 0.40, 0.10, 0.25, 0.05]
+    assert [budget.timeout_for(settings, k) for k in ("content", "lookup", "consolidate", "svg", "dance", "probe")] == [180, 120, 240, 120, 120, 60]
 
 
 def test_windows_and_resume_instants_in_wd_tz():
@@ -168,3 +169,18 @@ def test_spend_summary_numbers(conn, settings):
     assert s["flag_tier"] == 1 and s["enabled"] is True and s["paused_until"] is None
     assert s["avg_cost_per_word_7d"] == pytest.approx(0.004) and s["last_error"] == "error"
     assert s["daily_budget_usd"] == 3.0 and s["monthly_budget_usd"] == 40.0 and s["svg_daily_budget_usd"] == 0.5
+    assert s["dance_today_usd"] == 0.0 and s["dance_daily_budget_usd"] == 0.5
+
+
+def test_dance_sub_cap_defers_the_next_batch_and_logs_budget_dance_once(conn, settings):
+    cfg = replace(settings, ai_dance_daily_budget_usd=0.50)
+    for _ in range(7):
+        add_call(conn, kind="dance", cost=0.07, words=20, reserved=0.07)
+    assert budget.dance_spent_today(conn, cfg, NOW) == pytest.approx(0.49)
+    assert budget.can_spend(conn, "dance", 20, 50, NOW, cfg=cfg) == (True, None)  # the 8th batch still fits
+    add_call(conn, kind="dance", cost=0.07, words=20, reserved=0.07)
+    assert budget.can_spend(conn, "dance", 20, 50, NOW, cfg=cfg) == (False, "2026-10-14T16:05:00Z")  # the 9th is deferred to the next day
+    budget.can_spend(conn, "dance", 20, 50, NOW, cfg=cfg)
+    assert events(conn, "budget_dance") == 1
+    assert budget.can_spend(conn, "content", 1, 20, NOW, cfg=cfg) == (True, None) and budget.can_spend(conn, "svg", 1, 20, NOW, cfg=cfg) == (True, None)  # other kinds unaffected
+    assert budget.can_spend(conn, "dance", 20, 50, NOW, cfg=replace(cfg, ai_dance_daily_budget_usd=0)) == (False, "2026-10-14T16:05:00Z")

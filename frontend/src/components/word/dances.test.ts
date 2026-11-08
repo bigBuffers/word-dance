@@ -3,18 +3,19 @@
 // together at the end, and the whole choreography of the longest 小学 words stays under 2.5 s.
 import { describe, expect, it } from 'vitest';
 import type { DanceSpec } from '@/api/types';
-import { BEAT_MS, BEAT_STRESSED_MS, ENTER_MS, LETTER_MS, LETTER_MS_LONG, SYLLABLE_PAUSE_MS, TWIN_MS, beatDuration, beatPlan, danceDuration, dancePlan, spellDuration, spellPlan, syllableIndexes, twinPlan } from './dances';
+import type { DancePrimitive } from '@/api/types';
+import { BEAT_MS, BEAT_STRESSED_MS, ENTER_MS, LETTER_MS, LETTER_MS_LONG, OBJECT_OF, SEMANTIC_GAP_MS, SYLLABLE_PAUSE_MS, TWIN_MS, beatDuration, beatPlan, danceDuration, dancePlan, ghostCount, poseColor, semanticDuration, semanticPlan, spellDuration, spellPlan, syllableIndexes, twinPlan } from './dances';
 
-const rabbit: DanceSpec = { version: 1, letters: ['rab', 'bit'], stress: 0, marks: { double: [[2, 3]], silent: [] }, source: 'rule' };
-const night: DanceSpec = { version: 1, letters: ['night'], stress: 0, marks: { double: [], silent: [2, 3] }, source: 'rule' };
-const banana: DanceSpec = { version: 1, letters: ['ba', 'na', 'na'], stress: 1, marks: { double: [], silent: [] }, source: 'rule' };
-const supermarket: DanceSpec = { version: 1, letters: ['su', 'per', 'mar', 'ket'], stress: 0, marks: { double: [], silent: [] }, source: 'rule' };
-const uncle: DanceSpec = { version: 1, letters: ['un', 'cle'], stress: null, marks: { double: [], silent: [] }, source: 'rule' };
+const rabbit: DanceSpec = { version: 1, letters: ['rab', 'bit'], stress: 0, marks: { double: [[2, 3]], silent: [] }, semantic: null, source: 'rule' };
+const night: DanceSpec = { version: 1, letters: ['night'], stress: 0, marks: { double: [], silent: [2, 3] }, semantic: null, source: 'rule' };
+const banana: DanceSpec = { version: 1, letters: ['ba', 'na', 'na'], stress: 1, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
+const supermarket: DanceSpec = { version: 1, letters: ['su', 'per', 'mar', 'ket'], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
+const uncle: DanceSpec = { version: 1, letters: ['un', 'cle'], stress: null, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
 // the longest 小学 choreographies (8 letters, 3–4 syllables, doubled letters) — the real worst cases, not hand-picked easy ones
-const tomorrow: DanceSpec = { version: 1, letters: ['to', 'mor', 'row'], stress: 1, marks: { double: [[4, 5]], silent: [] }, source: 'rule' };
-const umbrella: DanceSpec = { version: 1, letters: ['um', 'brel', 'la'], stress: 1, marks: { double: [[5, 6]], silent: [] }, source: 'rule' };
-const january: DanceSpec = { version: 1, letters: ['Jan', 'u', 'a', 'ry'], stress: 0, marks: { double: [], silent: [] }, source: 'rule' };
-const february: DanceSpec = { version: 1, letters: ['Feb', 'ru', 'a', 'ry'], stress: 0, marks: { double: [], silent: [] }, source: 'rule' };
+const tomorrow: DanceSpec = { version: 1, letters: ['to', 'mor', 'row'], stress: 1, marks: { double: [[4, 5]], silent: [] }, semantic: null, source: 'rule' };
+const umbrella: DanceSpec = { version: 1, letters: ['um', 'brel', 'la'], stress: 1, marks: { double: [[5, 6]], silent: [] }, semantic: null, source: 'rule' };
+const january: DanceSpec = { version: 1, letters: ['Jan', 'u', 'a', 'ry'], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
+const february: DanceSpec = { version: 1, letters: ['Feb', 'ru', 'a', 'ry'], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
 
 describe('dances', () => {
   it('maps every letter to its syllable chunk', () => {
@@ -71,5 +72,66 @@ describe('dances', () => {
     expect(plan).toHaveLength(6 + 6 + 2);
     const end = Math.max(...plan.map((s) => Number(s.options.delay) + Number(s.options.duration)));
     expect(end).toBe(danceDuration(rabbit));
+  });
+});
+
+describe('semantic dances (语义舞, FRONTEND §6.5)', () => {
+  const PRIMITIVES: DancePrimitive[] = ['rise', 'fall', 'grow', 'shrink', 'dash', 'creep', 'enter', 'exit', 'arc', 'under', 'behind', 'between', 'split', 'join', 'shiver', 'shimmer', 'wave', 'droop', 'stretch', 'squash', 'thud', 'float', 'spin', 'repeat', 'multiply', 'dim', 'glow', 'color'];
+  const withSemantic = (primitive: DancePrimitive, params: { n?: number; color?: 'red' | 'black' } = {}): DanceSpec => ({ ...banana, letters: ['ba', 'na', 'na'], semantic: { primitive, params } });
+
+  it('every primitive yields a plan whose steps point at real targets and ends within 2.5 s', () => {
+    for (const primitive of PRIMITIVES) {
+      const spec = withSemantic(primitive, primitive === 'color' ? { color: 'red' } : primitive === 'multiply' ? { n: 3 } : {});
+      const plan = semanticPlan(spec, 'red');
+      expect(plan.length, primitive).toBeGreaterThan(0);
+      for (const step of plan) {
+        expect(['letter', 'word', 'ghost', 'stage']).toContain(step.target);
+        if (step.target === 'letter') expect(step.index).toBeLessThan(6);
+        if (step.target === 'ghost') expect(step.index).toBeLessThan(ghostCount(spec));
+        expect(step.keyframes.length).toBeGreaterThan(1);
+      }
+      expect(semanticDuration(spec), primitive).toBeLessThanOrEqual(2500);
+    }
+  });
+
+  it('a spec without a semantic has no semantic plan; black keeps the ink and darkens like dim, white glows like glow', () => {
+    expect(semanticPlan(rabbit, 'red')).toEqual([]);
+    expect(semanticDuration(rabbit)).toBe(0);
+    expect(poseColor(withSemantic('color', { color: 'black' }))).toBeNull();
+    expect(semanticPlan(withSemantic('color', { color: 'black' }), 'red')).toEqual(semanticPlan(withSemantic('dim'), 'red'));
+    expect(semanticPlan({ ...banana, letters: ['ba', 'na', 'na'], semantic: { primitive: 'color', params: { color: 'white' } } }, 'red')).toEqual(semanticPlan(withSemantic('glow'), 'red'));
+  });
+
+  it('the colour pour starts from the heading ink (the pose is already worn) and ends in the resolved pose colour', () => {
+    const plan = semanticPlan(withSemantic('color', { color: 'red' }), 'x', 0, { ink: 'rgb(29, 36, 51)', pose: 'rgb(196, 60, 60)' });
+    expect(plan.length).toBe(6); // one step per letter (banana)
+    expect(plan[0]?.keyframes[0]?.color).toBe('rgb(29, 36, 51)');
+    expect(plan.every((s) => s.options.fill === 'backwards')).toBe(true); // each letter holds the ink until its turn
+    expect(plan[0]?.keyframes.at(-1)?.color).toBe('rgb(196, 60, 60)');
+    // without the DOM colours the plan still targets the token and starts from currentColor (what the static tests see)
+    const bare = semanticPlan(withSemantic('color', { color: 'red' }), 'x');
+    expect(bare[0]?.keyframes.at(-1)?.color).toBe('var(--pose-red)');
+  });
+
+  it('poses, objects and ghosts follow the primitive', () => {
+    expect(poseColor(withSemantic('color', { color: 'red' }))).toBe('var(--pose-red)');
+    expect(poseColor(withSemantic('shiver'))).toBe('var(--pose-blue)');
+    expect(poseColor(withSemantic('rise'))).toBeNull();
+    expect(OBJECT_OF.enter).toBe('box');
+    expect(OBJECT_OF.under).toBe('table');
+    expect(OBJECT_OF.rise).toBeUndefined();
+    expect(ghostCount(withSemantic('multiply', { n: 3 }))).toBe(2);
+    expect(ghostCount(withSemantic('multiply', { n: 2 }))).toBe(1);
+    expect(ghostCount(withSemantic('multiply'))).toBe(2);
+    expect(ghostCount(withSemantic('grow'))).toBe(0);
+    expect(semanticPlan(withSemantic('multiply', { n: 2 }), 'red').every((s) => s.target === 'ghost')).toBe(true);
+    expect(semanticPlan(withSemantic('between'), 'red').some((s) => s.target === 'stage')).toBe(true);
+  });
+
+  it('a full play = the form dance followed by the semantic dance after SEMANTIC_GAP_MS (sequenced by DancingWord, pinned here as durations)', () => {
+    const spec = withSemantic('rise');
+    expect(SEMANTIC_GAP_MS).toBeGreaterThan(0);
+    expect(danceDuration(spec) + SEMANTIC_GAP_MS + semanticDuration(spec)).toBeLessThanOrEqual(5500); // both halves within a 5.5 s replay
+    expect(semanticPlan(rabbit, 'red')).toEqual([]); // no semantic → the full play is the form dance alone
   });
 });

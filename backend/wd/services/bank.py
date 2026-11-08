@@ -27,7 +27,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ValidationError
 
-from .. import db
+from .. import dance, db
 from ..clock import UTC, day_start, local_date as clock_local_date, now_iso, parse_iso, to_iso
 from ..errors import ApiError, pydantic_error_zh
 from ..jobs import queue
@@ -517,19 +517,23 @@ def clear_attention(conn: sqlite3.Connection, user_word_id: int, now: str) -> No
     )
 
 
-def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str) -> int | None:
-    """``generate_content`` for a VALIDATED word lacking content (DESIGN §4 / CLAUDE_INTEGRATION §6.1 enqueue rule).
+def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str, cfg: Any = None) -> int | None:
+    """``generate_content`` for a VALIDATED word lacking content (DESIGN §4 / CLAUDE_INTEGRATION §6.1 enqueue rule), plus the
+    word's 单词之舞 annotation (WORD_DANCE_DESIGN §6.2) when it has none yet.
 
     Never for ``is_valid_english IS NULL`` (``lookup_word`` is a provisional word's single content trigger) nor for
-    ``is_valid_english = 0`` or merged words. Sets ``words.content_state = 'queued'``.
+    ``is_valid_english = 0`` or merged words. Sets ``words.content_state = 'queued'``. The ``generate_dance`` job is enqueued
+    AFTER the content job and one priority notch below it (11 / 21 / 31), so a learner waiting for content never waits behind a
+    dance call; it is gated, deduped and budget-checked by ``wd.dance.enqueue_if_needed`` itself. Returns the content job id.
     """
     if word.get("is_valid_english") != 1 or word.get("merged_into_word_id") is not None:
         return None
-    if (word.get("content_state") or "none") not in ("none", "failed"):
-        return None
     wid = int(word["id"])
-    job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=int(priority), now=now)
-    conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
+    job_id: int | None = None
+    if (word.get("content_state") or "none") in ("none", "failed"):
+        job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=int(priority), now=now)
+        conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
+    dance.enqueue_if_needed(conn, wid, priority=int(priority) + 1, now=now, cfg=cfg)
     return job_id
 
 

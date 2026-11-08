@@ -14,7 +14,7 @@ import pytest
 
 from wd.jobs import registry
 
-MIGRATION = Path(registry.__file__).resolve().parents[1] / "migrations" / "0001_init.sql"
+MIGRATIONS = Path(registry.__file__).resolve().parents[1] / "migrations"
 OWNERS: dict[str, str] = {
     "generate_content": "wd.ai.content",
     "lookup_word": "wd.ai.lookup",
@@ -24,16 +24,19 @@ OWNERS: dict[str, str] = {
     "fetch_image": "wd.images.handler",
     "send_email": "wd.delivery.email",
     "send_webhook": "wd.delivery.webhook",
+    "generate_dance": "wd.ai.dance",
 }
-WP5_TYPES = ("generate_content", "lookup_word", "consolidate_bank", "generate_svg", "prewarm_plan")
+WP5_TYPES = ("generate_content", "lookup_word", "consolidate_bank", "generate_svg", "prewarm_plan", "generate_dance")
 
 
 def check_list_types() -> set[str]:
-    sql = MIGRATION.read_text(encoding="utf-8")
-    start = sql.index("CREATE TABLE jobs")
-    m = re.search(r"type\s+TEXT NOT NULL CHECK \(type IN \(([^)]*)\)\)", sql[start:])
-    assert m, "jobs.type CHECK list not found"
-    return {t.strip().strip("'") for t in m.group(1).split(",")}
+    """The jobs.type CHECK list of the newest migration that (re)creates `jobs` (0001, rebuilt by 0016_word_dances.sql)."""
+    for path in sorted(MIGRATIONS.glob("*.sql"), reverse=True):
+        sql = path.read_text(encoding="utf-8")
+        m = re.search(r"CREATE TABLE jobs(?:_new)?\s*\(.*?type\s+TEXT NOT NULL CHECK \(type IN \(([^)]*)\)\)", sql, re.S)
+        if m:
+            return {t.strip().strip("'") for t in m.group(1).split(",")}
+    raise AssertionError("jobs.type CHECK list not found")
 
 
 @pytest.fixture(autouse=True)

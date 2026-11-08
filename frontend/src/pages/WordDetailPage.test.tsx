@@ -148,7 +148,7 @@ describe('WordDetailPage', () => {
 });
 
 describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
-  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, semantic: null, source: 'rule' as const };
   beforeEach(() => {
     h.settings.dance_mode = 'full';
   });

@@ -25,6 +25,18 @@
   --good-ink: #22784b;
   --screen-ink: #5b36c9;
 
+  /* 单词之舞 pose colours (FRONTEND §6.5): the rest colour of a colour word / cold / hot / sad headword and the static fallback.
+     Large bold text, so ≥ 3:1 on --bg in each theme (light: deep tones; dark: bright tones) */
+  --pose-red: #c43c3c;
+  --pose-orange: #bf5f0a;
+  --pose-yellow: #967000;
+  --pose-green: #2b7a4b;
+  --pose-blue: #2a63c9;
+  --pose-purple: #6f45b5;
+  --pose-pink: #c2457f;
+  --pose-brown: #8b5a2b;
+  --pose-grey: #6b7683;
+
   /* derived colours */
   --on-brand: #ffffff;
   --brand-soft: color-mix(in srgb, var(--brand) 12%, transparent);
@@ -82,6 +94,15 @@
     --hard-ink: #f0b84a;
     --good-ink: #6fcf97;
     --screen-ink: #b197fc;
+    --pose-red: #ff7b7b;
+    --pose-orange: #ffa94d;
+    --pose-yellow: #ffd43b;
+    --pose-green: #69db7c;
+    --pose-blue: #74c0fc;
+    --pose-purple: #b197fc;
+    --pose-pink: #f783ac;
+    --pose-brown: #d9a066;
+    --pose-grey: #adb5bd;
     --overlay: rgba(0, 0, 0, 0.6);
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.5);
@@ -100,6 +121,15 @@
   --hard-ink: #f0b84a;
   --good-ink: #6fcf97;
   --screen-ink: #b197fc;
+  --pose-red: #ff7b7b;
+  --pose-orange: #ffa94d;
+  --pose-yellow: #ffd43b;
+  --pose-green: #69db7c;
+  --pose-blue: #74c0fc;
+  --pose-purple: #b197fc;
+  --pose-pink: #f783ac;
+  --pose-brown: #d9a066;
+  --pose-grey: #adb5bd;
   --overlay: rgba(0, 0, 0, 0.6);
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.5);

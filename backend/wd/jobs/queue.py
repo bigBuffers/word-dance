@@ -30,16 +30,16 @@ if TYPE_CHECKING:
 
 BACKOFF_MINUTES: tuple[int, ...] = (2, 10, 60)
 STALE_LOCK_MINUTES = 15
-CLAUDE_TYPES: tuple[str, ...] = ("generate_content", "lookup_word", "consolidate_bank", "generate_svg", "prewarm_plan")
+CLAUDE_TYPES: tuple[str, ...] = ("generate_content", "lookup_word", "consolidate_bank", "generate_svg", "prewarm_plan", "generate_dance")
 IO_TYPES: tuple[str, ...] = ("fetch_image", "send_email", "send_webhook")
 MAX_RUN_ONCE_CLAIMS = 10_000
 
 
 def limit_for(type: str, cfg: "Settings") -> int:
-    """Jobs per claim: content ``WD_AI_BATCH_SIZE`` · lookup 20 · everything else 1 (CLAUDE_INTEGRATION §6.2)."""
+    """Jobs per claim: content ``WD_AI_BATCH_SIZE`` · lookup 20 · dance 20 · everything else 1 (CLAUDE_INTEGRATION §6.2)."""
     if type == "generate_content":
         return max(1, int(cfg.ai_batch_size))
-    if type == "lookup_word":
+    if type in ("lookup_word", "generate_dance"):
         return 20
     return 1
 

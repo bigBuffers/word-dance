@@ -520,7 +520,7 @@ def word_detail(conn: sqlite3.Connection, word_id: int, user_id: int, *, now: st
             "forms": forms_with_kind(conn, wid),
             "source": final["source"],
             "confusables": confusables_for(conn, user_id, str(final["lemma"])),
-            "dance": dance.spec_for(final.get("display") or final.get("lemma"), final.get("phonetic")),
+            "dance": dance.spec_for_word(conn, final),
         }
     )
     content_state = final.get("content_state") or "none"

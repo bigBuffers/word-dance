@@ -39,6 +39,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__, db, security
+from .ai import ledger
 from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
 from .delivery.mailer import mailer_from_settings
@@ -389,9 +390,13 @@ def _start_workers(app: FastAPI, conn, instance: str) -> None:
     clock: Clock = app.state.clock
     boot_id: str = app.state.boot_id
     app.state.lease_instance = instance
-    swept = queue.requeue_stale(conn, boot_id, now=clock.now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    start_iso = clock.now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+    swept = queue.requeue_stale(conn, boot_id, now=start_iso)
     if swept:
         log.info("requeued %d stale running job(s) from a previous boot", swept, extra={"event": "stale_sweep"})
+    orphans = ledger.close_orphans(conn, now=start_iso)  # a call this process has not started cannot be running: stop its reservation
+    if orphans:
+        log.info("closed %d ai_calls row(s) left running by a previous boot", orphans, extra={"event": "ledger_sweep"})
 
     def connect():
         return db.connect(cfg.db_path)

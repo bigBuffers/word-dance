@@ -95,6 +95,114 @@
   color: var(--brand-ink);
 }
 
+/* … unless the word wears a semantic pose colour (red red, cold blue): the pose is the meaning's only trace in the static
+   fallback, so it wins over the stress mark (the syllable chips still show the stressed chunk) */
+.dword--static.dword--posed .dword__l--stressed {
+  color: inherit;
+}
+
+/* the word may stand on a small stage with the object its meaning moves against (语义舞, FRONTEND §6.5) */
+.dword-stage {
+  position: relative;
+  display: inline-block;
+  vertical-align: baseline;
+}
+
+.dword .dword__ghost {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.dword-obj {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border-color: var(--muted);
+}
+
+/* in / out: a box the word walks into or out of */
+.dword-stage--box,
+.dword-stage--tree {
+  padding: 0.18em 0.45em 0.1em;
+}
+
+.dword-stage--box .dword-obj {
+  inset: -0.05em -0.1em -0.05em -0.1em;
+  border: 0.09em solid var(--muted);
+  border-radius: 0.25em;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+
+.dword-stage--box[data-primitive='exit'] .dword-obj {
+  right: auto;
+  width: 1.6em;
+  left: -2.4em;
+}
+
+.dword-stage--box[data-primitive='exit'] {
+  margin-left: 2.2em;
+}
+
+/* over: a roof the word flies over */
+.dword-stage--roof {
+  padding-top: 0.9em;
+}
+
+.dword-stage--roof .dword-obj {
+  left: 50%;
+  top: 0;
+  width: 0;
+  height: 0;
+  transform: translateX(-50%);
+  border-left: 0.7em solid transparent;
+  border-right: 0.7em solid transparent;
+  border-bottom: 0.6em solid var(--muted);
+}
+
+/* under: a table the word ducks under */
+.dword-stage--table {
+  padding-top: 0.75em;
+}
+
+.dword-stage--table .dword-obj {
+  left: 0;
+  right: 0;
+  top: 0.15em;
+  height: 0.5em;
+  border-top: 0.14em solid var(--muted);
+  border-left: 0.12em solid var(--muted);
+  border-right: 0.12em solid var(--muted);
+}
+
+/* behind: a tree the word comes out from behind */
+.dword-stage--tree {
+  padding-left: 1.3em;
+}
+
+.dword-stage--tree .dword-obj {
+  left: 0;
+  top: -0.2em;
+  width: 1em;
+  height: 1em;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--good-ink, #2e8b57) 55%, var(--muted));
+  box-shadow: 0.35em 0.9em 0 -0.33em var(--muted);
+}
+
+/* between: two bars that close in */
+.dword-stage--bars {
+  padding-inline: 0.45em;
+}
+
+.dword-stage--bars .dword-obj {
+  inset: 0;
+  border-left: 0.12em solid var(--muted);
+  border-right: 0.12em solid var(--muted);
+}
+
 /* syllable chips under the headword: rab · bit, the stressed chunk filled */
 .syl {
   display: inline-flex;

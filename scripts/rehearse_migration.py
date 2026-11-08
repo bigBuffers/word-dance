@@ -49,6 +49,7 @@ the ``stages_json_known`` invariant is built in from 3.38 — on an older build 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sqlite3
 import sys
 import time
@@ -60,7 +61,7 @@ from wd.diag import LEARN_ORDER_INVARIANTS_FROM_VERSION, STAGE_INVARIANTS, STAGE
 from wd.schemas import STAGE_ORDER
 from wd.services import learn_order
 
-EXPECTED_TABLE_COUNT = 25  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0014 (rebuilds in place, 0014 adds a column)
+EXPECTED_TABLE_COUNT = 26  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26
 BOOKKEEPING_TABLES = frozenset({"schema_migrations", "kv", "system_events"})  # the only tables a migration may grow/shrink
 STAGE_COLUMNS = tuple(f"stage_{code}" for code in STAGE_ORDER)  # the 0011 column order (seed.SEED_COLUMNS order)
 WORD_IMAGES_META_COLUMNS = ("prompt_version", "model", "text_free", "eval_json")  # 0012
@@ -134,6 +135,18 @@ def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r["name"] == column for r in columns(conn, table))
 
 
+def table_digest(conn: sqlite3.Connection, table: str) -> str:
+    """A digest of every row (ordered by id) — equal before and after a rebuild that kept the data."""
+    h = hashlib.sha256()
+    for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY id'):
+        h.update(repr(tuple(row)).encode("utf-8"))
+    return h.hexdigest()
+
+
+def index_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_autoindex%'", (table,))}
+
+
 # ------------------------------------------------------------------------------------------ snapshots
 def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     """Everything the post-migration checks compare against, read before ``run_migrations``."""
@@ -164,6 +177,11 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         snap["v_bank"] = int(scalar(conn, "SELECT COUNT(*) FROM v_bank"))
     if "word_forms" in snap["counts"]:
         snap["word_forms_kinds"] = {str(r[0]): int(r[1]) for r in conn.execute("SELECT kind, COUNT(*) FROM word_forms GROUP BY kind")}
+    for table in ("jobs", "ai_calls"):  # 0016 rebuilds both: columns, rows and indexes must come out identical
+        if table in snap["counts"]:
+            snap[f"{table}_cols"] = [c["name"] for c in columns(conn, table)]
+            snap[f"{table}_digest"] = table_digest(conn, table)
+            snap[f"{table}_indexes"] = index_names(conn, table)
     if "words" in snap["counts"]:
         snap["has_learn_rank"] = has_column(conn, "words", "learn_rank")
         if snap["has_learn_rank"]:
@@ -177,7 +195,8 @@ def check_bookkeeping(rep: Report, conn: sqlite3.Connection, before: dict[str, A
     deltas = {t: (before["counts"].get(t), after.get(t)) for t in set(before["counts"]) | set(after) if before["counts"].get(t) != after.get(t)}
     rep.info("row deltas", str(dict(sorted(deltas.items()))) if deltas else "none")
     if applied:
-        rep.check("only bookkeeping tables changed row counts", set(deltas) <= BOOKKEEPING_TABLES, ", ".join(sorted(set(deltas) - BOOKKEEPING_TABLES)) or "schema_migrations / kv / system_events only")
+        created = set(after) - set(before["counts"])  # a table the files create (0016: word_dances) starts empty and is no row change
+        rep.check("only bookkeeping tables changed row counts", set(deltas) <= BOOKKEEPING_TABLES | created, ", ".join(sorted(set(deltas) - BOOKKEEPING_TABLES - created)) or "schema_migrations / kv / system_events only" + (f" (+ new tables {sorted(created)})" if created else ""))
         rep.check("schema_migrations grew by the applied files", after.get("schema_migrations", 0) - before["counts"].get("schema_migrations", 0) == len(applied))
     else:
         rep.check("nothing pending: no row count changed", not deltas, str(deltas))
@@ -299,6 +318,33 @@ def check_0013(rep: Report, conn: sqlite3.Connection, before: dict[str, Any]) ->
     rep.check("an unknown kind is rejected", ok, detail[:60])
     allowed = {str(r[0]) for r in conn.execute("SELECT DISTINCT kind FROM word_forms")}
     rep.check("every stored kind is in the 0013 list", allowed <= set(WORD_FORMS_KINDS_0013), ", ".join(sorted(allowed - set(WORD_FORMS_KINDS_0013))) or "ok")
+
+
+def check_0016(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """jobs / ai_calls rebuilt with the dance type / kind — every column, row and index kept — plus word_dances and the two words
+    columns (docs/releases/2026-11-word-dance-p2.md §4; mirrors backend/tests/unit/test_db_0016.py on the operator's copy)."""
+    for table in ("jobs", "ai_calls"):
+        cols = [c["name"] for c in columns(conn, table)]
+        rep.check(f"{table}: same columns in the same order", cols == before.get(f"{table}_cols", cols), f"{len(cols)} columns")
+        rep.check(f"{table}: every row intact (ids and values)", table_digest(conn, table) == before.get(f"{table}_digest"), f"{scalar(conn, f'SELECT COUNT(*) FROM {table}')} rows")
+        idx = index_names(conn, table)
+        rep.check(f"{table}: indexes re-created", set(before.get(f"{table}_indexes", idx)) <= idx, ", ".join(sorted(idx)))
+    ok, detail = accepted(conn, "INSERT INTO jobs(type, payload_json) VALUES ('generate_dance', '{}')")
+    rep.check("jobs.type admits generate_dance", ok, detail)
+    ok, detail = rejected(conn, "INSERT INTO jobs(type, payload_json) VALUES ('generate_dance2', '{}')")
+    rep.check("jobs.type still rejects strangers", ok, detail)
+    ok, detail = accepted(conn, "INSERT INTO ai_calls(kind, model_requested, max_budget_usd) VALUES ('dance', 'sonnet', 0.25)")
+    rep.check("ai_calls.kind admits dance", ok, detail)
+    ok, detail = rejected(conn, "INSERT INTO ai_calls(kind, model_requested, max_budget_usd) VALUES ('tango', 'sonnet', 0.25)")
+    rep.check("ai_calls.kind still rejects strangers", ok, detail)
+    words_cols = [c["name"] for c in columns(conn, "words")]
+    rep.check("words.active_dance_id / dance_state appended last", words_cols[-2:] == ["active_dance_id", "dance_state"], str(words_cols[-2:]))
+    rep.check("word_dances + ux_word_dances_active present", "word_dances" in db.table_names(conn) and int(scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'ux_word_dances_active'")) == 1)
+    ok, detail = rejected(conn, "UPDATE words SET dance_state = 'dancing' WHERE id = (SELECT MIN(id) FROM words)")
+    rep.check("words.dance_state CHECK", ok, detail)
+    if ran_here:
+        rep.check("dance_state 'none' everywhere right after the file", int(scalar(conn, "SELECT COUNT(*) FROM words WHERE dance_state != 'none'")) == 0)
+        rep.check("word_dances empty right after the file (the annotations are the job's work)", int(scalar(conn, "SELECT COUNT(*) FROM word_dances")) == 0)
 
 
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
@@ -438,6 +484,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0014(rep, conn, before, ran_here=14 in applied_versions)
         else:
             rep.skip("0014 checks", "not recorded in schema_migrations")
+        if 16 in recorded:
+            check_0016(rep, conn, before, ran_here=16 in applied_versions)
+        else:
+            rep.skip("0016 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

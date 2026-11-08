@@ -17,7 +17,7 @@ from typing import Any, Sequence
 from ..clock import now_iso
 from ..db import maybe_tx
 
-KINDS: tuple[str, ...] = ("content", "lookup", "consolidate", "svg", "probe")
+KINDS: tuple[str, ...] = ("content", "lookup", "consolidate", "svg", "probe", "dance")  # ai_calls.kind (0001, rebuilt by 0016 for dance)
 PROVIDERS: tuple[str, ...] = ("claude", "fallback")  # ai_calls.provider (migration 0010): the CLI or ai/providers/openai_http.py
 STATUSES: tuple[str, ...] = ("running", "success", "error", "timeout", "invalid_output", "budget", "auth", "overloaded", "spawn_error")
 ERROR_MAX_CHARS = 1000
@@ -116,6 +116,15 @@ def set_status(conn: sqlite3.Connection, call_id: int, status: str, *, error: st
             conn.execute("UPDATE ai_calls SET status=? WHERE id=?", (status, int(call_id)))
         else:
             conn.execute("UPDATE ai_calls SET status=?, error=? WHERE id=?", (status, str(error)[:ERROR_MAX_CHARS], int(call_id)))
+
+
+def close_orphans(conn: sqlite3.Connection, *, now: str, error: str = "interrupted: process restart") -> int:
+    """Finish every ``running`` row as ``error`` — called once at service start, before any worker thread exists, when no call of
+    this process can be in flight. Rows left behind by an ungraceful stop (SIGKILL, crash, power loss) would otherwise keep their
+    ``reserved_usd`` inside :func:`reserved_running` for ever, eating the daily cap and the small sub-caps (svg, dance)."""
+    with maybe_tx(conn):
+        cur = conn.execute("UPDATE ai_calls SET status = 'error', error = ?, finished_at = ? WHERE status = 'running'", (str(error)[:ERROR_MAX_CHARS], now))
+    return int(cur.rowcount or 0)
 
 
 def get_call(conn: sqlite3.Connection, call_id: int) -> dict[str, Any] | None:

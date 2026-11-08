@@ -62,6 +62,7 @@
 | `generate_content` 用户触发的例句生成 | 批 10 | **切片 2 起默认开**（2026-11-05 决定；第 5 节评测仍建议补做，不达标则从 `WD_AI_FALLBACK_KINDS` 去掉 `content`）；批 5（`WD_AI_FALLBACK_BATCH_SIZE`，实际 `min(WD_AI_BATCH_SIZE, …)`）、`max_tokens` 8192、超时 ×1.5；备选判非种子词 `valid=false` 不下架词——只有 CLI 可以让词失效（CLAUDE_INTEGRATION §6.4） | 是，批 10 | 例句含词头是弱模型最常挂的规则 |
 | `generate_content` 预生成计划（优先级 ≥90） | 是 | **默认不开**：912 次调用在单并发、会限流的免费档上要 15–30 小时，且成本为 0 时预算停止条件永不触发 | 可（≈ ¥3.3） | 预生成任务在切换期间顺延到主模型恢复 |
 | `generate_svg` | 是 | **不开**：被拒绝的 SVG 会让 `image_state='failed'` 且永不重试 | 不开 | 切换期间 SVG 任务顺延，照片管线照常 |
+| `generate_dance` 单词之舞舞步标注 | 20 词/次 | **不开**：舞步是语义判断，备选模型未评测；`FALLBACK_TASK_KINDS` 不含它 | 不开 | 切换期间舞步标注顺延（`openai_http` 模式下无限期等待，同 SVG），规则层的拼读舞照常 |
 | 探测 | 分 tier 的 CLI 探测 | 无 tier 的一次 `probe_v1` 调用（`wd ai-check --provider fallback`） | 同左 | 精确匹配答案是最便宜的枚举/数组能力检查 |
 
 ## 3. 为什么不用 Claude CLI 当网关，但今天可以用它应急

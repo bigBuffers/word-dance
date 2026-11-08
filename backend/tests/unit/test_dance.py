@@ -132,7 +132,7 @@ def test_golden_table(word, phonetic, chunks, stress, silent, double):
     assert "·".join(spec["letters"]) == chunks
     assert spec["stress"] == stress
     assert spec["marks"] == {"double": double, "silent": silent}
-    assert spec["version"] == dance.DANCE_SPEC_VERSION == 1 and spec["source"] == "rule"
+    assert spec["version"] == dance.DANCE_SPEC_VERSION == 1 and spec["source"] == "rule" and spec["semantic"] is None
     schemas.DanceSpec.model_validate(spec)
 
 
@@ -148,7 +148,7 @@ def test_no_spec_for_phrases_abbreviations_and_missing_phonetics():
 def test_disagreement_falls_back_to_one_chunk():
     # a spelling with fewer vowel groups than the transcription has nuclei and no hiatus to split: one chunk, stress unknown
     spec = dance.spec_for("rhythm", "'riðəm")
-    assert spec == {"version": 1, "letters": ["rhythm"], "stress": None, "marks": {"double": [], "silent": []}, "source": "rule"}
+    assert spec == {"version": 1, "letters": ["rhythm"], "stress": None, "marks": {"double": [], "silent": []}, "semantic": None, "source": "rule"}
     # letters without a vowel letter (an abbreviation) stay one chunk too
     assert dance.spec_for("TV", "'tiː'viː")["letters"] == ["TV"]
 

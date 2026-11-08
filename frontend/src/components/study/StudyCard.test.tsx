@@ -4,7 +4,7 @@
 // outside every list keeps its dashed outside-the-lists chip even without a phonetic.
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Grade, ImageMeta, StudyItem } from '@/api/types';
 import { zh } from '@/i18n/zh';
 import { contentMode, resultLabel, StudyCard } from './StudyCard';
@@ -258,7 +258,7 @@ describe('bottom bar offset (toasts stack above the grade bar)', () => {
 });
 
 describe('StudyCard word dance (FRONTEND §5.1.1, §6.5)', () => {
-  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, semantic: null, source: 'rule' as const };
 
   it('danceMode full → the headword dances and the syllable chips mark the stressed chunk on the front and on the back', () => {
     const danced = item();
@@ -296,5 +296,46 @@ describe('StudyCard word dance (FRONTEND §5.1.1, §6.5)', () => {
     const second = renderCard({ danceMode: 'full' }); // item().word.dance is null
     expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
     expect(second.container.querySelector('.dword')).toBeNull();
+  });
+});
+
+describe('StudyCard semantic dance at the reveal (FRONTEND §5.1.2, §6.5; element.animate stubbed)', () => {
+  const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, semantic: { primitive: 'rise' as const, params: {} }, source: 'claude' as const };
+  let animate: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    animate = vi.fn(() => ({ finished: Promise.resolve(), cancel: () => undefined }));
+    Object.defineProperty(Element.prototype, 'animate', { value: animate, configurable: true, writable: true });
+  });
+  afterEach(() => {
+    delete (Element.prototype as unknown as { animate?: unknown }).animate;
+  });
+
+  it("full mode: the front autoplays the form dance, the back autoplays the meaning; form_only never plays the meaning", () => {
+    const danced = item();
+    danced.word = { ...danced.word, dance: spec };
+    const { rerender, onReveal, onGrade, onMaster, onSkip, onRequestContent, container } = renderCard({ item: danced, danceMode: 'full', danceToken: 0, danceAutoplay: true });
+    const formSteps = animate.mock.calls.length;
+    expect(formSteps).toBeGreaterThan(0);
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBeNull(); // the front never shows the meaning (no object, pose or ghosts)
+    rerender(
+      <MemoryRouter>
+        <StudyCard item={danced} revealed zhMode="tap" showImage={false} preview={preview} onReveal={onReveal} onGrade={onGrade} onMaster={onMaster} onSkip={onSkip} onRequestContent={onRequestContent} danceMode="full" danceToken={0} danceAutoplay />
+      </MemoryRouter>,
+    );
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBe('rise'); // the back carries the primitive
+    expect(animate.mock.calls.length).toBeGreaterThan(formSteps); // the back face mounted and played the semantic dance
+    const afterReveal = animate.mock.calls.length;
+
+    animate.mockClear();
+    const second = renderCard({ item: danced, danceMode: 'form_only', danceToken: 0, danceAutoplay: true });
+    expect(animate.mock.calls.length).toBe(formSteps);
+    expect(second.container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBeNull();
+    second.rerender(
+      <MemoryRouter>
+        <StudyCard item={danced} revealed zhMode="tap" showImage={false} preview={preview} onReveal={onReveal} onGrade={onGrade} onMaster={onMaster} onSkip={onSkip} onRequestContent={onRequestContent} danceMode="form_only" danceToken={0} danceAutoplay />
+      </MemoryRouter>,
+    );
+    expect(animate.mock.calls.length).toBe(formSteps); // nothing on the back in form_only
+    expect(afterReveal).toBeGreaterThan(formSteps);
   });
 });

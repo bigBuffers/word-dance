@@ -116,7 +116,8 @@ empty instance next to the real one. Only the move itself (§5) passes a new dir
 
 `--no-restart` keeps the service running while migrating — only for purely additive migrations (new tables,
 columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that reminder. `0011_primary_stage.sql` and
-`0013_word_forms_alias.sql` (the K-12 release, `docs/releases/2026-11-k12-stages.md`) are table rebuilds — stop-first,
+`0013_word_forms_alias.sql` (the K-12 release, `docs/releases/2026-11-k12-stages.md`) and `0016_word_dances.sql` (the 单词之舞 P2 release,
+`docs/releases/2026-11-word-dance-p2.md`: `jobs` / `ai_calls` rebuilt for the new job type, `word_dances` added) are table rebuilds — stop-first,
 never `--no-restart`; `0012_word_images_meta.sql` and `0014_learn_rank.sql` (the learning-order release,
 `docs/releases/2026-11-learn-order.md`: one `ADD COLUMN` on `words`, filled at the next service start or by the `wd learn-order`
 step install.sh runs after `import-seed`) and `0015_dance_mode.sql` (the 单词之舞 release,

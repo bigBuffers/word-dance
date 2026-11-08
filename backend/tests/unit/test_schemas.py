@@ -18,7 +18,7 @@ SCHEMAS_DIR = ROOT / "backend/wd/ai/schemas"
 PROMPTS_DIR = ROOT / "backend/wd/ai/prompts"
 FIXTURES = ROOT / "backend/tests/fixtures"
 DOC = (ROOT / "docs/CLAUDE_INTEGRATION.md").read_text(encoding="utf-8")
-NAMES = ("probe_v1", "content_v1", "lookup_v1", "consolidate_v1", "svg_v1")
+NAMES = ("probe_v1", "content_v1", "lookup_v1", "consolidate_v1", "svg_v1", "dance_v1")
 ALLOWED_KEYWORDS = {"type", "properties", "required", "items", "minItems", "maxItems", "description", "enum"}
 FORBIDDEN_KEYWORDS = {"$ref", "additionalProperties", "minLength", "maxLength", "minimum", "maximum", "anyOf", "oneOf", "allOf"}
 DOC_HEADINGS = {
@@ -27,6 +27,7 @@ DOC_HEADINGS = {
     "lookup_v1": "### 4.2 `lookup_v1.json`",
     "consolidate_v1": "### 4.3 `consolidate_v1.json`",
     "svg_v1": "### 4.4 `svg_v1.json`",
+    "dance_v1": "### 4.5 `dance_v1.json`",
 }
 
 
@@ -119,7 +120,7 @@ def test_valid_items_drops_invalid_entries():
     assert models.valid_items(None, models.LookupItem) == []
 
 
-@pytest.mark.parametrize("name,heading", [("content_system", "### 5.1"), ("lookup_system", "### 5.3"), ("consolidate_system", "### 5.4"), ("svg_system", "### 5.5")])
+@pytest.mark.parametrize("name,heading", [("content_system", "### 5.1"), ("lookup_system", "### 5.3"), ("consolidate_system", "### 5.4"), ("svg_system", "### 5.5"), ("dance_system", "### 5.6")])
 def test_prompts_are_verbatim_from_section_5(name, heading):
     text = (PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8").rstrip("\n")
     assert text == doc_block(heading, lang="")

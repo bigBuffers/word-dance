@@ -17,7 +17,9 @@ export type ReportReason = 'wrong_meaning' | 'unnatural_example' | 'bad_translat
 export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bark';
 export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
 export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Claude CLI or the fallback HTTP provider (CLAUDE_INTEGRATION §10)
-export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = every dance the build has, form_only = spelling + stress only (reserved for P2), off
+export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = spelling + stress + semantic dance, form_only = spelling + stress only, off
+export type DancePrimitive = 'rise' | 'fall' | 'grow' | 'shrink' | 'dash' | 'creep' | 'enter' | 'exit' | 'arc' | 'under' | 'behind' | 'between' | 'split' | 'join' | 'shiver' | 'shimmer' | 'wave' | 'droop' | 'stretch' | 'squash' | 'thud' | 'float' | 'spin' | 'repeat' | 'multiply' | 'dim' | 'glow' | 'color';   // the semantic dance library (§4.3): one motion per meaning class, chosen by Claude from this closed list
+export type DanceColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'brown' | 'black' | 'white' | 'grey';   // the only colours the `color` primitive may name
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -37,7 +39,7 @@ export interface Settings {
   daily_new_count: number; daily_screen_count: number; max_reviews: number;
   stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–5 index (§9.1)
   show_images: boolean; zh_examples: 'tap' | 'always'; auto_pronounce: boolean; accent: 'en-US' | 'en-GB';
-  dance_mode: DanceMode;                // 单词之舞; P1 plays the spelling + stress dances for both full and form_only
+  dance_mode: DanceMode;                // 单词之舞: full = spelling + stress (card show) + semantic dance (reveal); form_only skips the semantic dance; off = plain headword
   email_enabled: boolean; webhook_enabled: boolean; webhook_url: string | null; webhook_format: WebhookFormat;
   next_push_at: string | null;          // read-only
   email_verified: boolean;              // read-only
@@ -68,11 +70,12 @@ export interface UserWord {
   srs: Srs; times_pushed: number; times_added: number;
   added_at: string; first_added_at: string; mastered_at: string | null;
 }
-export interface DanceSpec {                                 // 单词之舞 P1 (docs/WORD_DANCE_DESIGN.md §4.1–4.2): derived by backend/wd/dance.py from display + phonetic at serialisation time, never stored
+export interface DanceSpec {                                 // 单词之舞 (docs/WORD_DANCE_DESIGN.md §4): the stored Claude spec (word_dances, P2) when the word has one, else derived by backend/wd/dance.py from display + phonetic at serialisation time
   version: 1; letters: string[];                            // display cut into syllable chunks, letters.join('') === display; one chunk when the rules cannot split the word
   stress: number | null;                                     // index into letters of the primary-stressed chunk (an unmarked split word takes its first non-schwa chunk); null only when the word stays one chunk with two or more nuclei
   marks: { double: [number, number][]; silent: number[] };   // letter indexes into display: doubled letters jump together, silent letters stay put (night's gh, knife's k, the magic e)
-  source: 'rule';                                            // P2 adds 'claude' (corrected chunks, semantic primitive)
+  semantic: { primitive: DancePrimitive; params: { n?: number; color?: DanceColor } } | null;   // 语义舞 (§4.3): the word's one meaning motion, played at the reveal; null = no semantic dance (nouns with a picture, function words, rule-only specs)
+  source: 'rule' | 'claude';                                 // rule = backend/wd/dance.py at serialisation time; claude = the stored word_dances row (chunks confirmed or corrected, semantic chosen)
 }
 export interface Example { en: string; zh: string }
 export interface Content {
@@ -197,7 +200,7 @@ export interface AdminOverview {
   bank_entries: number; batches_today: number;
   jobs: { queued: number; running: number; dead: number; by_type: Record<string, number> };
   ai: { enabled: boolean; paused_until: string | null; manual_paused_until: string | null; flag_tier: 0 | 1; today_usd: number; month_usd: number;
-        daily_budget_usd: number; monthly_budget_usd: number; svg_today_usd: number; svg_daily_budget_usd: number;
+        daily_budget_usd: number; monthly_budget_usd: number; svg_today_usd: number; svg_daily_budget_usd: number; dance_today_usd: number; dance_daily_budget_usd: number;
         calls_today: number; avg_cost_per_word_7d: number | null; last_error: string | null;
         active_provider: AiProvider; fallback_configured: boolean; fallback_paused_until: string | null; fallback_calls_today: number; fallback_available: boolean | null };
   // ai.paused_until = the CLI's automatic pause or the admin's global pause, whichever ends later · manual_paused_until = the admin's own pause alone (what the pause/resume toggle keys off)

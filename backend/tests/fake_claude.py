@@ -110,6 +110,8 @@ def infer_kind(schema: dict) -> str:
         return "content"
     if "is_english" in item_props:
         return "lookup"
+    if "letters" in item_props:
+        return "dance"
     return "content"
 
 
@@ -262,7 +264,32 @@ def svg_output(word: str) -> dict:
     return {"svg": svg, "alt_zh": f"一幅表示 {word} 的简单示意图"}
 
 
-REQUIRED_DROP = {"content": "meaning_zh", "lookup": "headword", "consolidate": "verdict", "svg": "alt_zh", "probe": "echo"}
+REQUIRED_DROP = {"content": "meaning_zh", "lookup": "headword", "consolidate": "verdict", "svg": "alt_zh", "probe": "echo", "dance": "letters"}
+
+DANCE_PRIMITIVES = {"up": ("rise", 0, ""), "down": ("fall", 0, ""), "in": ("enter", 0, ""), "out": ("exit", 0, ""), "big": ("grow", 0, ""), "small": ("shrink", 0, ""),
+                    "cold": ("shiver", 0, ""), "hot": ("shimmer", 0, ""), "happy": ("wave", 0, ""), "sad": ("droop", 0, ""), "two": ("multiply", 2, ""), "three": ("multiply", 3, ""),
+                    "red": ("color", 0, "red"), "yellow": ("color", 0, "yellow"), "jump": ("rise", 0, ""), "turn": ("spin", 0, ""), "again": ("repeat", 0, "")}
+
+
+def dance_words(prompt: str) -> list[dict]:
+    data = items_block(prompt)
+    out: list[dict] = []
+    if isinstance(data, dict):
+        for w in data.get("words", []):
+            if isinstance(w, dict) and isinstance(w.get("word"), str):
+                out.append(w)
+    return out or [{"word": "unknown"}]
+
+
+def dance_item(entry: dict, mode: str) -> dict:
+    """Echo the rule chunks (or a corrected split for `abandon`) and pick a primitive from a tiny table; 'none' otherwise."""
+    word = str(entry["word"])
+    letters = list(entry.get("rule_letters") or [word])
+    stress = int(entry.get("rule_stress") or 0)
+    if word.lower() == "abandon":
+        letters, stress = ["a", "ban", "don"], 1  # the rule split; a corrected one would differ
+    primitive, n, color = DANCE_PRIMITIVES.get(word.lower(), ("none", 0, ""))
+    return {"word": word, "letters": letters, "stress": stress, "primitive": primitive, "n": n, "color": color, "reason": "测试" if primitive == "none" else "动作即词义"}
 
 
 def structured_output(kind: str, prompt: str, mode: str) -> tuple[dict, int]:
@@ -276,6 +303,9 @@ def structured_output(kind: str, prompt: str, mode: str) -> tuple[dict, int]:
     elif kind == "consolidate":
         items = consolidate_items(prompt)
         out, n = {"items": [consolidate_item(it, mode) for it in items], "confusable_groups": [], "difficulty_tags": []}, len(items)
+    elif kind == "dance":
+        entries = dance_words(prompt)
+        out, n = {"items": [dance_item(e, mode) for e in entries]}, len(entries)
     else:
         words = content_words(prompt)
         out, n = {"items": [content_item(w, mode) for w in words]}, len(words)

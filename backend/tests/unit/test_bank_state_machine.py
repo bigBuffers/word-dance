@@ -221,7 +221,7 @@ def test_readd_from_mastered_lowers_ease_and_logs_readd(seeded, user):
     assert row["repetitions"] == 6 and row["origin"] == "browse"  # history kept, origin never changes
     assert logs(seeded, user, w)[-1]["action"] == "readd"
     assert stats(seeded, user)["added"] == 2
-    assert [j["type"] for j in jobs(seeded)] == ["generate_content"]  # a validated word re-entering the bank wants content
+    assert [j["type"] for j in jobs(seeded)] == ["generate_content", "generate_dance"]  # a validated word re-entering the bank wants content (+ its 单词之舞 annotation, after it)
 
 
 def test_readd_from_known_or_removed_keeps_ease(seeded, user):
@@ -467,10 +467,16 @@ def test_bulk_add_statuses(seeded, user):
     assert by_input["abc123"].error == "只能包含英文字母、空格、连字符、撇号和缩写点"
     summary = bank.summarise(results)
     assert (summary["exists"], summary["added"], summary["pending_ai"], summary["ambiguous"], summary["invalid"]) == (1, 1, 1, 1, 1)
-    # jobs: one content job for the validated add, one debounced lookup for the provisional word, none else
+    # jobs: one content job for the validated add (+ its 单词之舞 annotation riding along at the same priority), one debounced lookup
+    # for the provisional word, none else
     js = jobs(seeded)
     types = sorted(j["type"] for j in js)
-    assert types == ["generate_content", "lookup_word"]
+    assert types == ["generate_content", "generate_dance", "lookup_word"]
+    content = next(j for j in js if j["type"] == "generate_content")
+    dance_job = next(j for j in js if j["type"] == "generate_dance")
+    child = by_input["children"].word["id"]
+    assert (content["dedupe_key"], dance_job["dedupe_key"], dance_job["priority"]) == (f"content:{child}", f"dance:{child}", content["priority"] + 1)  # one notch below, enqueued after
+    assert dance_job["id"] > content["id"]
     lookup = next(j for j in js if j["type"] == "lookup_word")
     prov = by_input["ubiquitous"].word["id"]
     assert lookup["dedupe_key"] == f"lookup:{prov}" and lookup["priority"] == 10

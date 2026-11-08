@@ -32,6 +32,7 @@ ESTIMATES: dict[str, tuple[float, float]] = {
     "consolidate": (0.05, 0.0),
     "svg": (0.03, 0.0),
     "probe": (0.01, 0.0),
+    "dance": (0.01, 0.003),  # 20 words per call ≈ $0.07 (dance_v1 items are short)
 }
 PROVIDERS: tuple[str, ...] = ("claude", "fallback")
 KV_GLOBAL_PAUSE = "ai.paused_until"  # the admin's manual pause: every provider (POST /api/admin/ai/pause)
@@ -45,6 +46,7 @@ DISABLED_WAIT = timedelta(minutes=30)
 EVENT_DAILY = "budget_daily"
 EVENT_MONTHLY = "budget_monthly"
 EVENT_SVG = "budget_svg"
+EVENT_DANCE = "budget_dance"
 
 
 def estimate(kind: str, word_count: int = 1, provider: str = "claude") -> float:
@@ -66,6 +68,7 @@ def budget_for(cfg: Settings, kind: str) -> float:
         "lookup": cfg.ai_budget_lookup,
         "consolidate": cfg.ai_budget_consolidate,
         "svg": cfg.ai_budget_svg,
+        "dance": cfg.ai_budget_dance,
         "probe": 0.05,
     }[kind]
 
@@ -78,6 +81,7 @@ def timeout_for(cfg: Settings, kind: str, provider: str = "claude") -> int:
         "lookup": cfg.ai_timeout_lookup_sec,
         "consolidate": cfg.ai_timeout_consolidate_sec,
         "svg": cfg.ai_timeout_svg_sec,
+        "dance": cfg.ai_timeout_dance_sec,
         "probe": 60,
     }[kind]
     if provider != "claude":
@@ -191,6 +195,14 @@ def svg_spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, now: 
     return ledger.sum_cost(conn, start, end, kind="svg") + ledger.reserved_running(conn, kind="svg")
 
 
+def dance_spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, now: str | None = None) -> float:
+    """Spend of today's ``kind='dance'`` calls (counted inside the daily cap), running reservations included."""
+    cfg = cfg or Settings.from_env()
+    now = now or now_iso()
+    start, end = day_window(now, cfg.tz)
+    return ledger.sum_cost(conn, start, end, kind="dance") + ledger.reserved_running(conn, kind="dance")
+
+
 def prewarm_spent_today(conn: sqlite3.Connection, cfg: Settings | None = None, now: str | None = None) -> float:
     cfg = cfg or Settings.from_env()
     now = now or now_iso()
@@ -275,6 +287,13 @@ def can_spend(
         svg_spent = svg_spent_today(conn, cfg, now)
         if svg_spent >= cfg.ai_svg_daily_budget_usd:
             event_once(conn, EVENT_SVG, day_begin, {"spent_usd": round(svg_spent, 4), "cap_usd": cfg.ai_svg_daily_budget_usd}, now=now)
+            return False, next_day_resume(now, cfg.tz)
+    if kind == "dance":
+        # §7: generate_dance additionally requires today's dance spend < its sub-cap (0.50 ≈ 140 words a day at ≈ $0.0035 per word;
+        # the 小学 backfill raises it for one evening, docs/releases/2026-11-word-dance-p2.md)
+        dance_spent = dance_spent_today(conn, cfg, now)
+        if dance_spent >= cfg.ai_dance_daily_budget_usd:
+            event_once(conn, EVENT_DANCE, day_begin, {"spent_usd": round(dance_spent, 4), "cap_usd": cfg.ai_dance_daily_budget_usd}, now=now)
             return False, next_day_resume(now, cfg.tz)
     return True, None
 
@@ -371,6 +390,8 @@ def spend_summary(conn: sqlite3.Connection, cfg: Settings | None = None, now: st
         "monthly_budget_usd": cfg.ai_monthly_budget_usd,
         "svg_today_usd": round(ledger.sum_cost(conn, d0, d1, kind="svg"), 6),
         "svg_daily_budget_usd": cfg.ai_svg_daily_budget_usd,
+        "dance_today_usd": round(ledger.sum_cost(conn, d0, d1, kind="dance"), 6),
+        "dance_daily_budget_usd": cfg.ai_dance_daily_budget_usd,
         "calls_today": ledger.count_started(conn, d0, d1),
         "avg_cost_per_word_7d": ledger.avg_cost_per_word(conn, week_ago, to_iso(parse_iso(now) + timedelta(seconds=1))),
         "last_error": ledger.last_error(conn),

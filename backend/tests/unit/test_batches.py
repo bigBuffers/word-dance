@@ -235,7 +235,7 @@ def test_content_enqueued_only_for_validated_words_lacking_content(seeded, user)
     conn.execute("UPDATE user_settings SET daily_screen_count = 2 WHERE user_id = ?", (user,))
     mark(conn, user, "apple")  # the mark itself enqueued content:apple (priority 20)
     conn.execute("DELETE FROM jobs")
-    conn.execute("UPDATE words SET content_state = 'none' WHERE lemma = 'apple'")
+    conn.execute("UPDATE words SET content_state = 'none', dance_state = 'none' WHERE lemma = 'apple'")  # the mark queued both jobs
     s1, s2 = screen_order(conn, user)[:2]  # today's two 推荐词 (daily_screen_count 2)
     conn.execute("UPDATE words SET content_state = 'ready' WHERE lemma = ?", (s1,))  # screen word with content
     b = batches.build_batch(conn, user, TODAY, "manual", NOW)
@@ -245,8 +245,19 @@ def test_content_enqueued_only_for_validated_words_lacking_content(seeded, user)
     assert jobs == {f"content:{wid(conn, 'apple')}": (20, "queued"), f"content:{wid(conn, s2)}": (20, "queued")}
     assert conn.execute("SELECT content_state FROM words WHERE lemma = 'apple'").fetchone()[0] == "queued"
     assert conn.execute("SELECT content_state FROM words WHERE lemma = ?", (s1,)).fetchone()[0] == "ready"
-    # no fetch_image / other job types are created by the builder
-    assert count(conn, "SELECT COUNT(*) FROM jobs WHERE type != 'generate_content'") == 0
+    # the only other job type the builder creates is the 单词之舞 annotation riding along with the content enqueue (WORD_DANCE_DESIGN
+    # §6.2): one generate_dance per batch word that has a rule spec and no Claude spec yet, one priority notch below — never fetch_image
+    from wd import dance as rules
+
+    expected = {}
+    for lemma in ("apple", s1, s2):
+        display, phonetic = conn.execute("SELECT display, phonetic FROM words WHERE lemma = ?", (lemma,)).fetchone()
+        if rules.spec_for(display, phonetic) is not None:
+            expected[f"dance:{wid(conn, lemma)}"] = (21, "queued")
+    assert f"dance:{wid(conn, 'apple')}" in expected
+    others = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT dedupe_key, priority, status FROM jobs WHERE type != 'generate_content'")}
+    assert others == expected
+    assert {r[0] for r in conn.execute("SELECT DISTINCT type FROM jobs WHERE type != 'generate_content'")} == {"generate_dance"}
 
 
 def test_preview_selection_is_read_only_and_matches_the_build(seeded, user):

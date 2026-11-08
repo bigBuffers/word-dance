@@ -23,7 +23,7 @@ Validation rules:
   accepted) and
   ``WD_AI_FALLBACK_BATCH_SIZE`` (words per ``generate_content`` call while the fallback takes the group, default 5)
   is clamped like ``WD_AI_BATCH_SIZE``; ``openai_http`` mode with a kind removed from ``WD_AI_FALLBACK_KINDS`` starts
-  with a warning that those jobs (and SVG jobs, always) wait indefinitely.
+  with a warning that those jobs (and SVG / dance jobs, always) wait indefinitely.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ FALLBACK_KINDS = ("none", "openai_http")
 FALLBACK_DIALECTS = ("auto", "zhipu", "bailian", "deepseek", "generic")
 FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
 FALLBACK_THINKING_MODES = ("off", "on", "default")
-FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg` and `probe` are never routed by WD_AI_FALLBACK_KINDS
+FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg`, `dance` and `probe` are never routed by WD_AI_FALLBACK_KINDS
 FALLBACK_PRICE_KEYS = frozenset({"input", "output", "cache_read"})  # WD_AI_FALLBACK_PRICE_JSON names (CNY per million tokens)
 
 # values masked as "***" by GET /api/admin/config (API.md 73) and never logged
@@ -118,15 +118,18 @@ class Settings:
     ai_timeout_lookup_sec: int = 120
     ai_timeout_consolidate_sec: int = 240
     ai_timeout_svg_sec: int = 120
+    ai_timeout_dance_sec: int = 120
     ai_budget_content: float = 0.25
     ai_budget_lookup: float = 0.15
     ai_budget_consolidate: float = 0.40
     ai_budget_svg: float = 0.10
+    ai_budget_dance: float = 0.25
     ai_daily_budget_usd: float = 3.00
     ai_monthly_budget_usd: float = 40.00
     ai_prewarm_daily_budget_usd: float = 1.00
     ai_hourly_call_cap: int = 60
     ai_svg_daily_budget_usd: float = 0.50
+    ai_dance_daily_budget_usd: float = 0.50
     ai_log_keep_days: int = 14
     # --- fallback provider + automatic failover (docs/AI_FALLBACK_MODEL.md §4.3) --------
     ai_provider: str = "claude_cli"  # claude_cli = today · openai_http = fallback only · auto = claude + automatic failover
@@ -459,7 +462,7 @@ class Settings:
             idle = [k for k in FALLBACK_TASK_KINDS if k not in fallback_kinds]
             if idle:
                 log.warning(
-                    "WD_AI_PROVIDER=openai_http with WD_AI_FALLBACK_KINDS=%s: %s jobs wait indefinitely (svg jobs always do in this mode — "
+                    "WD_AI_PROVIDER=openai_http with WD_AI_FALLBACK_KINDS=%s: %s jobs wait indefinitely (svg and dance jobs always do in this mode — "
                     "they never run on the fallback and the CLI is never spawned); add %s back to WD_AI_FALLBACK_KINDS to run them on the fallback",
                     ",".join(fallback_kinds),
                     "/".join(idle),
@@ -515,15 +518,18 @@ class Settings:
             ai_timeout_lookup_sec=integer("WD_AI_TIMEOUT_LOOKUP_SEC", 120, 5, 3600),
             ai_timeout_consolidate_sec=integer("WD_AI_TIMEOUT_CONSOLIDATE_SEC", 240, 5, 3600),
             ai_timeout_svg_sec=integer("WD_AI_TIMEOUT_SVG_SEC", 120, 5, 3600),
+            ai_timeout_dance_sec=integer("WD_AI_TIMEOUT_DANCE_SEC", 120, 5, 3600),
             ai_budget_content=money("WD_AI_BUDGET_CONTENT", 0.25),
             ai_budget_lookup=money("WD_AI_BUDGET_LOOKUP", 0.15),
             ai_budget_consolidate=money("WD_AI_BUDGET_CONSOLIDATE", 0.40),
             ai_budget_svg=money("WD_AI_BUDGET_SVG", 0.10),
+            ai_budget_dance=money("WD_AI_BUDGET_DANCE", 0.25),
             ai_daily_budget_usd=money("WD_AI_DAILY_BUDGET_USD", 3.00),
             ai_monthly_budget_usd=money("WD_AI_MONTHLY_BUDGET_USD", 40.00),
             ai_prewarm_daily_budget_usd=money("WD_AI_PREWARM_DAILY_BUDGET_USD", 1.00),
             ai_hourly_call_cap=integer("WD_AI_HOURLY_CALL_CAP", 60, 1, 100_000),
             ai_svg_daily_budget_usd=money("WD_AI_SVG_DAILY_BUDGET_USD", 0.50),
+            ai_dance_daily_budget_usd=money("WD_AI_DANCE_DAILY_BUDGET_USD", 0.50),
             ai_log_keep_days=integer("WD_AI_LOG_KEEP_DAYS", 14, 0, 3650),
             ai_provider=ai_provider,
             ai_fallback_kind=fallback_kind,

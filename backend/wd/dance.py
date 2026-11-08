@@ -25,11 +25,17 @@ hyphenated words).
 
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
-__all__ = ["DANCE_SPEC_VERSION", "spec_for", "nuclei", "ortho_groups", "split_letters", "silent_letters", "double_letters", "first_variant"]
+from . import db
+from .config import Settings, get_settings
+from .jobs import queue
+
+__all__ = ["DANCE_SPEC_VERSION", "DANCE_JOB", "spec_for", "spec_for_word", "active_spec", "store_spec", "mark_failed", "enqueue_if_needed", "nuclei", "ortho_groups", "split_letters", "silent_letters", "double_letters", "first_variant"]
 
 DANCE_SPEC_VERSION = 1
 
@@ -513,7 +519,7 @@ def spec_for(display: str | None, phonetic: str | None) -> dict[str, Any] | None
     split = split_letters(text, phonetic)
     marks = {"double": double_letters(text), "silent": silent_letters(text, phonetic)}
     if split is None:
-        return {"version": DANCE_SPEC_VERSION, "letters": [text], "stress": 0 if len(nucs) == 1 else None, "marks": marks, "source": "rule"}
+        return {"version": DANCE_SPEC_VERSION, "letters": [text], "stress": 0 if len(nucs) == 1 else None, "marks": marks, "semantic": None, "source": "rule"}
     letters, used, _reading = split
     stress: int | None = next((i for i, n in enumerate(used) if n.primary), None)
     lower = text.lower()
@@ -523,4 +529,99 @@ def spec_for(display: str | None, phonetic: str | None) -> dict[str, Any] | None
     if stress is None:
         # no mark in the transcription (ʌŋkl): the first chunk whose vowel is not a schwa, else the first
         stress = next((i for i, n in enumerate(used) if n.symbol.rstrip("ː") != "ə"), 0) if len(letters) > 1 else 0
-    return {"version": DANCE_SPEC_VERSION, "letters": letters, "stress": stress, "marks": marks, "source": "rule"}
+    return {"version": DANCE_SPEC_VERSION, "letters": letters, "stress": stress, "marks": marks, "semantic": None, "source": "rule"}
+
+
+# ----------------------------------------------------------------------------------------------- stored specs (P2)
+DANCE_JOB = "generate_dance"
+
+
+def active_spec(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The Claude-made spec of a word (``word_dances`` row ``words.active_dance_id`` points at, ``source == 'claude'``), or
+    ``None``; a stored spec whose chunks no longer spell the display form (a later rename) is ignored."""
+    dance_id = word.get("active_dance_id")
+    if not dance_id:
+        return None
+    row = conn.execute("SELECT spec_json FROM word_dances WHERE id = ? AND status = 'active'", (int(dance_id),)).fetchone()
+    if row is None:
+        return None
+    try:
+        spec = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    display = str(word.get("display") or word.get("lemma") or "")
+    if not isinstance(spec, dict) or "".join(spec.get("letters") or []) != display:
+        return None
+    return spec
+
+
+def spec_for_word(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
+    """API.md §9.1: the stored Claude spec when the word has one, else the rule-based spec of display + phonetic."""
+    return active_spec(conn, word) or spec_for(word.get("display") or word.get("lemma"), word.get("phonetic"))
+
+
+def store_spec(conn: sqlite3.Connection, word_id: int, spec: Mapping[str, Any], *, model: str | None, prompt_version: str, now: str, reason: str | None = None) -> int:
+    """Insert the new active ``word_dances`` row (``reason`` = the model's short justification, kept for the human review), supersede
+    the previous one and point the word at it (one transaction)."""
+    with db.maybe_tx(conn):
+        conn.execute("UPDATE word_dances SET status = 'superseded' WHERE word_id = ? AND status = 'active'", (int(word_id),))
+        cur = conn.execute(
+            "INSERT INTO word_dances(word_id, status, spec_json, model, prompt_version, reason, created_at) VALUES (?, 'active', ?, ?, ?, ?, ?)",
+            (int(word_id), json.dumps(dict(spec), ensure_ascii=False), model, prompt_version, (reason or None), now),
+        )
+        dance_id = int(cur.lastrowid)
+        conn.execute("UPDATE words SET active_dance_id = ?, dance_state = 'ready', updated_at = ? WHERE id = ?", (dance_id, now, int(word_id)))
+    return dance_id
+
+
+def mark_failed(conn: sqlite3.Connection, word_id: int, *, now: str) -> None:
+    """The dead-job side effect: ``dance_state = 'failed'`` for a word without a Claude spec (the rule spec keeps serving the card);
+    a word that still has an active spec — a dead forced re-annotation — goes back to ``'ready'`` (keyed on ``active_dance_id``,
+    like ``content.mark_failed``), so no word is left ``'queued'`` without a live job."""
+    with db.maybe_tx(conn):
+        conn.execute(
+            "UPDATE words SET dance_state = CASE WHEN active_dance_id IS NOT NULL THEN 'ready' ELSE 'failed' END, updated_at = ? WHERE id = ?",
+            (now, int(word_id)),
+        )
+
+
+def mark_unattempted(conn: sqlite3.Connection, word_id: int, *, now: str) -> None:
+    """A job finished without trying (budget switched off, no rule spec, the word merged or invalidated meanwhile): the state goes
+    back to ``'none'`` — or ``'ready'`` when a spec is active — because nothing was attempted and nothing failed."""
+    with db.maybe_tx(conn):
+        conn.execute(
+            "UPDATE words SET dance_state = CASE WHEN active_dance_id IS NOT NULL THEN 'ready' ELSE 'none' END, updated_at = ? WHERE id = ?",
+            (now, int(word_id)),
+        )
+
+
+def enqueue_if_needed(
+    conn: sqlite3.Connection, word_id: int, *, priority: int, now: str, force: bool = False, cfg: Settings | None = None
+) -> int | None:
+    """``generate_dance`` for a validated, unmerged word that has a rule spec (plain letters + phonetic) and no usable Claude spec
+    yet; ``force`` re-annotates a word that already has one. Sets ``dance_state = 'queued'``. Nothing is queued while the dance
+    sub-cap is ``0`` (the annotations are switched off — queuing would only churn skipped jobs on every bank action). A word is
+    re-queued when its active spec no longer spells the display form (a later rename) or when it is ``'queued'`` without a live
+    ``dance:<id>`` job (a group that died on the worker's crash path), restoring the "queued ⇔ live job" invariant."""
+    settings = cfg if cfg is not None else get_settings()
+    if settings.ai_dance_daily_budget_usd <= 0:
+        return None
+    row = conn.execute(
+        "SELECT id, lemma, display, phonetic, is_valid_english, merged_into_word_id, dance_state, active_dance_id FROM words WHERE id = ?",
+        (int(word_id),),
+    ).fetchone()
+    if row is None or row["is_valid_english"] != 1 or row["merged_into_word_id"] is not None:
+        return None
+    if not force:
+        if row["active_dance_id"] and active_spec(conn, dict(row)) is not None:
+            return None  # annotated (a stale spec whose chunks no longer spell the display falls through and is redone)
+        if (row["dance_state"] or "none") == "queued" and queue.live_job(conn, f"dance:{int(row['id'])}") is not None:
+            return None  # a live job already exists
+    if spec_for(row["display"] or row["lemma"], row["phonetic"]) is None:
+        return None  # phrases, abbreviations with a dot, words without a phonetic: nothing to annotate
+    payload: dict[str, Any] = {"word_id": int(row["id"])}
+    if force:
+        payload["force"] = True
+    job_id = queue.enqueue(conn, DANCE_JOB, payload, dedupe_key=f"dance:{int(row['id'])}", priority=int(priority), now=now)
+    conn.execute("UPDATE words SET dance_state = 'queued', updated_at = ? WHERE id = ?", (now, int(row["id"])))
+    return job_id

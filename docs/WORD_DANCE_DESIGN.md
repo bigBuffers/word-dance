@@ -1,6 +1,6 @@
 # word-Dance：「单词之舞」—— 让单词自己跳出拼写、读音和意思（设计稿 v0.1，待 review）
 
-> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；2026-11-08 决定先做 P1（拼写舞 + 重音舞），P1 已实现，见 §10 与 `docs/releases/2026-11-word-dance-p1.md`**
+> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；P1（拼写舞 + 重音舞）已上线（`2a1359d`，发布说明 `docs/releases/2026-11-word-dance-p1.md`）；P2（语义舞）已实现，见 §11 与 `docs/releases/2026-11-word-dance-p2.md`**
 >
 > 你的话：小学的图片确实提高了记单词的效率；软件叫 word dance，最初的想法是用一个单词「跳舞」的动态、醒目来增加记忆。请思考、分析、给出改进设计。
 >
@@ -160,22 +160,24 @@
 
 ### 6.1 数据
 
-新表 `word_dances`（照 `word_images` 的模式）：`id, word_id, status(active|superseded), spec_json, model, prompt_version, created_at`；`words` 加 `active_dance_id`、`dance_state(none|queued|ready|failed)`（迁移 0015，`ALTER TABLE ADD COLUMN` 有 0012 / 0014 的先例）。
+新表 `word_dances`（照 `word_images` 的模式）：`id, word_id, status(active|superseded), spec_json, model, prompt_version, reason, created_at`（`reason` = 模型给的 ≤ 12 字理由，供人工审核）；`words` 加 `active_dance_id`、`dance_state(none|queued|ready|failed)`。**实际落地为迁移 0016**（0015 已被 `dance_mode` 用掉）：因为 `jobs.type` 与 `ai_calls.kind` 的 CHECK 列表写死在初始迁移里，新增任务类型 `generate_dance` 和调用种类 `dance` 需要重建这两张表，所以 0016 是停机迁移（和 0011 / 0013 一样）。
 
-`spec_json`（v1）：
+`spec_json`（与 API.md §9 `DanceSpec` 一致，P2 实际写入的样子）：
 
 ```json
 {
   "version": 1,
-  "letters": ["rab", "bit"],
+  "letters": ["up"],
   "stress": 0,
-  "marks": { "double": [[2, 3]], "silent": [] },
-  "semantic": { "primitive": "hop", "params": {} },
-  "source": { "letters": "rule", "semantic": "claude", "reviewed": false }
+  "marks": { "double": [], "silent": [] },
+  "semantic": { "primitive": "rise", "params": {} },
+  "source": "claude"
 }
 ```
 
-校验（后端 `jsonschema`，已在依赖里）：`"".join(letters) == lemma`（忽略大小写与空格；词组按空格分块）、`0 <= stress < len(letters)`、`primitive` ∈ 枚举或 `null`、`params` 按原语白名单。API：`StudyItem.word.dance: DanceSpec | null`（`schemas.py` + `types.ts` 契约变更一次）。
+（名词 rabbit 的存储结果是 `"semantic": null`——具体名词靠图，见 §4.3 的规则。）
+
+校验（实际落地见 §11）：后端用 pydantic `schemas.DanceSpec` 校验；`"".join(letters) == display` **严格相等**（区分大小写，不做空格处理——词组、带缩写点的词条根本不标注，规则层也不给它们 spec），不满足就回退到规则层的切块；`0 <= stress < len(letters)`，不满足则连同切块一起回退规则层（不混用两层）；`primitive` ∈ 枚举或 `null`，`params` 按原语白名单（`multiply` 的 `n` ∈ {2, 3}，`color` 的 `color` ∈ 颜色枚举）。API：`StudyItem.word.dance: DanceSpec | null`（`schemas.py` + `types.ts` 契约变更一次）。
 
 ### 6.2 生成
 
@@ -251,3 +253,14 @@
 - 前端：`components/word/dances.ts`（纯关键帧计划，≤ 2.5 s）+ `DancingWord.tsx`（WAAPI，jsdom / 减弱动态时静态）；`WordHeader` 接 `dance` / `playToken`，加音节芯片，🔊 重放；`StudyCard` 透传；`StudyPage` 持有 `danceToken`（新词与 `repetitions < 3` 的复习卡出现时 +1，按 `P` +1，推荐词不跳）；详情页显示芯片；设置页开关「单词之舞」；文案 `zh.ts` 四条（`word.syllables`、`word.replayDance`、`settings.dance`、`settings.danceHint`）+ FRONTEND §8 镜像。
 - 测试：`test_dance.py`（101 条金表（100 词，abandon 的两种音标记法各一条） + 全种子不变量）、`test_db_0015.py`、契约审计、`dances.test.ts`、`DancingWord.test.tsx`、`WordHeader.test.tsx`、`StudyCard` / `SettingsPage` 各一组。
 - 与 §4.1–4.2 / §6.3 的差别（实现以 `docs/FRONTEND.md` §6.5 与发布说明 §2 为准）：拼写舞入场是 `translateY(0.35em) scale(0.86)`（不是 18px），8 个及以上字母的词字母 55 ms、音节边界 120 ms；重音舞每拍 300 ms、重读那拍 330 ms（不是每拍 330 ms），非重读跳 −0.2em、重读跳 −0.6em（不是 9px / 28px），重读着色取 `--dance-accent` = `--brand-ink`（品牌蓝，没有橙色令牌）；音节芯片静态标出重读块，不随节拍高亮；组件在 `components/word/`（不是 `components/study/`），props 为 `text, spec, playToken?, autoplay?`（没有 `mode` / `onDone`）；`dance_mode` 对所有阶段默认 `full`（没有按主攻阶段默认 `form_only`），P1 把 `form_only` 当 `full`；自动播放的范围是新词与 `repetitions < 3` 的复习 / 加练卡（推荐词不跳，翻面不重跳），不记曝光日志，靠 `user_words.repetitions` 推导；度量用 `review_logs.context` 的方案留到 A/B 开始时接。
+
+## 11. P2 语义舞实现记录（2026-11-08，sqin 在手机上确认 P1 效果后：「继续做语义舞」）
+
+- **舞步库**：§4.3 的 26 行落成 28 个原语（`dim` / `glow` 拆开，`color` 带颜色参数）：`rise fall grow shrink dash creep enter exit arc under behind between split join shiver shimmer wave droop stretch squash thud float spin repeat multiply dim glow color`，前端 `dances.semanticPlan` 每个原语一种动作，全部以 em 为单位、≤ 2.5 s；enter / exit / arc / under / behind / between 六个原语站在 CSS 画的小舞台物件上（盒子、屋顶、桌子、树、两道杠）；cold / hot / sad 与颜色词有静态姿态色（只改颜色不改字形，原则 5）。
+- **何时跳**：语义舞只在**翻面**时随背面挂载播放一次（决定 ③），正面只有拼读两舞；背面的 🔊 / `P` 重放 = 拼读 + 重音 + 语义；`dance_mode = form_only` 不播、不摆姿态（P2 起有实际含义；设置页暂时仍是开关，`form_only` 只能通过接口设置）。
+- **标注管线**：新任务类型 `generate_dance`（每次 20 词，kind `dance`，独立日预算 `WD_AI_DANCE_DAILY_BUDGET_USD` 默认 0.50，单次 `WD_AI_BUDGET_DANCE` 0.25，超时 120 s）；提示词 `dance_system.txt`（dance-v1），schema `dance_v1.json`（扁平：`primitive` 含 `none`，`n` / `color` 以 0 / "" 表示不适用，因为 CLI 已验证的关键字集合没有 oneOf）；输入给模型的是词形、音标、`meaning_zh` 第一义项（没有内容时取词典里主要词性那一行——ECDICT 按词性排列，fly 的第一行是「n. 苍蝇」而它八成是动词；内容任务还在路上时舞步任务顺延 10 分钟等卡片上的义项，最多 6 次）和规则层的切块；运行时再查一遍词是否被合并 / 判无效（跳过）；后验证：切块拼不回词形就回退规则切块，重读越界则切块和重读一起回退规则层（不混用两层），字母标记永远取规则层，最终用 `schemas.DanceSpec` 校验后写入 `word_dances`（旧行 superseded）并指向 `words.active_dance_id`；缺失或不合格的词任务失败重试，全军覆没则按 invalid_output 走 §6.3。
+- **入队**：`bank.enqueue_content_if_needed` 在内容任务**之后**顺带 `dance.enqueue_if_needed`，优先级比内容任务低一档（11 / 21 / 31），等内容的学习者永远不用排在舞步调用后面；门控：词有效、未合并、有规则 spec、没有仍能拼回词形的 Claude spec、没有存活的 `dance:<id>` 任务；子预算为 0 时什么都不排（关掉功能不产生任务抖动）；词形改名导致旧 spec 拼不回、或任务在 worker 崩溃路径上死掉留下 `queued` 的词会被重新排队。批量 `wd dance-annotate --stage xs` 跑小学 600 词（30 次调用 ≈ $2，一个晚上，预算临时抬高后脚本回退）。
+- **读取**：`dance.spec_for_word` 先取存储的 Claude spec，没有再按规则现算；卡片从不等任务。
+- **数据与运维**：迁移 0016 重建 `jobs` / `ai_calls`（CHECK 列表加新值）、新建 `word_dances`、`words` 加两列 —— 停机迁移；`wd check db` 不变；管理页 `ai` 多两项 `dance_today_usd` / `dance_daily_budget_usd`。
+- **测试**：`test_db_0016`（重建保留全部行与索引、CHECK 生效、唯一活动行）、`test_dance_annotate`（入队门控与去重、worker 整批标注、存储 spec 优先于规则、坏切块回退、预算为 0 时跳过、CLI）、契约与 fake claude 测试扩到 `dance_v1`；前端 `dances.test`（28 原语全部 ≤ 2.5 s、目标合法）、`DancingWord`（舞台物件 / 分身 / 姿态色 / 三种播放方式 / form_only）、`StudyCard`（背面翻面播放、form_only 不播）。
+- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关；标注结果的人工审核页（本次用一次性 Artifact）。

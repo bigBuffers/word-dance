@@ -45,7 +45,7 @@ EXPORT_COLUMNS = ("word", "phonetic", "translation", "state", "origin", "note", 
 EXPORT_VERSION = 1
 REVIEW_LOG_EXPORT_DAYS = 365
 EMAIL_CODE_SUBJECT = "【word-Dance】邮箱验证码"
-JOB_KEY_PREFIXES = ("lookup", "content", "image", "svg")  # live jobs cancelled with an orphaned private word
+JOB_KEY_PREFIXES = ("lookup", "content", "image", "svg", "dance")  # live jobs cancelled with an orphaned private word
 
 
 def _user_response(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:

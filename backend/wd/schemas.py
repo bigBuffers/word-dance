@@ -47,7 +47,9 @@ ImageProviderName = Literal["wikimedia", "openverse", "pixabay", "pexels", "clau
 Difficulty = Literal[1, 2, 3, 4, 5]
 FlagTier = Literal[0, 1]
 AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI or ai/providers/openai_http.py (CLAUDE_INTEGRATION §10)
-DanceMode = Literal["full", "form_only", "off"]  # user_settings.dance_mode — 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): P1 plays the same for full and form_only
+DanceMode = Literal["full", "form_only", "off"]  # user_settings.dance_mode — 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = + semantic dance, form_only = spelling + stress only
+DancePrimitive = Literal["rise", "fall", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]  # the semantic dance library (WORD_DANCE_DESIGN §4.3), mirrored by dance_v1.json
+DanceColor = Literal["red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]  # the only colours the `color` primitive may name
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
 # frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
@@ -611,15 +613,31 @@ class DanceMarks(Model):
     silent: list[int]
 
 
+class DanceParams(Model):
+    """Parameters of a semantic primitive (API.md §9 ``DanceSpec.semantic.params``): ``n`` copies for ``multiply``, the colour for ``color``."""
+
+    n: int | None = None
+    color: DanceColor | None = None
+
+
+class DanceSemantic(Model):
+    """The one meaning motion of a word (WORD_DANCE_DESIGN §4.3), chosen by Claude from the closed ``DancePrimitive`` list."""
+
+    primitive: DancePrimitive
+    params: DanceParams
+
+
 class DanceSpec(Model):
-    """API.md §9 ``DanceSpec`` — the 「单词之舞」 P1 data derived by ``wd.dance.spec_for`` from the display form and the phonetic:
-    syllable chunks (``"".join(letters) == display``), the primary-stressed chunk, letter marks. Never stored."""
+    """API.md §9 ``DanceSpec`` — the 「单词之舞」 data: syllable chunks (``"".join(letters) == display``), the primary-stressed chunk,
+    letter marks and the optional semantic dance. ``source="rule"`` = ``wd.dance.spec_for`` at serialisation time (P1, no semantic);
+    ``source="claude"`` = the stored ``word_dances`` row (chunks confirmed or corrected, semantic chosen; P2)."""
 
     version: Literal[1]
     letters: list[str]
     stress: int | None
     marks: DanceMarks
-    source: Literal["rule"]
+    semantic: DanceSemantic | None
+    source: Literal["rule", "claude"]
 
 
 class WordDetailWord(WordBrief):
@@ -1153,6 +1171,8 @@ class AdminOverviewAi(Model):
     monthly_budget_usd: float
     svg_today_usd: float
     svg_daily_budget_usd: float
+    dance_today_usd: float  # generate_dance (单词之舞 annotations) today, against WD_AI_DANCE_DAILY_BUDGET_USD
+    dance_daily_budget_usd: float
     calls_today: int
     avg_cost_per_word_7d: float | None
     last_error: str | None
@@ -1289,7 +1309,7 @@ class InviteCreatedResponse(Model):
 
 class AdminJobsQuery(Model):
     status: Literal["queued", "running", "done", "dead", "cancelled"] | None = None
-    type: Literal["generate_content", "lookup_word", "consolidate_bank", "generate_svg", "fetch_image", "send_email", "send_webhook", "prewarm_plan"] | None = None
+    type: Literal["generate_content", "lookup_word", "consolidate_bank", "generate_svg", "fetch_image", "send_email", "send_webhook", "prewarm_plan", "generate_dance"] | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=100)
 

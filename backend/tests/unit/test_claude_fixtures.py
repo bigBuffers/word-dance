@@ -30,7 +30,7 @@ def keywords_of(node, found: set[str]) -> None:
     return None
 
 
-@pytest.mark.parametrize("name", ["probe_v1", "content_v1", "lookup_v1", "consolidate_v1", "svg_v1"])
+@pytest.mark.parametrize("name", ["probe_v1", "content_v1", "lookup_v1", "consolidate_v1", "svg_v1", "dance_v1"])
 def test_schema_copies_use_only_the_probe_validated_keywords(name):
     found: set[str] = set()
     keywords_of(SCHEMAS[name], found)
@@ -93,6 +93,7 @@ def test_consolidate_fixture_covers_every_verdict_but_ok_twice():
         ("lookup_v1", "Look up.\n<items>\n" + json.dumps({"items": ["went", "GDP", "take off"]}) + "\n</items>"),
         ("consolidate_v1", "Consolidate.\n<items>\n" + json.dumps({"bank_headwords": ["a"], "items": [{"id": 1, "input": "a", "headword": "a"}]}) + "\n</items>"),
         ("svg_v1", 'Draw an illustration for the word "abandon" (v. 放弃). Concept: 雪地里的汽车。'),
+        ("dance_v1", "Annotate.\n<items>\n" + json.dumps({"words": [{"word": "up", "phonetic": "ʌp", "meaning_zh": "向上", "rule_letters": ["up"], "rule_stress": 0}, {"word": "abandon", "phonetic": "ə'bændən", "meaning_zh": "放弃", "rule_letters": ["a", "ban", "don"], "rule_stress": 1}]}) + "\n</items>"),
     ],
 )
 def test_fake_claude_output_validates_against_the_schema(schema, prompt, fake_claude_env):

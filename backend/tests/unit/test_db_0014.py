@@ -69,14 +69,14 @@ def test_upgrade_0014_adds_a_nullable_column_without_rebuild(settings, tmp_path:
         assert result.applied[0] == (14, "learn_rank") and db.current_version(c) >= 14  # later additive files (0015 …) ride along
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         cols = {r["name"]: r for r in c.execute("PRAGMA table_info(words)")}
-        assert [r["name"] for r in c.execute("PRAGMA table_info(words)")] == [*before_cols, "learn_rank"]  # appended, nothing else moved
+        assert [r["name"] for r in c.execute("PRAGMA table_info(words)")] == [*before_cols, "learn_rank", "active_dance_id", "dance_state"]  # appended (0014, then 0016), nothing else moved
         col = cols["learn_rank"]
         assert (col["type"], col["notnull"], col["dflt_value"], col["pk"]) == ("INTEGER", 0, None, 0)
         assert c.execute("SELECT COUNT(*) FROM words WHERE learn_rank IS NOT NULL").fetchone()[0] == 0  # NULL = not computed yet
         assert [tuple(r)[: len(before_cols)] for r in c.execute("SELECT * FROM words ORDER BY id")] == before_words  # every value survived
         assert {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'words'")} == before_indexes
         assert "ix_words_learn_rank" not in before_indexes
-        assert set(db.table_names(c)) == before_tables == EXPECTED_TABLES
+        assert set(db.table_names(c)) == before_tables | {"word_dances"} == EXPECTED_TABLES  # 0016 adds word_dances on the way
         assert db.view_names(c) == ["v_bank"] and c.execute("SELECT COUNT(*) FROM v_bank").fetchone()[0] == before_bank
         assert {t: c.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in before_tables if t != "schema_migrations"} == {t: n for t, n in before_counts.items() if t != "schema_migrations"}
         last = c.execute("SELECT kind FROM system_events ORDER BY id DESC LIMIT 1").fetchone()

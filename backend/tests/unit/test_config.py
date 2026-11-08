@@ -33,6 +33,7 @@ def test_defaults_without_environment():
     assert cfg.image_providers == ("wikimedia", "openverse")
     assert cfg.image_kid_stages == ()  # the child picture style is off until the pilot (PLAN §5.1 C3)
     assert cfg.ai_daily_budget_usd == 3.0 and cfg.ai_monthly_budget_usd == 40.0 and cfg.ai_svg_daily_budget_usd == 0.5
+    assert cfg.ai_dance_daily_budget_usd == 0.5 and cfg.ai_budget_dance == 0.25 and cfg.ai_timeout_dance_sec == 120  # 单词之舞 annotations (P2)
     assert cfg.max_body_bytes == 1_048_576 and cfg.session_days == 30 and cfg.prebuild_hours == 3
     assert cfg.secret_key.startswith("ephemeral-")  # random per process when unset
     assert cfg.email_configured is False and cfg.public_origin is None and cfg.cookie_secure_effective is False

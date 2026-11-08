@@ -565,7 +565,7 @@ def test_word_detail_shape_for_a_seed_word(seeded, user):
     assert w["forms"][0] == {"form": "abandoned", "kind": "p"} and {f["form"] for f in w["forms"]} == {"abandoned", "abandoning", "abandons"}
     assert w["confusables"] == ["abundant"] and w["source"] == "seed" and w["exam_tags"] == ["ky", "toefl", "gre"]
     assert w["definition"] and w["translation"].startswith("vt. 放弃, 抛弃") and w["pos"] and w["bnc"]
-    assert w["dance"] == {"version": 1, "letters": ["a", "ban", "don"], "stress": 1, "marks": {"double": [], "silent": []}, "source": "rule"}  # wd.dance from display + phonetic
+    assert w["dance"] == {"version": 1, "letters": ["a", "ban", "don"], "stress": 1, "marks": {"double": [], "silent": []}, "semantic": None, "source": "rule"}  # wd.dance from display + phonetic
     assert d["content"] is None and d["content_state"] == "none" and d["content_deferred_until"] is None
     assert d["image"] == words.card_image_meta(wid)
     assert d["mine"] is None and d["redirected_from"] is None and d["history"] == []

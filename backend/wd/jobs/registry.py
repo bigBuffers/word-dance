@@ -26,7 +26,7 @@ from ..interfaces import Handler
 
 log = logging.getLogger("wd.jobs.registry")
 
-# the jobs.type CHECK list of 0001_init.sql
+# the jobs.type CHECK list (0001_init.sql, rebuilt with generate_dance by 0016_word_dances.sql)
 JOB_TYPES: tuple[str, ...] = (
     "generate_content",
     "lookup_word",
@@ -36,6 +36,7 @@ JOB_TYPES: tuple[str, ...] = (
     "send_email",
     "send_webhook",
     "prewarm_plan",
+    "generate_dance",
 )
 
 HANDLER_MODULES: tuple[str, ...] = (
@@ -47,6 +48,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "wd.images.handler",
     "wd.delivery.email",
     "wd.delivery.webhook",
+    "wd.ai.dance",
 )
 
 

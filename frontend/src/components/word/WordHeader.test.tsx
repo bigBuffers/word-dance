@@ -9,7 +9,7 @@ import { dancePlan } from './dances';
 import { WordHeader } from './WordHeader';
 
 const word = { display: 'yesterday', phonetic: "'jestədi", stages: ['xs' as const], stage_min: 1 as const, cet6_star: false };
-const spec: DanceSpec = { version: 1, letters: ['yes', 'ter', 'day'], stress: 0, marks: { double: [], silent: [] }, source: 'rule' };
+const spec: DanceSpec = { version: 1, letters: ['yes', 'ter', 'day'], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' };
 
 describe('WordHeader word dance', () => {
   it('shows the syllable chips with the stressed one marked, names the heading after the word and keeps its text', () => {

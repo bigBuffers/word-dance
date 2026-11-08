@@ -305,7 +305,7 @@ describe('StudyPage', () => {
 });
 
 describe('StudyPage word dance (FRONTEND §5.1.1, §6.5; element.animate stubbed)', () => {
-  const spec = { version: 1 as const, letters: ['w', '1'], stress: 0, marks: { double: [] as [number, number][], silent: [] as number[] }, source: 'rule' as const };
+  const spec = { version: 1 as const, letters: ['w', '1'], stress: 0, marks: { double: [] as [number, number][], silent: [] as number[] }, semantic: null, source: 'rule' as const };
   const danced = (id: number, over: Partial<StudyItem> = {}): StudyItem => {
     const it = item(id, over);
     it.word = { ...it.word, dance: spec };

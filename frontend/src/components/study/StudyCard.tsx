@@ -62,7 +62,7 @@ export interface StudyCardProps {
   danceMode?: DanceMode;
   /** Replay counter from the page (key P), see `WordHeader.playToken`. */
   danceToken?: number;
-  /** Play the dance when the front face mounts (the page decides: first exposures only). */
+  /** Play the dances on this card's first exposures (the page decides): the spelling + stress dance when the front face mounts, the semantic dance when the back mounts at the reveal. */
   danceAutoplay?: boolean;
 }
 
@@ -150,6 +150,7 @@ export function StudyCard({
   const { word, content, mine } = item;
   // screen items never dance (FRONTEND §5.1.1): the spec is withheld, so the header renders the plain headword
   const dance = danceMode !== 'off' && item.kind !== 'screen' ? word.dance : undefined;
+  const semanticEnabled = danceMode === 'full';
   // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
   const barRef = useBottomBarOffset<HTMLDivElement>();
   const isScreen = item.kind === 'screen';
@@ -221,8 +222,9 @@ export function StudyCard({
     return (
       <article className={cx('study-card', className)} role="group" aria-label={word.display}>
         {header}
-        <div className="study-card__face study-card__front study-card__front--tappable" onClick={onReveal}>
-          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} autoplay={danceAutoplay} />
+        <div key="front" className="study-card__face study-card__front study-card__front--tappable" onClick={onReveal}>
+          {/* semanticEnabled={false}: the front never shows the meaning — no stage object, pose colour or ghost copies before the reveal */}
+          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} autoplay={danceAutoplay ? 'form' : false} semanticEnabled={false} />
           {hint && hintText && (
             <p className="study-card__hint" lang="en">
               {hintText}
@@ -312,8 +314,21 @@ export function StudyCard({
   return (
     <article className={cx('study-card', 'study-card--revealed', className)} role="group" aria-label={word.display}>
       {header}
-      <div className="study-card__face study-card__back">
-        <WordHeader word={word} size="md" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} />
+      <div key="back" className="study-card__face study-card__back">
+        {/* keyed: the back face is new content, so its WordHeader mounts fresh and the semantic autoplay fires at the reveal */}
+        <WordHeader
+          word={word}
+          size="md"
+          as="h2"
+          accent={accent}
+          onlyStages={onlyStages}
+          className="study-card__word"
+          dance={dance}
+          playToken={danceToken}
+          autoplay={danceAutoplay && semanticEnabled ? 'semantic' : false}
+          replay={semanticEnabled ? 'full' : 'form'}
+          semanticEnabled={semanticEnabled}
+        />
         <p className="study-card__meaning" lang="zh-CN" aria-live="polite">
           {meaning}
         </p>

@@ -147,3 +147,6 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 - [ ] 系统「减弱动态效果」打开：不动，重读音节静态着色，信息不丢。
 - [ ] 手机 360px：长词（supermarket、grandmother）不换行、不溢出；整段动画不超过 2.5 s；低端 Android 上不卡顿。
 - [ ] 详情页：词头下有音节芯片，🔊 重放；词组（ice cream）、缩写（TV、Mr.）没有芯片，词头照旧。
+- [ ] 语义舞（P2，设置为默认的 full 时）：有语义舞步的词（up、in、small、cold、red、three…）在**翻面**那一刻做一次意思动作，正面不做；🔊 / `P` 在背面重放时先拼读后动作；设置成 `form_only`（暂无开关，可用 `PUT /api/settings {dance_mode:'form_only'}`）后背面不再做动作、词头没有颜色姿态。
+- [ ] 有舞台物件的词（in / out 的盒子、over 的屋顶、under 的桌子、behind 的树、between 的两道杠）在 360px 下不溢出卡片；two / three 的分身复制在动画后消失。
+- [ ] 名词（rabbit、apple）和虚词（the、of）没有语义舞，只有拼读两舞；`wd dance-annotate --word <w>` 后详情页接口 `word.dance.source` 变为 `claude`。

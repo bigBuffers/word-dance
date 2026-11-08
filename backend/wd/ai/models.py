@@ -101,12 +101,27 @@ class SvgOutput(Mirror):
     alt_zh: str
 
 
+class DanceItem(Mirror):
+    word: str
+    letters: list[str]
+    stress: int
+    primitive: Literal["none", "rise", "fall", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]
+    n: Literal[0, 2, 3]
+    color: Literal["", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]
+    reason: str
+
+
+class DanceOutput(Mirror):
+    items: list[DanceItem]
+
+
 OUTPUT_MODELS: dict[str, type[Mirror]] = {
     "probe_v1": ProbeOutput,
     "content_v1": ContentOutput,
     "lookup_v1": LookupOutput,
     "consolidate_v1": ConsolidateOutput,
     "svg_v1": SvgOutput,
+    "dance_v1": DanceOutput,
 }
 
 

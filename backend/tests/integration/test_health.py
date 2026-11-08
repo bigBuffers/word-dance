@@ -220,7 +220,7 @@ def test_lifespan_migrated_db_and_public_url_guess(client: TestClient, settings)
     c = db.connect(settings.db_path)
     try:
         assert db.current_version(c) == db.list_migration_files()[-1].version  # every shipped file applied by the lifespan
-        assert len(db.table_names(c)) == 25
+        assert len(db.table_names(c)) == 26
         guess = db.kv_get(c, "public_url_guess")
         assert guess is None or guess.startswith("http://") and guess.endswith(f":{settings.port}")
         assert db.kv_get(c, "seed_version") == hashlib.sha256(settings.seed_path.read_bytes()).hexdigest()  # lifespan imported WD_SEED_PATH via wd.seed (WP1)

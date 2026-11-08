@@ -14,7 +14,7 @@ from wd import db
 EXPECTED_TABLES = {
     "schema_migrations", "kv", "system_events", "users", "sessions", "invite_codes", "auth_throttle", "email_codes", "user_settings",
     "words", "word_forms", "word_contents", "word_images", "user_words", "review_logs", "daily_stats", "push_batches", "push_items",
-    "consolidation_runs", "bank_suggestions", "jobs", "ai_calls", "provider_usage", "provider_state", "content_reports",
+    "consolidation_runs", "bank_suggestions", "jobs", "ai_calls", "provider_usage", "provider_state", "content_reports", "word_dances",
 }
 
 
@@ -49,7 +49,7 @@ def test_fresh_migration_creates_schema_and_one_bookkeeping_row_per_file(setting
         assert result.from_version == 0 and result.to_version == shipped[-1][0]
         tables = set(db.table_names(c))
         assert tables == EXPECTED_TABLES
-        assert len(tables) == 25
+        assert len(tables) == 26
         assert db.view_names(c) == ["v_bank"]
         rows = c.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchall()
         assert [tuple(r) for r in rows] == shipped  # one row per file, written by the runner
@@ -414,6 +414,8 @@ def test_upgrade_0011_renumbers_stages_and_rebuilds_two_tables(settings, tmp_pat
         expected_cols = before_words_cols[: before_words_cols.index("stage_zk")] + ["stage_xs"] + before_words_cols[before_words_cols.index("stage_zk") :]
         if (14, "learn_rank") in result.applied:
             expected_cols.append("learn_rank")  # 0014_learn_rank.sql: one ADD COLUMN, appended after the 0011 layout (test_db_0014.py)
+        if (16, "word_dances") in result.applied:
+            expected_cols.extend(["active_dance_id", "dance_state"])  # 0016_word_dances.sql: two ADD COLUMNs (test_db_0016.py)
         assert words_cols == expected_cols
         assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == [*before_settings_cols, "dance_mode"]  # 0011 keeps the list; 0015 appends one column
         ddl = {r["name"]: r["sql"] for r in c.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}

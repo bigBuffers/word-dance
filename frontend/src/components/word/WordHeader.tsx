@@ -7,6 +7,7 @@ import { cx } from '@/components/ui/cx';
 import type { Accent } from '@/hooks/useSpeech';
 import { zh } from '@/i18n/zh';
 import { DancingWord } from './DancingWord';
+import type { DancePlayKind } from './dances';
 import { KindBadge } from './KindBadge';
 import { SpeakButton } from './SpeakButton';
 import { StageChips } from './StageChips';
@@ -34,8 +35,12 @@ export interface WordHeaderProps {
   dance?: DanceSpec | null;
   /** Replay counter driven by the page (key P); 🔊 adds its own replays on top. */
   playToken?: number;
-  /** Play the dance once on mount, before the first paint (the card show of a word on its first exposures). */
-  autoplay?: boolean;
+  /** Play once on mount, before the first paint: 'form' on the card front, 'semantic' on the back (the reveal), 'full' for both. */
+  autoplay?: DancePlayKind | false;
+  /** What 🔊 / key P replay: 'form' (default, no meaning leak on the front) or 'full' (back face, detail page). */
+  replay?: DancePlayKind;
+  /** `settings.dance_mode === 'form_only'`: the semantic dance is never played or posed. */
+  semanticEnabled?: boolean;
 }
 
 function lengthBucket(display: string): 'long' | 'xlong' | undefined {
@@ -45,7 +50,7 @@ function lengthBucket(display: string): 'long' | 'xlong' | undefined {
   return undefined;
 }
 
-export function WordHeader({ word, size = 'md', kind, accent, showStages = true, onlyStages, as: Tag = 'div', className, dance, playToken = 0, autoplay = false }: WordHeaderProps) {
+export function WordHeader({ word, size = 'md', kind, accent, showStages = true, onlyStages, as: Tag = 'div', className, dance, playToken = 0, autoplay = false, replay = 'form', semanticEnabled = true }: WordHeaderProps) {
   const [replays, setReplays] = useState(0);
   const dancing = dance !== undefined;
   const chips = dance && dance.letters.length > 1 ? dance : null;
@@ -56,7 +61,7 @@ export function WordHeader({ word, size = 'md', kind, accent, showStages = true,
       <div className="word-head__row">
         {/* the letter spans are inline-block, so the heading names itself (otherwise screen readers spell r a b b i t) */}
         <Tag className="word-head__display" lang="en" aria-label={dance ? word.display : undefined}>
-          {dancing ? <DancingWord text={word.display} spec={dance} playToken={playToken + replays} autoplay={autoplay} /> : word.display}
+          {dancing ? <DancingWord text={word.display} spec={dance} playToken={playToken + replays} autoplay={autoplay} replay={replay} semanticEnabled={semanticEnabled} /> : word.display}
         </Tag>
         <SpeakButton
           text={word.display}

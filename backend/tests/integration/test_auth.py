@@ -513,6 +513,7 @@ def test_delete_account_cascade_keeps_shared_private_word(client: TestClient, ap
         c.execute("INSERT INTO content_reports(user_id, word_id, target, reason) VALUES (?, ?, 'content', 'other')", (bob["id"], public))
         job_private = queue.enqueue(c, "lookup_word", {"word_id": private}, dedupe_key=f"lookup:{private}", priority=10, now=NOW_ISO)
         job_shared = queue.enqueue(c, "lookup_word", {"word_id": shared}, dedupe_key=f"lookup:{shared}", priority=10, now=NOW_ISO)
+        job_dance = queue.enqueue(c, "generate_dance", {"word_id": private}, dedupe_key=f"dance:{private}", priority=11, now=NOW_ISO)
     finally:
         c.close()
     r = bob_c.request("DELETE", "/api/account", json={"password": "wrong-password-1"})
@@ -530,6 +531,7 @@ def test_delete_account_cascade_keeps_shared_private_word(client: TestClient, ap
         assert c.execute("SELECT COUNT(*) FROM words WHERE id = ?", (private,)).fetchone()[0] == 0  # nobody else held it
         assert c.execute("SELECT COUNT(*) FROM words WHERE id = ?", (public,)).fetchone()[0] == 1
         assert c.execute("SELECT status FROM jobs WHERE id = ?", (job_private,)).fetchone()[0] == "cancelled"
+        assert c.execute("SELECT status FROM jobs WHERE id = ?", (job_dance,)).fetchone()[0] == "cancelled"  # the 单词之舞 job of the purged word too
         assert c.execute("SELECT status FROM jobs WHERE id = ?", (job_shared,)).fetchone()[0] == "queued"
     finally:
         c.close()

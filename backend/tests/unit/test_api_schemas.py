@@ -162,5 +162,6 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.GradeResponse.model_fields) == {"item", "mine", "next_due_zh", "mastery_suggested", "today", "duplicate", "study_item"}
     assert "confusables" in schemas.WordDetailWord.model_fields and "confusables" in schemas.StudyItemWord.model_fields
     assert "dance" in schemas.WordDetailWord.model_fields and "dance" in schemas.StudyItemWord.model_fields
-    assert set(schemas.DanceSpec.model_fields) == {"version", "letters", "stress", "marks", "source"} and set(schemas.DanceMarks.model_fields) == {"double", "silent"}
+    assert set(schemas.DanceSpec.model_fields) == {"version", "letters", "stress", "marks", "semantic", "source"} and set(schemas.DanceMarks.model_fields) == {"double", "silent"}
+    assert set(schemas.DanceSemantic.model_fields) == {"primitive", "params"} and set(schemas.DanceParams.model_fields) == {"n", "color"}
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}

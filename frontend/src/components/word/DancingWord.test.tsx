@@ -6,10 +6,10 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DanceSpec } from '@/api/types';
 import { DancingWord, canDance, prefersReducedMotion } from './DancingWord';
-import { dancePlan } from './dances';
+import { SEMANTIC_GAP_MS, danceDuration, dancePlan, semanticPlan } from './dances';
 
-const rabbit: DanceSpec = { version: 1, letters: ['rab', 'bit'], stress: 0, marks: { double: [[2, 3]], silent: [] }, source: 'rule' };
-const night: DanceSpec = { version: 1, letters: ['night'], stress: 0, marks: { double: [], silent: [2, 3] }, source: 'rule' };
+const rabbit: DanceSpec = { version: 1, letters: ['rab', 'bit'], stress: 0, marks: { double: [[2, 3]], silent: [] }, semantic: null, source: 'rule' };
+const night: DanceSpec = { version: 1, letters: ['night'], stress: 0, marks: { double: [], silent: [2, 3] }, semantic: null, source: 'rule' };
 
 describe('DancingWord', () => {
   it('renders one span per letter with the syllable index, the stressed and the silent marks, and reads as the word', () => {
@@ -46,7 +46,7 @@ describe('DancingWord', () => {
   it('a moving token does not crash without the Web Animations API', () => {
     const { rerender, container } = render(<DancingWord text="rabbit" spec={rabbit} playToken={0} />);
     rerender(<DancingWord text="rabbit" spec={rabbit} playToken={1} />);
-    rerender(<DancingWord text="rabbit" spec={rabbit} playToken={2} autoplay />);
+    rerender(<DancingWord text="rabbit" spec={rabbit} playToken={2} autoplay="form" />);
     expect(container.querySelectorAll('.dword__l')).toHaveLength(6);
   });
 });
@@ -79,9 +79,9 @@ describe('DancingWord play path (element.animate stubbed)', () => {
 
   it('autoplay plays once on mount and the token still replays afterwards', () => {
     const steps = dancePlan(night, 'currentColor').length; // 5 letters enter + 3 beats (gh stay still), no twins
-    const { rerender } = render(<DancingWord text="night" spec={night} autoplay />);
+    const { rerender } = render(<DancingWord text="night" spec={night} autoplay="form" />);
     expect(animate).toHaveBeenCalledTimes(steps);
-    rerender(<DancingWord text="night" spec={night} autoplay playToken={1} />);
+    rerender(<DancingWord text="night" spec={night} autoplay="form" playToken={1} />);
     expect(animate).toHaveBeenCalledTimes(2 * steps);
   });
 
@@ -89,13 +89,88 @@ describe('DancingWord play path (element.animate stubbed)', () => {
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({ matches: query.includes('reduce'), media: query, onchange: null, addListener: () => undefined, removeListener: () => undefined, addEventListener: () => undefined, removeEventListener: () => undefined, dispatchEvent: () => false })) as typeof window.matchMedia;
     try {
-      const { rerender, container } = render(<DancingWord text="rabbit" spec={rabbit} autoplay />);
+      const { rerender, container } = render(<DancingWord text="rabbit" spec={rabbit} autoplay="form" />);
       expect(prefersReducedMotion()).toBe(true);
       expect(container.querySelector('.dword--static')).not.toBeNull();
-      rerender(<DancingWord text="rabbit" spec={rabbit} autoplay playToken={1} />);
+      rerender(<DancingWord text="rabbit" spec={rabbit} autoplay="form" playToken={1} />);
       expect(animate).not.toHaveBeenCalled();
     } finally {
       window.matchMedia = original;
     }
+  });
+});
+
+describe('DancingWord semantic dance', () => {
+  const inSpec: DanceSpec = { version: 1, letters: ['in'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'enter', params: {} }, source: 'claude' };
+  const three: DanceSpec = { version: 1, letters: ['three'], stress: 0, marks: { double: [[3, 4]], silent: [] }, semantic: { primitive: 'multiply', params: { n: 3 } }, source: 'claude' };
+  const red: DanceSpec = { version: 1, letters: ['red'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'color', params: { color: 'red' } }, source: 'claude' };
+
+  it('draws the stage object, the ghost copies and the pose colour the primitive asks for', () => {
+    const { container, rerender } = render(<DancingWord text="in" spec={inSpec} />);
+    expect(container.querySelector('.dword-stage--box .dword-obj--box')).not.toBeNull();
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBe('enter');
+    rerender(<DancingWord text="three" spec={three} />);
+    expect(container.querySelectorAll('.dword__ghost')).toHaveLength(2);
+    expect(container.querySelector('.dword-obj')).toBeNull();
+    rerender(<DancingWord text="red" spec={red} />);
+    expect((container.querySelector('.dword') as HTMLElement).style.color).toBe('var(--pose-red)'); // the theme token, resolved by the browser
+    expect(container.querySelector('.dword')?.classList.contains('dword--posed')).toBe(true); // the static fallback lets the pose win over the stress mark
+    expect(container.querySelectorAll('.dword__l--stressed')).toHaveLength(0); // a one-chunk word carries no stress information
+    rerender(<DancingWord text="in" spec={inSpec} />);
+    expect(container.querySelector('.dword')?.classList.contains('dword--posed')).toBe(false);
+  });
+
+  it('semanticEnabled=false (form_only) drops the object, the ghosts and the pose', () => {
+    const { container, rerender } = render(<DancingWord text="in" spec={inSpec} semanticEnabled={false} />);
+    expect(container.querySelector('.dword-obj')).toBeNull();
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBeNull();
+    rerender(<DancingWord text="red" spec={red} semanticEnabled={false} />);
+    expect((container.querySelector('.dword') as HTMLElement).style.color).toBe('');
+  });
+
+  describe('with element.animate stubbed', () => {
+    let animate: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      animate = vi.fn(() => ({ finished: Promise.resolve(), cancel: () => undefined }));
+      Object.defineProperty(Element.prototype, 'animate', { value: animate, configurable: true, writable: true });
+    });
+    afterEach(() => {
+      delete (Element.prototype as unknown as { animate?: unknown }).animate;
+    });
+
+    it("autoplay 'semantic' plays the meaning alone; a 'full' replay plays the form now and the meaning after the gap; 'form' never leaks the meaning", () => {
+      vi.useFakeTimers();
+      try {
+        const semantic = semanticPlan(inSpec, 'currentColor').length;
+        const form = dancePlan(inSpec, 'currentColor').length;
+        const { rerender, unmount } = render(<DancingWord text="in" spec={inSpec} autoplay="semantic" replay="full" />);
+        expect(animate).toHaveBeenCalledTimes(semantic);
+        rerender(<DancingWord text="in" spec={inSpec} autoplay="semantic" replay="full" playToken={1} />);
+        expect(animate).toHaveBeenCalledTimes(semantic + form); // the form half plays at once …
+        vi.advanceTimersByTime(danceDuration(inSpec) + SEMANTIC_GAP_MS);
+        expect(animate).toHaveBeenCalledTimes(semantic + form + semantic); // … the meaning follows as a second play (no backwards fill over the form dance)
+        rerender(<DancingWord text="in" spec={inSpec} autoplay="semantic" replay="full" playToken={2} />);
+        expect(animate).toHaveBeenCalledTimes(semantic + form + semantic + form);
+        unmount(); // the pending second half never plays on a gone word
+        vi.advanceTimersByTime(10_000);
+        expect(animate).toHaveBeenCalledTimes(semantic + form + semantic + form);
+        animate.mockClear();
+        const front = render(<DancingWord text="in" spec={inSpec} autoplay="form" replay="form" />);
+        expect(animate).toHaveBeenCalledTimes(form);
+        front.rerender(<DancingWord text="in" spec={inSpec} autoplay="form" replay="form" playToken={1} />);
+        vi.advanceTimersByTime(10_000);
+        expect(animate).toHaveBeenCalledTimes(2 * form);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('semanticEnabled=false plays the form dance only, even for a full replay', () => {
+      const form = dancePlan(inSpec, 'currentColor').length;
+      const { rerender } = render(<DancingWord text="in" spec={inSpec} autoplay="semantic" replay="full" semanticEnabled={false} />);
+      expect(animate).not.toHaveBeenCalled(); // nothing semantic to play
+      rerender(<DancingWord text="in" spec={inSpec} autoplay="semantic" replay="full" semanticEnabled={false} playToken={1} />);
+      expect(animate).toHaveBeenCalledTimes(form);
+    });
   });
 });

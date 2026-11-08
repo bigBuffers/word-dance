@@ -326,10 +326,11 @@ def test_prefetch_enqueues_priority_30_content_for_tomorrows_words(settings, see
     assert r.prefetched == 3 + len(screens)
     assert conn.execute("SELECT content_state FROM words WHERE lemma = 'apple'").fetchone()[0] == "queued"
     assert conn.execute("SELECT content_state FROM words WHERE lemma = 'house'").fetchone()[0] == "none"
-    # the next build_batch enqueues nothing for the prefetched words
-    before = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    # the next build_batch enqueues no CONTENT for the prefetched words (the 单词之舞 ride-along may still queue generate_dance for
+    # words whose dance job is missing — bank's and cat's were deleted above)
+    before = conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'").fetchone()[0]
     batches.build_batch(conn, alice, "2026-10-15", "scheduled", datetime(2026, 10, 14, 21, 0, tzinfo=UTC))
-    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'").fetchone()[0] == before
     # maintenance runs once per WD_TZ day
     assert tick(conn, settings, datetime(2026, 10, 14, 19, 31, tzinfo=UTC)).maintenance is False
 
