@@ -263,4 +263,5 @@
 - **读取**：`dance.spec_for_word` 先取存储的 Claude spec，没有再按规则现算；卡片从不等任务。
 - **数据与运维**：迁移 0016 重建 `jobs` / `ai_calls`（CHECK 列表加新值）、新建 `word_dances`、`words` 加两列 —— 停机迁移；`wd check db` 不变；管理页 `ai` 多两项 `dance_today_usd` / `dance_daily_budget_usd`。
 - **测试**：`test_db_0016`（重建保留全部行与索引、CHECK 生效、唯一活动行）、`test_dance_annotate`（入队门控与去重、worker 整批标注、存储 spec 优先于规则、坏切块回退、预算为 0 时跳过、CLI）、契约与 fake claude 测试扩到 `dance_v1`；前端 `dances.test`（28 原语全部 ≤ 2.5 s、目标合法）、`DancingWord`（舞台物件 / 分身 / 姿态色 / 三种播放方式 / form_only）、`StudyCard`（背面翻面播放、form_only 不播）。
-- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关；标注结果的人工审核页（本次用一次性 Artifact）。
+- **回填与评审（2026-11-08）**：小学 600 词中 592 个标注完成（30 次调用 $0.675），67 个有动作；评审确认动作全部合库、无漏判；切块改正 12 处里 10 处更好。确认的两处**库空缺**：`jump`（库里没有「跳」——rise 是向上 / 高处的位置义，不是跳）和 `on`（in / on / under 三件套缺 on）；提议 P3 加两个原语 `hop`（整词向上弹一下落回）和 `onto`（词落到舞台物件顶上停住），各自对应的典型词：jump、hop、skip / on、on top of。
+- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关；标注结果的人工审核页（本次用一次性 Artifact）；上面两个库空缺；规则层的 `-er` 后缀切分（work·er / farm·er 而不是 wor·ker / far·mer）。
