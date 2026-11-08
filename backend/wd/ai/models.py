@@ -105,7 +105,7 @@ class DanceItem(Mirror):
     word: str
     letters: list[str]
     stress: int
-    primitive: Literal["none", "rise", "fall", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]
+    primitive: Literal["none", "rise", "fall", "hop", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "onto", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]
     n: Literal[0, 2, 3]
     color: Literal["", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]
     reason: str

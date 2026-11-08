@@ -177,6 +177,31 @@
   border-right: 0.12em solid var(--muted);
 }
 
+/* on: a shelf the word lands on — its top edge sits at the baseline, the letters paint over it (the stage isolates a stacking
+   context so the object can sit behind the in-flow word without falling behind the card) */
+.dword-stage--shelf {
+  padding-bottom: 0.35em;
+  isolation: isolate;
+}
+
+.dword-stage--shelf .dword-obj {
+  left: -0.15em;
+  right: -0.15em;
+  bottom: 0;
+  height: 0.6em;
+  z-index: -1;
+  border: 0.09em solid var(--muted);
+  border-radius: 0.12em;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+
+/* hop / onto land on their feet: the squash of the whole word sits on the baseline (hop) or on the shelf (onto); the keyframes
+   themselves stay transform / opacity only */
+.dword-stage[data-primitive='hop'] .dword,
+.dword-stage[data-primitive='onto'] .dword {
+  transform-origin: 50% 100%;
+}
+
 /* behind: a tree the word comes out from behind */
 .dword-stage--tree {
   padding-left: 1.3em;

@@ -18,7 +18,7 @@ export type WebhookFormat = 'generic' | 'wecom' | 'feishu' | 'serverchan' | 'bar
 export type WebhookTestReason = 'dns_failed' | 'host_not_public' | 'connect_failed' | 'timeout' | 'tls_failed' | 'http_error' | 'invalid_url';   // endpoint 17 `reason`
 export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Claude CLI or the fallback HTTP provider (CLAUDE_INTEGRATION §10)
 export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = spelling + stress + semantic dance, form_only = spelling + stress only, off
-export type DancePrimitive = 'rise' | 'fall' | 'grow' | 'shrink' | 'dash' | 'creep' | 'enter' | 'exit' | 'arc' | 'under' | 'behind' | 'between' | 'split' | 'join' | 'shiver' | 'shimmer' | 'wave' | 'droop' | 'stretch' | 'squash' | 'thud' | 'float' | 'spin' | 'repeat' | 'multiply' | 'dim' | 'glow' | 'color';   // the semantic dance library (§4.3): one motion per meaning class, chosen by Claude from this closed list
+export type DancePrimitive = 'rise' | 'fall' | 'hop' | 'grow' | 'shrink' | 'dash' | 'creep' | 'enter' | 'exit' | 'arc' | 'onto' | 'under' | 'behind' | 'between' | 'split' | 'join' | 'shiver' | 'shimmer' | 'wave' | 'droop' | 'stretch' | 'squash' | 'thud' | 'float' | 'spin' | 'repeat' | 'multiply' | 'dim' | 'glow' | 'color';   // the semantic dance library (§4.3): one motion per meaning class, chosen by Claude from this closed list
 export type DanceColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'brown' | 'black' | 'white' | 'grey';   // the only colours the `color` primitive may name
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }

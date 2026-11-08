@@ -207,6 +207,11 @@ def test_build_spec_falls_back_to_the_rules_for_bad_chunks_and_rejects_nothing_v
     assert red["semantic"] is None
     red2, _ = handler.build_spec("red", {"word": "red", "letters": ["red"], "stress": 0, "primitive": "color", "n": 0, "color": "red", "reason": "x"}, rules.spec_for("red", "red"))
     assert red2["semantic"] == {"primitive": "color", "params": {"color": "red"}}
+    # the P3 primitives (library gaps of the 小学 review: jump, on) take no params; a stray n / color is dropped
+    hop, _ = handler.build_spec("jump", {"word": "jump", "letters": ["jump"], "stress": 0, "primitive": "hop", "n": 2, "color": "red", "reason": "x"}, rules.spec_for("jump", "dʒʌmp"))
+    assert hop["semantic"] == {"primitive": "hop", "params": {}}
+    onto, _ = handler.build_spec("on", {"word": "on", "letters": ["on"], "stress": 0, "primitive": "onto", "n": 0, "color": "", "reason": "x"}, rules.spec_for("on", "ɔn"))
+    assert onto["semantic"] == {"primitive": "onto", "params": {}} and onto["source"] == "claude"
 
 
 def test_first_sense_and_prompt_entry(seeded):

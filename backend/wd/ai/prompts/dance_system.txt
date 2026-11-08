@@ -9,6 +9,7 @@ You annotate English vocabulary words for a picture-book style learning card use
 The library — primitive → meaning class → typical words:
 rise      upward movement or high position: up, high, rise, climb, stand up, lift
 fall      downward: down, low, fall, drop, sit down
+hop       jumping: jump, hop, skip, leap, bounce
 grow      big, growing, more: big, large, huge, grow, more, most
 shrink    small, less: small, little, tiny, less, few
 dash      fast: fast, quick, quickly, run, hurry, rush
@@ -16,6 +17,7 @@ creep     slow: slow, slowly
 enter     into: in, into, inside, enter, indoors
 exit      out of: out, outside, leave, exit, outdoors
 arc       over, above, across: over, above, across
+onto      on, on top of: on, onto, upon
 under     under, below: under, below, beneath
 behind    behind, at the back: behind, back (位置)
 between   between, in the middle: between, middle, among

@@ -2,7 +2,7 @@
 // test is offered only once the switch is on AND a URL is saved (the server requires both), its failures are
 // reported in zh from the response's closed-set `reason` (API.md 17; HTTP status / connection advice as the fallback,
 // never the transport text), and the queued test e-mail is announced as queued, not as a success.
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Settings, User } from '@/api/types';
@@ -251,16 +251,22 @@ describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('the switch reflects dance_mode and saves off / full', async () => {
+  it('the three-way control reflects dance_mode and saves form_only / off / full', async () => {
     renderSettings();
-    const sw = (await screen.findByRole('switch', { name: zh.settings.dance })) as HTMLButtonElement;
-    expect(sw.getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByText(zh.settings.danceHint)).toBeTruthy();
-    fireEvent.click(sw);
+    const group = await screen.findByRole('radiogroup', { name: zh.settings.dance });
+    const radio = (label: string) => within(group).getByRole('radio', { name: label }) as HTMLButtonElement;
+    expect(within(group).getAllByRole('radio').map((r) => r.textContent)).toEqual([zh.settings.danceModes.full, zh.settings.danceModes.form_only, zh.settings.danceModes.off]);
+    expect(radio(zh.settings.danceModes.full).getAttribute('aria-checked')).toBe('true');
+    const hint = screen.getByText(zh.settings.danceHint);
+    for (const r of within(group).getAllByRole('radio')) expect(r.getAttribute('aria-describedby')).toBe(hint.id); // the hint stays the control's description (the Switch had aria-describedby)
+    fireEvent.click(radio(zh.settings.danceModes.form_only));
+    await waitFor(() => expect(settings.dance_mode).toBe('form_only'));
+    await waitFor(() => expect(radio(zh.settings.danceModes.form_only).getAttribute('aria-checked')).toBe('true'));
+    fireEvent.click(radio(zh.settings.danceModes.off));
     await waitFor(() => expect(settings.dance_mode).toBe('off'));
-    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ dance_mode: 'off' }]);
-    await waitFor(() => expect(screen.getByRole('switch', { name: zh.settings.dance }).getAttribute('aria-checked')).toBe('false'));
-    fireEvent.click(screen.getByRole('switch', { name: zh.settings.dance }));
+    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ dance_mode: 'form_only' }, { dance_mode: 'off' }]);
+    await waitFor(() => expect(radio(zh.settings.danceModes.off).getAttribute('aria-checked')).toBe('true'));
+    fireEvent.click(radio(zh.settings.danceModes.full));
     await waitFor(() => expect(settings.dance_mode).toBe('full'));
   });
 });

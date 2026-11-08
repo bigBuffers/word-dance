@@ -44,7 +44,7 @@
 
 ## 6 未决
 
-- 设置页仍是开关（full / off）；`form_only` 需要三档控件（P3 一并做）。
+- 设置页仍是开关（full / off）；`form_only` 需要三档控件 —— P3 第一批已做（`docs/releases/2026-11-word-dance-p3.md`）。
 - 标注的人工审核页是一次性脚本生成的 Artifact，不在产品里。
 - 线索复习（P3）、手势（P4）、初高中词缀舞（P5）按设计稿分期。
 
@@ -53,5 +53,5 @@
 - 14:43 上线 `d143df0`：0016 在启动时套用（< 1 s，快照 `backups/pre-migrate-15-to-16.db.gz`），`jobs` 2297 / `ai_calls` 849 行不变，2 s 内健康。迁移前用 `scripts/rehearse_migration.py` 在副本上彩排通过（68 项）。
 - 14:45–14:51 回填：`wd dance-annotate --stage xs --priority 50` 排 592 个任务（8 个词组 / 缩写没有规则 spec：physical education、ice cream、Mr.、Mrs.、Ms.、p.e.、ping-pong、o'clock），30 次调用全部成功，共 **$0.675**（每 20 词 ≈ $0.0225、9.4 s，比预估的 $2 便宜 2/3），无失败、无重试。
 - 结果：592 词有 Claude spec，**67 个有动作**（color 8、repeat 5、multiply 4、glow 4、shimmer 4、droop 4、rise 3、dash 3，其余各 1–2），525 个无动作；模型改正规则层切块 12 处（sto·ry、teach·er、T·V、O·K、Jan·u·ar·y、Feb·ru·ar·y、health·y、fa·vor·ite、fa·vour·ite、grand·moth·er、cloud·y、ev·ery），评审认为 10 处更好、2 处等价。
-- 评审（5 个评审 + 每条 2 个反驳者，47 个 agent）：67 个动作全部合库；525 个「无动作」没有漏判；确认 4 条——**舞步库空缺** `jump`（跳；库里没有「跳一下」的原语，最接近的 rise 意为向上 / 高处）和 `on`（在……上；库里有 enter=in、under，缺 on），模型判 none 是对的，是否扩库留给 P3；**切块** `worker` → work·er、`farmer` → farm·er（规则层的机械 VC·CV 切分，模型没改），已用 `--word worker --word farmer --force` 排了重标，因当日舞步子预算已花完（0.675 > 0.50）顺延到 11-09 00:05 执行。
+- 评审（5 个评审 + 每条 2 个反驳者，47 个 agent）：67 个动作全部合库；525 个「无动作」没有漏判；确认 4 条——**舞步库空缺** `jump`（跳；库里没有「跳一下」的原语，最接近的 rise 意为向上 / 高处）和 `on`（在……上；库里有 enter=in、under，缺 on），模型判 none 是对的，是否扩库留给 P3（P3 第一批加了 `hop` / `onto`）；**切块** `worker` → work·er、`farmer` → farm·er（规则层的机械 VC·CV 切分，模型没改），已用 `--word worker --word farmer --force` 排了重标，因当日舞步子预算已花完（0.675 > 0.50）顺延到 11-09 00:05 执行。
 - 审核页（Artifact「小学语义舞分配」）：按舞步分组，点卡片预览动作。

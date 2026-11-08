@@ -13,7 +13,9 @@ DESIGN §7.1 and the runbooks describe what the code does; each test here pins o
   §6.2 / §6.3 step 4, WORD_LIBRARY_CURATION §1.6 and CLAUDE_INTEGRATION's prewarm paragraph quote ``learn_order.ORDER_SQL`` (the
   ``w.`` alias stripped) and the NULL stage distance instead of the pre-0014 frequency order; ops.md §1 and TASKS.md list the
   eight ``wd check db`` invariant names in ``diag`` order; DEPLOY §9 lists ``learn-order`` with the options the parser registers;
-  FRONTEND §5.5 / §8 and zh.ts carry the 学习顺序 label while the wire value stays ``freq``.
+  FRONTEND §5.5 / §8 and zh.ts carry the 学习顺序 label while the wire value stays ``freq``;
+* API.md §9's ``ts`` block is ``frontend/src/api/types.ts`` verbatim (header comment excluded) — the frozen DTO contract, which
+  ``scripts/check_contract.py`` only compares with ``schemas.py`` (单词之舞 P3 review).
 """
 
 from __future__ import annotations
@@ -272,6 +274,20 @@ def test_frontend_copy_contract_lists_the_p0_keys():
     zh = (REPO / "frontend" / "src" / "i18n" / "zh.ts").read_text(encoding="utf-8")
     for key in ("backToToday: '回到今日'", "speak: '发音'", "speechUnsupported: '当前浏览器不支持语音'"):
         assert key in block.group(1) and key in zh, key
+
+
+# ------------------------------------------------------------------------------------------ API.md §9 ↔ types.ts
+def test_types_ts_is_api_section_9_verbatim():
+    """types.ts calls itself 'API.md §9 copied verbatim' (its header comment) and scripts/check_contract.py compares it with
+    schemas.py only: this pins the §9 ``ts`` block to the file — the header comment and the blank line after it excluded — so a DTO
+    or a literal union (``DancePrimitive``, 单词之舞 P3) edited in one place fails here instead of drifting."""
+    block = re.search(r"```ts\n(.*?)\n```", section(doc("API.md"), "## 9. Shared TypeScript DTOs"), re.S)
+    assert block
+    lines = (REPO / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8").splitlines()
+    header, lines = lines[:4], lines[4:]  # exactly the three-line header comment and its blank line — a stray comment is drift
+    assert header[0].startswith("// word-Dance — shared DTOs. FROZEN CONTRACT") and all(l.startswith("//") for l in header[:3]) and header[3] == ""
+    assert lines[0].startswith("export type Stage")
+    assert "\n".join(lines).rstrip("\n") == block.group(1).rstrip("\n")
 
 
 # ------------------------------------------------------ learning order (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.1 item 23)

@@ -6,7 +6,7 @@
 // 重音舞 (beats): the syllables then beat in turn; the primary-stressed one jumps highest, grows a little and takes the accent
 // colour; silent letters (night's gh, the magic e) stay still and keep their muted colour. Doubled letters jump together once
 // more at the end (rabbit's bb). 语义舞 (semantic): one motion from the closed library that IS the word's meaning — up rises,
-// small shrinks, in walks into a box, cold shivers — played at the reveal, every primitive the same motion for the same meaning
+// small shrinks, in walks into a box, jump hops, on lands on a shelf, cold shivers — played at the reveal, every primitive the same motion for the same meaning
 // class (design principle 3). Everything is transform / opacity / color, so it composites; the form plan stays under 2.5 s and a
 // semantic plan under 2.5 s.
 import type { DanceColor, DancePrimitive, DanceSpec } from '@/api/types';
@@ -32,6 +32,8 @@ export const BEAT_STRESSED_MS = 330;
 export const TWIN_MS = 420;
 /** The pause between the stress dance and the semantic dance in a 'full' play. */
 export const SEMANTIC_GAP_MS = 160;
+/** `onto`: the keyframe offset at which the word touches the shelf — the shelf's own step gives from this offset on. */
+export const ONTO_TOUCHDOWN = 0.78;
 const ENTER_EASING = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
 const BEAT_EASING = 'cubic-bezier(0.3, 0.7, 0.3, 1)';
 const SETTLE = 'cubic-bezier(0.3, 0.6, 0.3, 1)';
@@ -133,9 +135,9 @@ export function danceDuration(spec: DanceSpec): number {
 
 // ---------------------------------------------------------------------------------------------------- 语义舞
 /** The stage object a primitive moves against (drawn by DancingWord / word.css), or none. */
-export type DanceObject = 'box' | 'roof' | 'table' | 'tree' | 'bars';
+export type DanceObject = 'box' | 'roof' | 'table' | 'tree' | 'bars' | 'shelf';
 
-export const OBJECT_OF: Partial<Record<DancePrimitive, DanceObject>> = { enter: 'box', exit: 'box', arc: 'roof', under: 'table', behind: 'tree', between: 'bars' };
+export const OBJECT_OF: Partial<Record<DancePrimitive, DanceObject>> = { enter: 'box', exit: 'box', arc: 'roof', onto: 'shelf', under: 'table', behind: 'tree', between: 'bars' };
 
 /** The colour a word wears at rest and in the static fallback: the `--pose-*` tokens of styles/tokens.css, which hold a deep tone
  * on the light theme and a bright one on the dark theme (≥ 3:1 on each `--bg` for the large bold headword); black / white keep
@@ -197,7 +199,8 @@ export interface DanceColors {
 
 /**
  * The semantic dance of `spec` from `start`: one motion per meaning class (§4.3). Word-level motions animate the whole word;
- * letter-level ones stagger the letters; `multiply` fans ghost copies out and back; `between` also fades its bars in; `dim`,
+ * letter-level ones stagger the letters; `multiply` fans ghost copies out and back; `between` also fades its bars in and `onto` lets
+ * its shelf give under the landing; `dim`,
  * `glow` and `color` animate the colour — `color` pours from `colors.ink` (the heading ink, not the pose the word already wears)
  * into `colors.pose`; black plays as `dim`, white as `glow`. Returns [] when the spec has no semantic.
  */
@@ -220,6 +223,20 @@ export function semanticPlan(spec: DanceSpec, accent: string, start = 0, colors:
       return enterEach(() => [{ transform: 'translateY(1.1em)', opacity: 0 }, { transform: 'translateY(-0.25em)', opacity: 1, offset: 0.7 }, { transform: 'none' }], 720, ENTER_EASING);
     case 'fall': // down, low, drop: it comes down from above and lands with a bounce
       return enterEach(() => [{ transform: 'translateY(-1.4em)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1, offset: 0.6, easing: 'cubic-bezier(0.4, 0, 1, 1)' }, { transform: 'translateY(-0.3em)', offset: 0.78 }, { transform: 'none' }], 820, SETTLE, 30);
+    case 'hop': // jump, hop, skip: the word crouches, springs up, lands with a squash and takes one small hop more (the squash sits on
+      // the baseline: word.css gives the hop / onto word a transform-origin at its foot; the other word-level motions keep the centre)
+      return whole(
+        [
+          { transform: 'none', easing: 'ease-in' },
+          { transform: 'scaleY(0.84) scaleX(1.08)', offset: 0.12, easing: 'cubic-bezier(0.2, 0.7, 0.4, 1)' },
+          { transform: 'translateY(-1.3em) scaleY(1.08) scaleX(0.96)', offset: 0.42, easing: 'cubic-bezier(0.5, 0, 1, 1)' },
+          { transform: 'translateY(0) scaleY(0.8) scaleX(1.14)', offset: 0.6, easing: 'cubic-bezier(0.2, 0.7, 0.4, 1)' },
+          { transform: 'translateY(-0.45em)', offset: 0.78, easing: 'cubic-bezier(0.5, 0, 1, 1)' },
+          { transform: 'translateY(0) scaleY(0.92) scaleX(1.05)', offset: 0.9, easing: 'ease-out' },
+          { transform: 'none' },
+        ],
+        { duration: 1300, easing: 'linear' },
+      );
     case 'grow': // big, large, grow: it grows into its size
       return whole([{ transform: 'scale(0.35)', opacity: 0.5 }, { transform: 'scale(1.08)', opacity: 1, offset: 0.8 }, { transform: 'none' }], { duration: 1100, easing: SETTLE });
     case 'shrink': // small, little: it shrinks into its size
@@ -237,6 +254,26 @@ export function semanticPlan(spec: DanceSpec, accent: string, start = 0, colors:
       return whole([{ transform: 'translateX(-2.6em) scale(0.8)', opacity: 0.7 }, { transform: 'translateX(-2.6em) translateY(-0.7em) scale(0.9)', opacity: 1, offset: 0.35 }, { transform: 'translateX(-0.4em) translateY(-0.4em)', offset: 0.75 }, { transform: 'none' }], { duration: 1200, easing: SETTLE });
     case 'arc': // over, above, across: it flies over the roof
       return whole([{ transform: 'translateX(-4em)', opacity: 0.8 }, { transform: 'translateX(-2em) translateY(-1.6em)', opacity: 1, offset: 0.5 }, { transform: 'none' }], { duration: 1500, easing: 'ease-in-out' });
+    case 'onto': // on, onto: it comes in from the upper left and lands on top of the shelf, which gives a little under the landing
+      // (the squash sits on the shelf: foot transform-origin from word.css, like hop). The shelf's step carries no options-level
+      // easing — an effect-level easing warps the offsets, and the shelf must give at the word's touchdown, not before it
+      return [
+        ...whole(
+          [
+            { transform: 'translateX(-2.4em) translateY(-1.1em)', opacity: 0.85, easing: 'ease-out' },
+            { transform: 'translateX(-1em) translateY(-1.35em)', opacity: 1, offset: 0.45, easing: 'cubic-bezier(0.5, 0, 1, 1)' },
+            { transform: 'translateX(0) scaleY(0.88)', offset: ONTO_TOUCHDOWN, easing: 'ease-out' },
+            { transform: 'none' },
+          ],
+          { duration: 1300, easing: 'linear' },
+        ),
+        {
+          target: 'stage',
+          index: 0,
+          keyframes: [{ transform: 'none' }, { transform: 'none', offset: ONTO_TOUCHDOWN, easing: 'ease-in' }, { transform: 'translateY(0.08em)', offset: 0.86, easing: 'ease-out' }, { transform: 'none' }],
+          options: { duration: 1300, delay: start },
+        },
+      ];
     case 'under': // under, below: it ducks under the table
       return whole([{ transform: 'translateX(-4em) translateY(-1em)', opacity: 0.8 }, { transform: 'translateX(-2em) translateY(0.15em)', opacity: 1, offset: 0.55 }, { transform: 'none' }], { duration: 1400, easing: 'ease-in-out' });
     case 'behind': // behind: it comes out from behind the tree

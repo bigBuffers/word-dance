@@ -268,7 +268,7 @@ REQUIRED_DROP = {"content": "meaning_zh", "lookup": "headword", "consolidate": "
 
 DANCE_PRIMITIVES = {"up": ("rise", 0, ""), "down": ("fall", 0, ""), "in": ("enter", 0, ""), "out": ("exit", 0, ""), "big": ("grow", 0, ""), "small": ("shrink", 0, ""),
                     "cold": ("shiver", 0, ""), "hot": ("shimmer", 0, ""), "happy": ("wave", 0, ""), "sad": ("droop", 0, ""), "two": ("multiply", 2, ""), "three": ("multiply", 3, ""),
-                    "red": ("color", 0, "red"), "yellow": ("color", 0, "yellow"), "jump": ("rise", 0, ""), "turn": ("spin", 0, ""), "again": ("repeat", 0, "")}
+                    "red": ("color", 0, "red"), "yellow": ("color", 0, "yellow"), "jump": ("hop", 0, ""), "on": ("onto", 0, ""), "turn": ("spin", 0, ""), "again": ("repeat", 0, "")}
 
 
 def dance_words(prompt: str) -> list[dict]:

@@ -15,6 +15,8 @@ export interface SegmentedProps<V extends string> {
   onChange: (value: V) => void;
   'aria-label'?: string;
   'aria-labelledby'?: string;
+  /** Forwarded to every radio (the focused element): VoiceOver / TalkBack read a description only from the focused control, not from the group. */
+  'aria-describedby'?: string;
   size?: 'sm' | 'md';
   /** Stretch to the container width. */
   block?: boolean;
@@ -27,6 +29,7 @@ export function Segmented<V extends string>({
   onChange,
   'aria-label': ariaLabel,
   'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
   size = 'md',
   block = false,
   className,
@@ -80,6 +83,7 @@ export function Segmented<V extends string>({
             role="radio"
             className="segmented__opt"
             aria-checked={checked}
+            aria-describedby={ariaDescribedBy}
             tabIndex={checked ? 0 : -1}
             disabled={option.disabled}
             onClick={() => onChange(option.value)}

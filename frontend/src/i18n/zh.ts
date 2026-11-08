@@ -80,7 +80,7 @@ export const zh = {
               webhookFailDns: '域名无法解析，请检查地址拼写', webhookFailPrivate: '地址不是公网地址，已拒绝；请填写公网 https 地址', webhookFailTimeout: '连接超时，请稍后重试或检查目标服务',
               webhookFailTls: 'HTTPS 证书校验失败，请检查目标站点的证书', webhookFailInvalidUrl: '地址格式无效，请检查后重新填写',
               showImages: '显示配图', zhExamples: '例句译文', zhModes: { tap: '点按显示', always: '总是显示' }, autoPronounce: '自动发音', accent: '口音', accents: { 'en-US': '美音', 'en-GB': '英音' },
-              dance: '单词之舞', danceHint: '新词出现时，字母按音节入场，重读的音节跳得最高；点发音按钮可以再看一次',
+              dance: '单词之舞', danceModes: { full: '全部', form_only: '只拼读', off: '关' }, danceHint: '新词和还不熟的词出现时，字母按音节入场、重读的音节跳得最高；翻面时 up、in、cold 这类词再做一次它的意思。「只拼读」只跳字母、不做意思动作；点发音按钮随时可以再看一次',
               displayName: '昵称', changePassword: '修改密码', currentPassword: '当前密码', newPassword: '新密码', export: '导出数据', exportCsv: 'CSV', exportJson: 'JSON',
               import: '导入数据', importHint: '选择之前导出的 CSV 或 JSON 文件', importDone: (n: number, m: number) => `已导入 ${n} 个，跳过 ${m} 个`,
               deleteAccount: '删除账号', deleteConfirm: '删除后所有学习记录将无法恢复。请输入密码确认。', version: (v: string) => `版本 ${v}`,

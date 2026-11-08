@@ -48,7 +48,7 @@ Difficulty = Literal[1, 2, 3, 4, 5]
 FlagTier = Literal[0, 1]
 AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI or ai/providers/openai_http.py (CLAUDE_INTEGRATION §10)
 DanceMode = Literal["full", "form_only", "off"]  # user_settings.dance_mode — 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = + semantic dance, form_only = spelling + stress only
-DancePrimitive = Literal["rise", "fall", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]  # the semantic dance library (WORD_DANCE_DESIGN §4.3), mirrored by dance_v1.json
+DancePrimitive = Literal["rise", "fall", "hop", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "onto", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]  # the semantic dance library (WORD_DANCE_DESIGN §4.3), mirrored by dance_v1.json
 DanceColor = Literal["red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]  # the only colours the `color` primitive may name
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the

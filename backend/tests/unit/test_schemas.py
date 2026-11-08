@@ -126,3 +126,20 @@ def test_prompts_are_verbatim_from_section_5(name, heading):
     assert text == doc_block(heading, lang="")
     assert runner.load_prompt(name) == text
     assert text and text[0].isalpha()  # the prompt argument can never be parsed as a flag
+
+
+def test_dance_prompt_library_lists_every_primitive_of_the_schema_in_order():
+    """WORD_DANCE_DESIGN §4.3 / CLAUDE_INTEGRATION §4.5 + §5.6: the closed library the model chooses from is ONE list — the schema
+    enum (minus `none`), `schemas.DancePrimitive` (mirrored by types.ts through check_contract and by API.md §9 through test_docs_contract) and the prompt's library
+    block name the same primitives in the same order, so a primitive added to one place (P3: hop, onto) must be added to all."""
+    import typing
+
+    from wd import schemas
+
+    enum = [p for p in runner.load_schema("dance_v1")["properties"]["items"]["items"]["properties"]["primitive"]["enum"] if p != "none"]
+    text = runner.load_prompt("dance_system")
+    block = text.split("The library — primitive → meaning class → typical words:\n", 1)[1].split("\n\nSelection rules:", 1)[0]
+    listed = [line.split()[0] for line in block.splitlines() if line.strip()]
+    assert listed == enum
+    assert tuple(enum) == typing.get_args(schemas.DancePrimitive)
+    assert ("none", *enum) == typing.get_args(models.DanceItem.model_fields["primitive"].annotation)  # the output mirror keeps `none` first

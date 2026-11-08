@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router';
 import { errorMessage } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
-import type { ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
+import type { DanceMode, ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
@@ -25,6 +25,7 @@ import { AddStatusBadge } from '@/components/bank/AddWordPreviewRow';
 import './SettingsPage.css';
 
 const FORMATS: readonly WebhookFormat[] = ['generic', 'wecom', 'feishu', 'serverchan', 'bark'];
+const DANCE_MODES: readonly DanceMode[] = ['full', 'form_only', 'off']; // the three levels of the word dance (WORD_DANCE_DESIGN §6.3), in display order
 const SAVED_FLASH_MS = 2000;
 
 /**
@@ -428,8 +429,18 @@ function LearnSection({ settings }: { settings: Settings }) {
       <div className="settings__row">
         <Switch label={zh.settings.autoPronounce} checked={settings.auto_pronounce} onChange={(v) => void save({ auto_pronounce: v })} />
       </div>
-      <div className="settings__row">
-        <Switch label={zh.settings.dance} description={zh.settings.danceHint} checked={settings.dance_mode !== 'off'} onChange={(v) => void save({ dance_mode: v ? 'full' : 'off' })} />
+      <div className="settings__row settings__row--wrap">
+        <span id="settings-dance">{zh.settings.dance}</span>
+        {/* three levels: full = spelling + stress + the meaning motion at the reveal, form_only = no meaning motion, off = plain headword */}
+        <Segmented
+          size="sm"
+          aria-labelledby="settings-dance"
+          aria-describedby="settings-dance-hint"
+          options={DANCE_MODES.map((mode) => ({ value: mode, label: zh.settings.danceModes[mode] }))}
+          value={settings.dance_mode}
+          onChange={(v) => void save({ dance_mode: v })}
+        />
+        <span id="settings-dance-hint" className="settings__hint settings__hint--row">{zh.settings.danceHint}</span>
       </div>
       <div className="settings__row">
         <span id="settings-accent">{zh.settings.accent}</span>

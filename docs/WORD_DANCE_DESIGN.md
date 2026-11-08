@@ -1,6 +1,6 @@
 # word-Dance：「单词之舞」—— 让单词自己跳出拼写、读音和意思（设计稿 v0.1，待 review）
 
-> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；P1（拼写舞 + 重音舞）已上线（`2a1359d`，发布说明 `docs/releases/2026-11-word-dance-p1.md`）；P2（语义舞）已实现，见 §11 与 `docs/releases/2026-11-word-dance-p2.md`**
+> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；P1（拼写舞 + 重音舞）已上线（`2a1359d`，发布说明 `docs/releases/2026-11-word-dance-p1.md`）；P2（语义舞）已上线，见 §11 与 `docs/releases/2026-11-word-dance-p2.md`；P3 第一批（`hop` / `onto` 两个原语、设置页三档）见 §12 与 `docs/releases/2026-11-word-dance-p3.md`**
 >
 > 你的话：小学的图片确实提高了记单词的效率；软件叫 word dance，最初的想法是用一个单词「跳舞」的动态、醒目来增加记忆。请思考、分析、给出改进设计。
 >
@@ -83,12 +83,13 @@
 
 ### 4.3 语义舞（约三分之一的词）
 
-舞步库第一批 26 个原语，每个原语附带：适用语义类、例词、可调参数、静态姿态（减弱动态时用）。原语名是代码里的枚举值，AI 只能选、不能造。
+舞步库第一批 26 个原语（P2 实现为 28 个，§11；P3 加 `hop`、`onto` 成 30 个，§12），每个原语附带：适用语义类、例词、可调参数、静态姿态（减弱动态时用）。原语名是代码里的枚举值，AI 只能选、不能造。
 
 | 原语 | 动作 | 适用语义类 | 小学例词 | 静态姿态 |
 |---|---|---|---|---|
 | `rise` | 从下方升起到位 | 向上 / 起来 / 高 | up, high, stand up, climb | — |
 | `fall` | 从上方落下并反弹 | 向下 / 低 | down, low, sit down, fall | — |
+| `hop` | 整词蹲下、弹起、落地压扁，再小跳一次（P3） | 跳 | jump, hop, skip | — |
 | `grow` | 由小变大到位 | 大 / 长大 / 更多 | big, large, grow, more | 字号 1.4× |
 | `shrink` | 由大缩小到位 | 小 / 少 | small, little, tiny, less | 字号 0.6× |
 | `dash` | 快速冲入带斜切 | 快 | fast, quick, run, hurry | — |
@@ -96,6 +97,7 @@
 | `enter` | 走进盒子（舞台上有盒子） | 进入 | in, into, inside, enter | 盒子静止在词周围 |
 | `exit` | 从盒子里出来 | 出去 | out, outside, leave | 盒子在左侧 |
 | `arc` | 从屋顶上方越过 | 越过 / 上方 | over, above, across | 屋子在下方 |
+| `onto` | 从左上方落到台子顶上停住，台子微微一沉（P3，舞台上有台子） | 在……上面 | on, onto | 台子在下方 |
 | `under` | 钻到桌子下面 | 下方 | under, below | 桌子在上方 |
 | `behind` | 躲到树后、半遮住 | 后面 | behind | 半遮 |
 | `between` | 夹到两个物体中间 | 中间 | between, middle | 两侧有物 |
@@ -257,11 +259,20 @@
 ## 11. P2 语义舞实现记录（2026-11-08，sqin 在手机上确认 P1 效果后：「继续做语义舞」）
 
 - **舞步库**：§4.3 的 26 行落成 28 个原语（`dim` / `glow` 拆开，`color` 带颜色参数）：`rise fall grow shrink dash creep enter exit arc under behind between split join shiver shimmer wave droop stretch squash thud float spin repeat multiply dim glow color`，前端 `dances.semanticPlan` 每个原语一种动作，全部以 em 为单位、≤ 2.5 s；enter / exit / arc / under / behind / between 六个原语站在 CSS 画的小舞台物件上（盒子、屋顶、桌子、树、两道杠）；cold / hot / sad 与颜色词有静态姿态色（只改颜色不改字形，原则 5）。
-- **何时跳**：语义舞只在**翻面**时随背面挂载播放一次（决定 ③），正面只有拼读两舞；背面的 🔊 / `P` 重放 = 拼读 + 重音 + 语义；`dance_mode = form_only` 不播、不摆姿态（P2 起有实际含义；设置页暂时仍是开关，`form_only` 只能通过接口设置）。
+- **何时跳**：语义舞只在**翻面**时随背面挂载播放一次（决定 ③），正面只有拼读两舞；背面的 🔊 / `P` 重放 = 拼读 + 重音 + 语义；`dance_mode = form_only` 不播、不摆姿态（P2 起有实际含义；设置页暂时仍是开关，`form_only` 只能通过接口设置 —— P3 第一批已改为三档，见 §12）。
 - **标注管线**：新任务类型 `generate_dance`（每次 20 词，kind `dance`，独立日预算 `WD_AI_DANCE_DAILY_BUDGET_USD` 默认 0.50，单次 `WD_AI_BUDGET_DANCE` 0.25，超时 120 s）；提示词 `dance_system.txt`（dance-v1），schema `dance_v1.json`（扁平：`primitive` 含 `none`，`n` / `color` 以 0 / "" 表示不适用，因为 CLI 已验证的关键字集合没有 oneOf）；输入给模型的是词形、音标、`meaning_zh` 第一义项（没有内容时取词典里主要词性那一行——ECDICT 按词性排列，fly 的第一行是「n. 苍蝇」而它八成是动词；内容任务还在路上时舞步任务顺延 10 分钟等卡片上的义项，最多 6 次）和规则层的切块；运行时再查一遍词是否被合并 / 判无效（跳过）；后验证：切块拼不回词形就回退规则切块，重读越界则切块和重读一起回退规则层（不混用两层），字母标记永远取规则层，最终用 `schemas.DanceSpec` 校验后写入 `word_dances`（旧行 superseded）并指向 `words.active_dance_id`；缺失或不合格的词任务失败重试，全军覆没则按 invalid_output 走 §6.3。
 - **入队**：`bank.enqueue_content_if_needed` 在内容任务**之后**顺带 `dance.enqueue_if_needed`，优先级比内容任务低一档（11 / 21 / 31），等内容的学习者永远不用排在舞步调用后面；门控：词有效、未合并、有规则 spec、没有仍能拼回词形的 Claude spec、没有存活的 `dance:<id>` 任务；子预算为 0 时什么都不排（关掉功能不产生任务抖动）；词形改名导致旧 spec 拼不回、或任务在 worker 崩溃路径上死掉留下 `queued` 的词会被重新排队。批量 `wd dance-annotate --stage xs` 跑小学 600 词（30 次调用 ≈ $2，一个晚上，预算临时抬高后脚本回退）。
 - **读取**：`dance.spec_for_word` 先取存储的 Claude spec，没有再按规则现算；卡片从不等任务。
 - **数据与运维**：迁移 0016 重建 `jobs` / `ai_calls`（CHECK 列表加新值）、新建 `word_dances`、`words` 加两列 —— 停机迁移；`wd check db` 不变；管理页 `ai` 多两项 `dance_today_usd` / `dance_daily_budget_usd`。
 - **测试**：`test_db_0016`（重建保留全部行与索引、CHECK 生效、唯一活动行）、`test_dance_annotate`（入队门控与去重、worker 整批标注、存储 spec 优先于规则、坏切块回退、预算为 0 时跳过、CLI）、契约与 fake claude 测试扩到 `dance_v1`；前端 `dances.test`（28 原语全部 ≤ 2.5 s、目标合法）、`DancingWord`（舞台物件 / 分身 / 姿态色 / 三种播放方式 / form_only）、`StudyCard`（背面翻面播放、form_only 不播）。
 - **回填与评审（2026-11-08）**：小学 600 词中 592 个标注完成（30 次调用 $0.675），67 个有动作；评审确认动作全部合库、无漏判；切块改正 12 处里 10 处更好。确认的两处**库空缺**：`jump`（库里没有「跳」——rise 是向上 / 高处的位置义，不是跳）和 `on`（in / on / under 三件套缺 on）；提议 P3 加两个原语 `hop`（整词向上弹一下落回）和 `onto`（词落到舞台物件顶上停住），各自对应的典型词：jump、hop、skip / on、on top of。
-- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关；标注结果的人工审核页（本次用一次性 Artifact）；上面两个库空缺；规则层的 `-er` 后缀切分（work·er / farm·er 而不是 wor·ker / far·mer）。
+- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关（§12 已做）；标注结果的人工审核页（本次用一次性 Artifact）；上面两个库空缺（§12 已做：`hop` / `onto`）；规则层的 `-er` 后缀切分（work·er / farm·er 而不是 wor·ker / far·mer）。
+
+## 12. P3 第一批实现记录（2026-11-08 晚，sqin：「P3 加 hop 和 onto 两个原语，设置页开三档」）
+
+- **两个原语**：`hop`（jump / hop / skip：整词以脚底为变换原点蹲下 → 弹起 1.3 em → 落地压扁 → 再小跳一次 → 回到原样，1.3 s，没有舞台物件、没有姿态）和 `onto`（on / onto / upon：从左上方划一道弧落到台子顶上、落地时微微压扁、台子跟着沉一下，1.3 s；新舞台物件 `shelf`，台面在基线处，字母（含下伸部）画在台子前面）。库从 28 个到 30 个；枚举顺序 = 提示词舞步库顺序（hop 在 fall 之后，onto 在 arc 之后），`test_schemas` 把 `dance_v1.json`、`schemas.DancePrimitive`、`models.DanceItem` 与提示词的舞步库锁成一份，types.ts 由 `check_contract` 对齐，API.md §9 的 ts 块由 `test_docs_contract` 锁定为与 types.ts 逐字相同。
+- **提示词** `dance-v2`（`word_dances.prompt_version`）：只加两行舞步；已存的 `dance-v1` spec 全部有效（枚举只增不减），不重跑小学 600 词，只对评审确认的库空缺 `jump`、`on` 用 `wd dance-annotate --word jump --word on --force` 重标（和 worker / farmer 的切块重标一起受当日舞步子预算限制，排在 11-09 00:05 执行）。
+- **设置页三档**：学习设置里的「单词之舞」从开关改为分段控件 全部 / 只拼读 / 关（`dance_mode` = `full` / `form_only` / `off`，和例句译文、口音同一控件），说明文字另起一行；文案 `settings.danceModes` + 改写的 `settings.danceHint`，FRONTEND §8 镜像。
+- **不变**：数据库（无迁移）、入队与预算、P1 / P2 的播放时机、`form_only` 的含义。
+- **测试**：`dances.test`（30 原语 ≤ 2.5 s；hop 整词起跳后回到原样；onto 从左上方进场、落定后回到原样，台子步不带效果级 easing、在落地偏移之后才下沉）、`DancingWord`（onto 画 shelf，台子步真的落在舞台物件上）、`test_docs_contract`（API.md §9 与 types.ts 逐字相同）、`SettingsPage`（三档保存 form_only / off / full，顺序 全部 / 只拼读 / 关）、`test_dance_annotate.build_spec`（hop / onto 不带参数，多余的 n / color 丢弃）、`test_schemas`（三份枚举与提示词同序）。
+- **留给以后**：线索复习（§4.5）；按学段默认 `form_only`；规则层 -er 后缀切分；标注审核页进产品；手势版（§4.6）。

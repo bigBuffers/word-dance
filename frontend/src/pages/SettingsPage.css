@@ -63,6 +63,16 @@
   flex: none;
 }
 
+/* a row whose hint wraps under the label + control (the word dance): the hint takes the whole width on a second line */
+.settings__row--wrap {
+  flex-wrap: wrap;
+}
+
+.settings__row .settings__hint--row {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
 .settings__inline {
   display: flex;
   gap: var(--space-2);

@@ -104,11 +104,19 @@ describe('DancingWord semantic dance', () => {
   const inSpec: DanceSpec = { version: 1, letters: ['in'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'enter', params: {} }, source: 'claude' };
   const three: DanceSpec = { version: 1, letters: ['three'], stress: 0, marks: { double: [[3, 4]], silent: [] }, semantic: { primitive: 'multiply', params: { n: 3 } }, source: 'claude' };
   const red: DanceSpec = { version: 1, letters: ['red'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'color', params: { color: 'red' } }, source: 'claude' };
+  const onSpec: DanceSpec = { version: 1, letters: ['on'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'onto', params: {} }, source: 'claude' };
+  const jump: DanceSpec = { version: 1, letters: ['jump'], stress: 0, marks: { double: [], silent: [] }, semantic: { primitive: 'hop', params: {} }, source: 'claude' };
 
   it('draws the stage object, the ghost copies and the pose colour the primitive asks for', () => {
     const { container, rerender } = render(<DancingWord text="in" spec={inSpec} />);
     expect(container.querySelector('.dword-stage--box .dword-obj--box')).not.toBeNull();
     expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBe('enter');
+    rerender(<DancingWord text="on" spec={onSpec} />);
+    expect(container.querySelector('.dword-stage--shelf .dword-obj--shelf')).not.toBeNull(); // P3: on lands on a shelf
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBe('onto');
+    rerender(<DancingWord text="jump" spec={jump} />);
+    expect(container.querySelector('.dword-stage[data-primitive="hop"] .dword')).not.toBeNull(); // the hook word.css keys the foot transform-origin on
+    expect(container.querySelector('.dword-obj')).toBeNull(); // hop has no stage object
     rerender(<DancingWord text="three" spec={three} />);
     expect(container.querySelectorAll('.dword__ghost')).toHaveLength(2);
     expect(container.querySelector('.dword-obj')).toBeNull();
@@ -163,6 +171,15 @@ describe('DancingWord semantic dance', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('a stage step animates the stage object itself (onto: the shelf gives under the landing)', () => {
+      const plan = semanticPlan(onSpec, 'currentColor');
+      const { container } = render(<DancingWord text="on" spec={onSpec} autoplay="semantic" />);
+      expect(animate).toHaveBeenCalledTimes(plan.length);
+      const targets = animate.mock.contexts as unknown[];
+      expect(targets).toContain(container.querySelector('.dword-obj--shelf')); // the shelf …
+      expect(targets).toContain(container.querySelector('.dword')); // … and the word
     });
 
     it('semanticEnabled=false plays the form dance only, even for a full replay', () => {

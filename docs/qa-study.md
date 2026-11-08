@@ -141,12 +141,13 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 
 ## 7. 单词之舞（P1，FRONTEND §6.5）
 
-- [ ] 设置 → 学习设置 有「单词之舞」开关（默认开）和说明文字；关掉后 `PUT /api/settings {dance_mode:'off'}`，学习卡与详情页的词头是普通文字、没有音节芯片。
+- [ ] 设置 → 学习设置 有「单词之舞」三档（全部 / 只拼读 / 关，默认全部）和一行说明文字，360px 下不换行错位；选「关」发 `PUT /api/settings {dance_mode:'off'}`，学习卡与详情页的词头是普通文字、没有音节芯片；选「只拼读」发 `{dance_mode:'form_only'}`。
 - [ ] 开着时，新词卡出现：字母按音节依次入场，重读音节跳得最高并变色；词下方音节芯片（如 `rab · bit`）标出重读音节；单音节词没有芯片、只有一拍；不发音字母（night 的 gh、knife 的 k、magic e）颜色变浅、不跳。
 - [ ] 点 🔊 或按 `P`：再跳一次并朗读；翻面不重跳；`repetitions ≥ 3` 的复习卡出现时不自动跳；推荐词（筛词卡）不跳。
 - [ ] 系统「减弱动态效果」打开：不动，重读音节静态着色，信息不丢。
 - [ ] 手机 360px：长词（supermarket、grandmother）不换行、不溢出；整段动画不超过 2.5 s；低端 Android 上不卡顿。
 - [ ] 详情页：词头下有音节芯片，🔊 重放；词组（ice cream）、缩写（TV、Mr.）没有芯片，词头照旧。
-- [ ] 语义舞（P2，设置为默认的 full 时）：有语义舞步的词（up、in、small、cold、red、three…）在**翻面**那一刻做一次意思动作，正面不做；🔊 / `P` 在背面重放时先拼读后动作；设置成 `form_only`（暂无开关，可用 `PUT /api/settings {dance_mode:'form_only'}`）后背面不再做动作、词头没有颜色姿态。
-- [ ] 有舞台物件的词（in / out 的盒子、over 的屋顶、under 的桌子、behind 的树、between 的两道杠）在 360px 下不溢出卡片；two / three 的分身复制在动画后消失。
+- [ ] 语义舞（P2，设置为默认的 full 时）：有语义舞步的词（up、in、small、cold、red、three…）在**翻面**那一刻做一次意思动作，正面不做；🔊 / `P` 在背面重放时先拼读后动作；设置成「只拼读」（`form_only`）后背面不再做动作、词头没有颜色姿态、没有舞台物件。
+- [ ] 有舞台物件的词（in / out 的盒子、over 的屋顶、on 的台子、under 的桌子、behind 的树、between 的两道杠）在 360px 下不溢出卡片；two / three 的分身复制在动画后消失。
+- [ ] P3：jump 翻面时整词蹲下、跳起、落地压扁、再小跳一次后回到原样（字形不变）；on 从左上方落到台子上停住，台子微微一沉；字母的下伸部画在台子前面。
 - [ ] 名词（rabbit、apple）和虚词（the、of）没有语义舞，只有拼读两舞；`wd dance-annotate --word <w>` 后详情页接口 `word.dance.source` 变为 `claude`。

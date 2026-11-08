@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DanceSpec } from '@/api/types';
 import type { DancePrimitive } from '@/api/types';
-import { BEAT_MS, BEAT_STRESSED_MS, ENTER_MS, LETTER_MS, LETTER_MS_LONG, OBJECT_OF, SEMANTIC_GAP_MS, SYLLABLE_PAUSE_MS, TWIN_MS, beatDuration, beatPlan, danceDuration, dancePlan, ghostCount, poseColor, semanticDuration, semanticPlan, spellDuration, spellPlan, syllableIndexes, twinPlan } from './dances';
+import { BEAT_MS, BEAT_STRESSED_MS, ENTER_MS, LETTER_MS, LETTER_MS_LONG, OBJECT_OF, ONTO_TOUCHDOWN, SEMANTIC_GAP_MS, SYLLABLE_PAUSE_MS, TWIN_MS, beatDuration, beatPlan, danceDuration, dancePlan, ghostCount, poseColor, semanticDuration, semanticPlan, spellDuration, spellPlan, syllableIndexes, twinPlan } from './dances';
 
 const rabbit: DanceSpec = { version: 1, letters: ['rab', 'bit'], stress: 0, marks: { double: [[2, 3]], silent: [] }, semantic: null, source: 'rule' };
 const night: DanceSpec = { version: 1, letters: ['night'], stress: 0, marks: { double: [], silent: [2, 3] }, semantic: null, source: 'rule' };
@@ -76,7 +76,7 @@ describe('dances', () => {
 });
 
 describe('semantic dances (语义舞, FRONTEND §6.5)', () => {
-  const PRIMITIVES: DancePrimitive[] = ['rise', 'fall', 'grow', 'shrink', 'dash', 'creep', 'enter', 'exit', 'arc', 'under', 'behind', 'between', 'split', 'join', 'shiver', 'shimmer', 'wave', 'droop', 'stretch', 'squash', 'thud', 'float', 'spin', 'repeat', 'multiply', 'dim', 'glow', 'color'];
+  const PRIMITIVES: DancePrimitive[] = ['rise', 'fall', 'hop', 'grow', 'shrink', 'dash', 'creep', 'enter', 'exit', 'arc', 'onto', 'under', 'behind', 'between', 'split', 'join', 'shiver', 'shimmer', 'wave', 'droop', 'stretch', 'squash', 'thud', 'float', 'spin', 'repeat', 'multiply', 'dim', 'glow', 'color'];
   const withSemantic = (primitive: DancePrimitive, params: { n?: number; color?: 'red' | 'black' } = {}): DanceSpec => ({ ...banana, letters: ['ba', 'na', 'na'], semantic: { primitive, params } });
 
   it('every primitive yields a plan whose steps point at real targets and ends within 2.5 s', () => {
@@ -89,6 +89,8 @@ describe('semantic dances (语义舞, FRONTEND §6.5)', () => {
         if (step.target === 'letter') expect(step.index).toBeLessThan(6);
         if (step.target === 'ghost') expect(step.index).toBeLessThan(ghostCount(spec));
         expect(step.keyframes.length).toBeGreaterThan(1);
+        // only transform / opacity / colour properties: anything else (transform-origin, say) takes the effect off the compositor
+        for (const k of step.keyframes) for (const key of Object.keys(k)) expect(['transform', 'opacity', 'color', 'textShadow', 'offset', 'easing', 'composite'], `${primitive}: ${key}`).toContain(key);
       }
       expect(semanticDuration(spec), primitive).toBeLessThanOrEqual(2500);
     }
@@ -120,12 +122,31 @@ describe('semantic dances (语义舞, FRONTEND §6.5)', () => {
     expect(OBJECT_OF.enter).toBe('box');
     expect(OBJECT_OF.under).toBe('table');
     expect(OBJECT_OF.rise).toBeUndefined();
+    expect(OBJECT_OF.onto).toBe('shelf'); // P3: on lands on a shelf
+    expect(OBJECT_OF.hop).toBeUndefined();
     expect(ghostCount(withSemantic('multiply', { n: 3 }))).toBe(2);
     expect(ghostCount(withSemantic('multiply', { n: 2 }))).toBe(1);
     expect(ghostCount(withSemantic('multiply'))).toBe(2);
     expect(ghostCount(withSemantic('grow'))).toBe(0);
     expect(semanticPlan(withSemantic('multiply', { n: 2 }), 'red').every((s) => s.target === 'ghost')).toBe(true);
     expect(semanticPlan(withSemantic('between'), 'red').some((s) => s.target === 'stage')).toBe(true);
+    expect(semanticPlan(withSemantic('onto'), 'red').some((s) => s.target === 'stage')).toBe(true); // the shelf gives under the landing
+    const hop = semanticPlan(withSemantic('hop'), 'red');
+    expect(hop.every((s) => s.target === 'word')).toBe(true); // the whole word jumps …
+    expect(hop[0]?.keyframes.some((k) => String(k.transform).includes('translateY(-'))).toBe(true); // … up …
+    expect(hop[0]?.keyframes.at(-1)?.transform).toBe('none'); // … and comes back to the standard glyphs (principle 4)
+    const onto = semanticPlan(withSemantic('onto'), 'red', 500);
+    const ontoWord = onto.find((s) => s.target === 'word');
+    const shelf = onto.find((s) => s.target === 'stage');
+    expect(String(ontoWord?.keyframes[0]?.transform)).toMatch(/translateX\(-.*translateY\(-/); // enters from the upper left …
+    expect(ontoWord?.keyframes.at(-1)?.transform).toBe('none'); // … and settles on the shelf
+    expect(ontoWord?.options.delay).toBe(500);
+    expect(shelf?.options.delay).toBe(500); // the shelf step starts with the word …
+    expect(shelf?.options.easing).toBeUndefined(); // … carries no effect-level easing (it would warp the offsets) …
+    expect(shelf?.keyframes[1]).toMatchObject({ transform: 'none', offset: ONTO_TOUCHDOWN }); // … holds still until the word has touched down …
+    expect(Number(shelf?.keyframes[2]?.offset)).toBeGreaterThan(ONTO_TOUCHDOWN); // … then gives …
+    expect(String(shelf?.keyframes[2]?.transform)).toContain('translateY(');
+    expect(shelf?.keyframes.at(-1)?.transform).toBe('none'); // … and comes back
   });
 
   it('a full play = the form dance followed by the semantic dance after SEMANTIC_GAP_MS (sequenced by DancingWord, pinned here as durations)', () => {

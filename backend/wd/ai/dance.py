@@ -34,7 +34,7 @@ from . import common, ledger, models, runner
 log = logging.getLogger(__name__)
 
 KIND = "dance"
-DANCE_PROMPT_VERSION = "dance-v1"  # written to word_dances.prompt_version; bump together with dance_system.txt
+DANCE_PROMPT_VERSION = "dance-v2"  # written to word_dances.prompt_version; bump together with dance_system.txt (v2: + hop / onto, P3)
 MEANING_MAX = 80
 CONTENT_WAIT_MINUTES = 10  # a job whose word's content is still on its way is deferred this long (the pupil's sense beats the dictionary's)
 MAX_CONTENT_WAITS = 6  # … at most this many times (an hour); then the dictionary sense is judged
