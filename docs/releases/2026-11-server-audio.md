@@ -34,4 +34,7 @@
 
 ## 5 上线记录
 
-（部署后补。）
+- 2026-11-10 01:02（Mac，家里网络 192.168.1.250）：`398fcb2` 上线。前端快照 `frontend-releases/398fcb2`（三份 APK 同步放在其 `dl/` 下，内容与 18:20 版相同只多了 UA 标记，不需要重装），`launchctl kickstart -k` 重启后端，2 秒后 `/api/health` 正常；启动日志 `pronunciation clips: provider say (WD_AUDIO_PROVIDER=auto, cache cap 256 MB)`；未登录 `GET /media/audio?text=farmer` 答 401；线上主包含 `media/audio` 路由；`audio/` 目录已建（空，随播放填充）。`.env` 未改。
+- 门禁（提交前）：pytest 2264 通过 / 3 跳过（Mac 专属的 `test_defaults_without_environment` 与 Linux 专属的 `test_deploy_files` 除外），契约审计通过，tsc，vitest 50 个文件 412 条，文案检查，主包 101.5 KB gzip（上限 200 KB），`make smoke` 29 步（含真实 `say` 的发音一步，2.7 秒）。对真实 `say` 的直接核对：`say -v ?` 解析出 188 行（含 19 字名字只隔一个空格的 9 行），探测能区分已装的 Samantha 与未装的 Ava (Premium)，一条带弯引号 / 破折号 / 省略号的例句 0.49 秒合成为 21 KB 的 AAC。
+- 这台 Mac 只装了普通版 Samantha（en-US）与 Daniel（en-GB）；下载「Ava（高级）」或「Samantha（增强）」并重启服务即可自动换用（§4 第 1 步）。
+- 平板上的 App 不用重装：壳加载的是线上站点，下次点发音即走服务器音频；首次播放会在日志里留下 `audio_voice`（选用的语音）与 `/media/audio` 的 200 记录。
