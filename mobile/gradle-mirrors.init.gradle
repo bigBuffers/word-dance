@@ -1,0 +1,17 @@
+// Gradle init script (docs/MOBILE_APP.md §2): Maven mirrors for builds from mainland networks, tried FIRST; the originals
+// (google(), mavenCentral(), gradlePluginPortal()) stay as fallbacks. Used by the npm scripts: ./gradlew --init-script ../gradle-mirrors.init.gradle …
+def mirrors = ['https://maven.aliyun.com/repository/public', 'https://maven.aliyun.com/repository/google', 'https://maven.aliyun.com/repository/gradle-plugin']
+settingsEvaluated { settings ->
+    settings.pluginManagement.repositories {
+        mirrors.each { m -> maven { url m } }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+allprojects {
+    buildscript {
+        repositories { mirrors.each { m -> maven { url m } } }
+    }
+    repositories { mirrors.each { m -> maven { url m } } }
+}

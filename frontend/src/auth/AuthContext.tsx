@@ -7,7 +7,7 @@
 // (`needs_setup`, `registration_mode`) are exposed as `health` for the login/register pages.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Navigate, Outlet, useLocation, useSearchParams } from 'react-router';
-import { AUTH_EXPIRED_EVENT, isApiError } from '@/api/client';
+import { AUTH_EXPIRED_EVENT, AUTH_SIGNED_OUT_EVENT, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { HealthResponse, RegisterBody, SettingsUpdate } from '@/api/endpoints';
 import type { Counters, ServerFlags, Settings, User } from '@/api/types';
@@ -131,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await endpoints.logout();
     } finally {
       setState((s) => ({ ...s, ...signedOut }));
+      window.dispatchEvent(new Event(AUTH_SIGNED_OUT_EVENT)); // an explicit sign-out (the native shell cancels its reminder on it)
       void refreshHealth();
     }
   }, [refreshHealth]);

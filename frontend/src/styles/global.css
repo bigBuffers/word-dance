@@ -233,3 +233,11 @@ textarea {
     scroll-behavior: auto !important;
   }
 }
+
+/* Native shell (mobile/, FRONTEND §6.6): the WebView draws under the status bar; containers outside AppLayout take the top inset */
+html.native .auth {
+  padding-top: calc(var(--space-6) + var(--safe-top));
+}
+html.native .welcome {
+  padding-top: calc(var(--space-5) + var(--safe-top));
+}

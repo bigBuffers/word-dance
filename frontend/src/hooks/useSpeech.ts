@@ -1,7 +1,11 @@
 // useSpeech — pronunciation through the Web Speech API (FRONTEND.md §6.4).
 // Voices load asynchronously (`voiceschanged`); the first user gesture unlocks audio on iOS, which
 // is naturally satisfied because `speak()` is always triggered from a click/key handler.
+// Inside the native shell (mobile/, §6.6) the system TTS plugin speaks instead: Android's WebView has no speechSynthesis.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useToast } from '@/hooks/useToast';
+import { zh } from '@/i18n/zh';
+import { isNative, isSpeechUnavailable, speakNative, stopNativeSpeech } from '@/native/capacitor';
 
 export type Accent = 'en-US' | 'en-GB';
 
@@ -10,6 +14,11 @@ const PREFERRED_VOICE = /Google|Microsoft|Samantha|Daniel/i;
 
 export function speechSupported(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
+}
+
+/** Something can pronounce: the Web Speech API, or the native shell's TTS plugin. */
+export function speechAvailable(): boolean {
+  return isNative() || speechSupported();
 }
 
 const normLang = (lang: string) => lang.replace('_', '-').toLowerCase();
@@ -35,6 +44,10 @@ function buildUtterance(text: string, accent: Accent, rate: number): SpeechSynth
 
 /** Speaks `text`; returns false when the browser has no speech synthesis. Cancels anything still speaking. */
 export function speak(text: string, accent: Accent, rate = DEFAULT_RATE): boolean {
+  if (isNative()) {
+    void speakNative(text, accent, rate).catch(() => undefined); // no UI here (auto-pronounce); the hook reports a missing voice
+    return true;
+  }
   if (!speechSupported()) return false;
   const synth = window.speechSynthesis;
   const u = buildUtterance(text, accent, rate);
@@ -55,13 +68,14 @@ export interface Speech {
 }
 
 export function useSpeech(defaultAccent: Accent = 'en-US'): Speech {
-  const [supported] = useState<boolean>(() => speechSupported());
+  const toast = useToast();
+  const [supported] = useState<boolean>(() => speechAvailable());
   const [speaking, setSpeaking] = useState(false);
-  const [voicesReady, setVoicesReady] = useState<boolean>(() => supported && window.speechSynthesis.getVoices().length > 0);
+  const [voicesReady, setVoicesReady] = useState<boolean>(() => isNative() || (speechSupported() && window.speechSynthesis.getVoices().length > 0));
   const currentRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   useEffect(() => {
-    if (!supported) return;
+    if (!speechSupported() || isNative()) return;
     const synth = window.speechSynthesis; // captured: the cleanup must not depend on the global still existing
     const onVoices = () => setVoicesReady(synth.getVoices().length > 0);
     onVoices();
@@ -72,6 +86,13 @@ export function useSpeech(defaultAccent: Accent = 'en-US'): Speech {
   const doSpeak = useCallback(
     (text: string, accent: Accent = defaultAccent, rate = DEFAULT_RATE): boolean => {
       if (!supported) return false;
+      if (isNative()) {
+        setSpeaking(true);
+        void speakNative(text, accent, rate)
+          .catch((e: unknown) => toast.error(isSpeechUnavailable(e) ? zh.word.voiceNotReady : zh.word.voiceMissing)) // engine not ready yet / no English voice (common on domestic ROMs)
+          .finally(() => setSpeaking(false));
+        return true;
+      }
       const synth = window.speechSynthesis;
       const u = buildUtterance(text, accent, rate);
       const done = () => {
@@ -88,11 +109,17 @@ export function useSpeech(defaultAccent: Accent = 'en-US'): Speech {
       synth.speak(u);
       return true;
     },
-    [supported, defaultAccent],
+    [supported, defaultAccent, toast],
   );
 
   const cancel = useCallback(() => {
     if (!supported) return;
+    if (isNative()) {
+      void stopNativeSpeech().catch(() => undefined);
+      currentRef.current = null;
+      setSpeaking(false);
+      return;
+    }
     window.speechSynthesis.cancel();
     currentRef.current = null;
     setSpeaking(false);

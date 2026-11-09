@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Settings, User } from '@/api/types';
 import { AuthProvider } from '@/auth/AuthContext';
 import { ToastProvider } from '@/components/ui/Toast';
+import { exportAccountUrl } from '@/api/endpoints';
 import { zh } from '@/i18n/zh';
 import SettingsPage, { buildImportBody, toggleStageSetting, webhookFailureReason } from './SettingsPage';
 
@@ -67,6 +68,30 @@ function renderSettings() {
 }
 
 const testButton = () => screen.getByRole('button', { name: zh.settings.webhookTest }) as HTMLButtonElement;
+
+describe('in a browser (no native shell)', () => {
+  beforeEach(() => {
+    calls = [];
+    settings = {
+      stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
+      webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+    } as unknown as Settings;
+    installFetch();
+  });
+
+  it('keeps the export links, shows no shell-only copy, and saves the push toggle without a permission flow', async () => {
+    renderSettings();
+    await screen.findByText(zh.settings.export);
+    const links = screen.getAllByRole('link').filter((a) => a.getAttribute('download') !== null) as HTMLAnchorElement[];
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([exportAccountUrl('csv'), exportAccountUrl('json')]);
+    expect(screen.queryByText(zh.settings.nativeReminderHint)).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.settings.allowNotifications })).toBeNull();
+    fireEvent.click(screen.getByRole('switch', { name: zh.settings.pushEnabled }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ push_enabled: true }]));
+    expect(screen.queryByText(zh.settings.reminderDenied)).toBeNull();
+  });
+});
 const urlInput = () => screen.getByLabelText(zh.settings.webhookUrl) as HTMLInputElement;
 const saveUrl = async () => {
   fireEvent.change(urlInput(), { target: { value: HOOK } });

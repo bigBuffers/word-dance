@@ -18,6 +18,7 @@ import { STAGE_ORDER } from '@/components/word/StageChips';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
+import { isNative, reminderPermission, requestReminderPermission, syncDailyReminder, type ReminderPermission } from '@/native/capacitor';
 import { routePaths } from '@/routes';
 import { DEFAULT_TIMEZONE, detectTimeZone, formatDateTime, isValidPushTime } from '@/utils/date';
 import { parseIntInRange } from '@/utils/format';
@@ -269,11 +270,44 @@ function PushSection({ settings, user }: { settings: Settings; user: User }) {
 
   const smtpMissing = server?.email_configured === false;
   const canEnableEmail = settings.email_verified && !smtpMissing;
+  // in the native shell the daily reminder is a local notification: ask for permission inside this gesture, then save either way
+  const enablePush = async (v: boolean) => {
+    if (v && isNative()) {
+      const granted = await requestReminderPermission().catch(() => false); // a failed permission call counts as not granted; still save
+      setReminderPerm(granted ? 'granted' : 'denied');
+      if (!granted) toast.error(zh.settings.reminderDenied);
+    }
+    await save({ push_enabled: v });
+  };
+  // a learner whose push was already on before installing the app never went through the toggle: show the state and a button
+  const [reminderPerm, setReminderPerm] = useState<ReminderPermission | null>(null);
+  useEffect(() => {
+    if (!isNative() || !settings.push_enabled) return;
+    let cancelled = false;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      void reminderPermission().then((p) => {
+        if (!cancelled) setReminderPerm(p);
+      });
+    };
+    refresh();
+    document.addEventListener('visibilitychange', refresh); // the learner may grant it in the system settings and come back
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [settings.push_enabled]);
+  const allowReminder = async () => {
+    const granted = await requestReminderPermission().catch(() => false); // inside the gesture: the OS may prompt
+    setReminderPerm(granted ? 'granted' : 'denied');
+    if (granted) await syncDailyReminder(settings);
+    else toast.error(zh.settings.reminderDenied);
+  };
 
   return (
     <Section title={zh.settings.push} saved={saved}>
       <div className="settings__row">
-        <Switch label={zh.settings.pushEnabled} checked={settings.push_enabled} onChange={(v) => void save({ push_enabled: v })} />
+        <Switch label={zh.settings.pushEnabled} checked={settings.push_enabled} onChange={(v) => void enablePush(v)} />
       </div>
       <div className="settings__row">
         <label htmlFor="push-time">{zh.settings.pushTime}</label>
@@ -295,6 +329,15 @@ function PushSection({ settings, user }: { settings: Settings; user: User }) {
         </div>
       </div>
       {settings.next_push_at && <p className="settings__hint">{zh.settings.nextPush(formatDateTime(settings.next_push_at, settings.timezone))}</p>}
+      {isNative() && <p className="settings__hint">{zh.settings.nativeReminderHint}</p>}
+      {isNative() && settings.push_enabled && reminderPerm !== null && reminderPerm !== 'granted' && (
+        <div className="settings__row">
+          <span className="settings__hint">{zh.settings.reminderDenied}</span>
+          <Button size="sm" onClick={() => void allowReminder()}>
+            {zh.settings.allowNotifications}
+          </Button>
+        </div>
+      )}
       <NumberRow label={zh.settings.dailyNew} value={settings.daily_new_count} min={0} max={50} onSave={(n) => void save({ daily_new_count: n })} />
       <NumberRow label={zh.settings.dailyScreen} value={settings.daily_screen_count} min={0} max={50} onSave={(n) => void save({ daily_screen_count: n })} />
       <NumberRow label={zh.settings.maxReviews} value={settings.max_reviews} min={0} max={300} onSave={(n) => void save({ max_reviews: n })} />
@@ -605,17 +648,19 @@ function AccountSection({ user }: { user: User }) {
         </Button>
       </div>
 
-      <div className="settings__row">
-        <span>{zh.settings.export}</span>
-        <div className="settings__inline">
-          <a className="btn btn--secondary btn--sm" href={exportAccountUrl('csv')} download>
-            <span className="btn__label">{zh.settings.exportCsv}</span>
-          </a>
-          <a className="btn btn--secondary btn--sm" href={exportAccountUrl('json')} download>
-            <span className="btn__label">{zh.settings.exportJson}</span>
-          </a>
+      {!isNative() && (
+        <div className="settings__row">
+          <span>{zh.settings.export}</span>
+          <div className="settings__inline">
+            <a className="btn btn--secondary btn--sm" href={exportAccountUrl('csv')} download>
+              <span className="btn__label">{zh.settings.exportCsv}</span>
+            </a>
+            <a className="btn btn--secondary btn--sm" href={exportAccountUrl('json')} download>
+              <span className="btn__label">{zh.settings.exportJson}</span>
+            </a>
+          </div>
         </div>
-      </div>
+      )}
       <div className="settings__row">
         <span>{zh.settings.import}</span>
         <label className={`btn btn--secondary btn--sm${importBusy ? ' is-loading' : ''}`} aria-busy={importBusy || undefined}>

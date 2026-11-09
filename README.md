@@ -75,6 +75,7 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 |---|---|
 | `backend/` | FastAPI 后端：`wd` 包（API 路由、服务层、SQLite 迁移、任务队列与调度、Claude 与图片管线、备份、`wd` 命令行）及 pytest 测试 |
 | `frontend/` | React + TypeScript 单页应用（Vite）；构建产物由后端直接提供——开发时为 `frontend/dist`，安装后由 `deploy/install.sh` 构建到数据目录的版本化快照 `frontend-releases/<sha>` 并以符号链接 `frontend` 原子发布，仓库内的构建不会影响线上页面 |
+| `mobile/` | Capacitor 远程壳：Android / iOS 原生工程、离线页模板 `templates/index.html` 与钩子脚本 `scripts/prepare.mjs`、图标源 `resources/`、阿里云镜像 init 脚本；签名密钥与构建产物不入库（`docs/MOBILE_APP.md`） |
 | `data/` | 官方词表词头清单与构建器元数据 `lists/`（来源说明、`manifest.json`、别名表、人工释义表、校验和）；随仓库分发的压缩词汇种子 `seed/vocab.jsonl.gz`（记录数与各阶段词数见 `seed/stats.json`）、与上一版的差异 `seed/DIFF.md`、数据来源说明与 ECDICT 许可证文本 |
 | `scripts/` | `build_seed.py` / `seed_diff.py`（`backend/wd/seedbuild` 的入口：从 ECDICT 与 `data/lists/` 官方词表重建种子并生成差异报告，`make seed`）、`pack_seed.sh`、`rehearse_migration.py`（在数据库拷贝上排练待办迁移并核对结果）、`check_contract.py`、`smoke.py`（端到端冒烟测试）、`dev.sh`（开发服务器） |
 | `deploy/` | `install.sh`、`fetch_ecdict.sh`、systemd 单元（服务 + 每夜备份定时器）、`env.example`、Caddy / nginx 示例配置 |
@@ -93,6 +94,7 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 | [`docs/API.md`](docs/API.md) | 全部 HTTP 接口、错误信封与共享 TypeScript 类型（= `frontend/src/api/types.ts`） |
 | [`docs/CLAUDE_INTEGRATION.md`](docs/CLAUDE_INTEGRATION.md) | `claude` CLI 的精确调用方式、提示词、JSON Schema、批处理、预算与失败处理、整理规则 |
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 路由、页面、组件、状态、交互、响应式规则与全部中文文案 |
+| [`docs/MOBILE_APP.md`](docs/MOBILE_APP.md) | iOS / Android 壳（`mobile/`，Capacitor 远程壳）：开发环境、构建、TestFlight / App Store / Google Play / 国内商店的上架步骤 |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | 安装脚本、systemd、环境变量、数据目录、备份、日志、反向代理、开发流程、CLI 参考 |
 | [`docs/ops.md`](docs/ops.md) | 运维手册：日常检查、备份与恢复、升级与回滚、配置修改、故障处理表 |
 | [`docs/qa.md`](docs/qa.md) | 手工验收索引：部署验收、真实 Claude 验收、推送渠道检查；链接前端 / 学习流程清单 `qa-frontend.md`、`qa-study.md` |

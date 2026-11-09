@@ -1,0 +1,31 @@
+{
+  "name": "word-dance-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "word-Dance 的 iOS / Android 壳（Capacitor 远程壳：WebView 加载线上站点，后端零改动；docs/MOBILE_APP.md）",
+  "scripts": {
+    "capacitor:copy:before": "node scripts/prepare.mjs",
+    "prepare:shell": "node scripts/prepare.mjs",
+    "sync": "cap sync",
+    "sync:android": "cap sync android",
+    "sync:ios": "cap sync ios",
+    "open:android": "cap open android",
+    "open:ios": "cap open ios",
+    "android:debug": "cap sync android && cd android && ./gradlew --init-script ../gradle-mirrors.init.gradle assembleDebug",
+    "android:release": "cap sync android && cd android && ./gradlew --init-script ../gradle-mirrors.init.gradle assembleRelease bundleRelease",
+    "doctor": "cap doctor"
+  },
+  "dependencies": {
+    "@capacitor-community/text-to-speech": "8.0.2",
+    "@capacitor/android": "8.6.0",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.0",
+    "@capacitor/ios": "8.6.0",
+    "@capacitor/local-notifications": "8.3.1"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "3.0.5",
+    "@capacitor/cli": "8.6.0",
+    "typescript": "~5.6.0"
+  }
+}

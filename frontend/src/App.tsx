@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router';
 import { AuthProvider } from '@/auth/AuthContext';
 import { ToastProvider } from '@/components/ui/Toast';
 import { zh } from '@/i18n/zh';
+import { NativeBridge } from '@/native/NativeBridge';
 import { AppRoutes } from '@/routes';
 
 interface BoundaryState {
@@ -43,6 +44,7 @@ export default function App() {
       <BrowserRouter>
         <AuthProvider>
           <ToastProvider>
+            <NativeBridge />
             <AppRoutes />
           </ToastProvider>
         </AuthProvider>

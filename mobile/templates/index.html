@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>word-Dance</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: -apple-system, "PingFang SC", system-ui, sans-serif; background: #f7f6f1; color: #1e2a2d; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom); }
+      @media (prefers-color-scheme: dark) { body { background: #15191b; color: #e8ebe6; } }
+      main { max-width: 28em; text-align: center; }
+      h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+      p { margin: 0 0 1.25rem; line-height: 1.5; }
+      button { font: inherit; padding: .6em 1.4em; border-radius: 999px; border: 1px solid #157a73; background: #157a73; color: #fff; }
+    </style>
+    <script>
+      // rendered by scripts/render-www.mjs at every sync: this page is served from the LOCAL origin, so a reload would only reload itself
+      var SERVER = '__WD_APP_SERVER_URL__';
+      addEventListener('online', function () { location.replace(SERVER); });
+    </script>
+  </head>
+  <body>
+    <main>
+      <h1>连不上服务器</h1>
+      <p>请检查网络后重试。</p>
+      <button type="button" onclick="location.replace(SERVER)">重试</button>
+    </main>
+  </body>
+</html>

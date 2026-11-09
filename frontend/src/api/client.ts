@@ -23,6 +23,8 @@ export interface RequestOptions {
 
 /** Window event dispatched when the server answers 401 `unauthorized`. `detail: { path }`. */
 export const AUTH_EXPIRED_EVENT = 'auth:expired';
+/** Dispatched by `AuthContext.logout()` after an explicit sign-out (the native shell cancels its reminder on it, never on an expiry). */
+export const AUTH_SIGNED_OUT_EVENT = 'auth:signed-out';
 /** CSRF header required on every non-GET `/api/*` request (API.md §1). */
 export const CSRF_HEADER = 'X-WD-Request';
 
