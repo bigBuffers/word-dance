@@ -8,7 +8,7 @@ log line per request) and the lifespan:
     migrate (with the pre-migrate snapshot hook) → seed import when kv.seed_version ≠ content sha256 of WD_SEED_PATH (never fatal)
     (warn-and-continue when the file is missing) → learn_order.ensure_current (the learning-order keys words.learn_rank:
     stored vs computed, changed rows only; never fatal — a `learn_order_failed` event and the lists serve the fail-soft order)
-    → kv.public_url_guess → registry.load_handlers() → take kv.worker_lease and start the Claude worker(s), the I/O worker
+    → dance.backfill_corrected (word_dances.corrected rows 0017 left NULL; never fatal) → kv.public_url_guess → registry.load_handlers() → take kv.worker_lease and start the Claude worker(s), the I/O worker
     and the scheduler when WD_WORKER_ENABLED.
 
 It refuses to run under more than one uvicorn worker (the single-process invariant, DESIGN §0.2).
@@ -38,7 +38,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import __version__, db, security
+from . import __version__, dance, db, security
 from .ai import ledger
 from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
@@ -499,6 +499,12 @@ def startup(app: FastAPI) -> None:
             log.info("applied migration %04d_%s", version, name, extra={"event": "migration"})
         seed_check(conn, cfg)
         learn_order.ensure_current(conn, now=now_iso(app.state.clock))  # fills / repairs words.learn_rank (0014); never raises
+        try:
+            filled = dance.backfill_corrected(conn)  # word_dances.corrected: every row right after 0017 (the file only adds the column) and any row written without the flag; never fatal
+            if filled:
+                log.info("word_dances.corrected backfilled for %d row(s)", filled, extra={"event": "dance_corrected_backfill"})
+        except Exception:  # noqa: BLE001 — like seed_check: no data shape may stop the service; the NULL rows serve their stored chunks
+            log.exception("word_dances.corrected backfill failed; stored chunks keep serving until the next start")
         guess = first_non_loopback_ipv4()
         if guess:
             db.kv_set(conn, "public_url_guess", f"http://{guess}:{cfg.port}")

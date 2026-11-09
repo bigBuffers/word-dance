@@ -347,6 +347,29 @@ def check_0016(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
         rep.check("word_dances empty right after the file (the annotations are the job's work)", int(scalar(conn, "SELECT COUNT(*) FROM word_dances")) == 0)
 
 
+def check_0017(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """word_dances.corrected appended (nullable, CHECK 0/1); the file fills nothing — wd.dance.backfill_corrected does at the next
+    service start — so the rehearsal runs that backfill here, on the copy, and reports the split (docs/releases/2026-11-word-dance-p3b.md
+    §3 / §4; mirrors backend/tests/unit/test_db_0017.py)."""
+    from wd import dance
+
+    cols = [c["name"] for c in columns(conn, "word_dances")]
+    rep.check("word_dances.corrected appended last", cols[-1] == "corrected", str(cols[-3:]))
+    total = int(scalar(conn, "SELECT COUNT(*) FROM word_dances"))
+    if total:
+        ok, detail = rejected(conn, "UPDATE word_dances SET corrected = 2 WHERE id = (SELECT MIN(id) FROM word_dances)")
+        rep.check("word_dances.corrected CHECK (0/1)", ok, detail)
+    else:
+        rep.skip("word_dances.corrected CHECK probe", "no word_dances rows")
+    if ran_here:
+        rep.check("corrected NULL everywhere right after the file (the backfill is the service start's work)", int(scalar(conn, "SELECT COUNT(*) FROM word_dances WHERE corrected IS NULL")) == total, f"{total} rows")
+    filled = dance.backfill_corrected(conn)
+    nulls = int(scalar(conn, "SELECT COUNT(*) FROM word_dances WHERE corrected IS NULL"))
+    ones = int(scalar(conn, "SELECT COUNT(*) FROM word_dances WHERE corrected = 1"))
+    rep.check("backfill_corrected (what the next service start does) leaves no NULL", nulls == 0, f"filled {filled}; corrected = 1 on {ones} of {total} rows")
+    rep.check("backfill_corrected is idempotent", dance.backfill_corrected(conn) == 0)
+
+
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
     """words.learn_rank, the learning order recomputed on the copy (DESIGN §2.9; docs/analysis/2026-11-06-learn-order/DESIGN.md)."""
     cols = {r["name"]: r for r in columns(conn, "words")}
@@ -488,6 +511,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0016(rep, conn, before, ran_here=16 in applied_versions)
         else:
             rep.skip("0016 checks", "not recorded in schema_migrations")
+        if 17 in recorded:
+            check_0017(rep, conn, before, ran_here=17 in applied_versions)
+        else:
+            rep.skip("0017 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

@@ -1,6 +1,6 @@
 # word-Dance：「单词之舞」—— 让单词自己跳出拼写、读音和意思（设计稿 v0.1，待 review）
 
-> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；P1（拼写舞 + 重音舞）已上线（`2a1359d`，发布说明 `docs/releases/2026-11-word-dance-p1.md`）；P2（语义舞）已上线，见 §11 与 `docs/releases/2026-11-word-dance-p2.md`；P3 第一批（`hop` / `onto` 两个原语、设置页三档）见 §12 与 `docs/releases/2026-11-word-dance-p3.md`**
+> 日期：2026-11-08 · 代码基线：`main` @ `d9d5033` · 应 sqin 的要求由 Claude 撰写 · 状态：**v0.1 已评审；P1（拼写舞 + 重音舞）已上线（`2a1359d`，发布说明 `docs/releases/2026-11-word-dance-p1.md`）；P2（语义舞）已上线，见 §11 与 `docs/releases/2026-11-word-dance-p2.md`；P3 第一批（`hop` / `onto` 两个原语、设置页三档）见 §12 与 `docs/releases/2026-11-word-dance-p3.md`；P3 第二批（规则层 -er 后缀切分、`word_dances.corrected`，迁移 0017）见 §13 与 `docs/releases/2026-11-word-dance-p3b.md`**
 >
 > 你的话：小学的图片确实提高了记单词的效率；软件叫 word dance，最初的想法是用一个单词「跳舞」的动态、醒目来增加记忆。请思考、分析、给出改进设计。
 >
@@ -162,7 +162,7 @@
 
 ### 6.1 数据
 
-新表 `word_dances`（照 `word_images` 的模式）：`id, word_id, status(active|superseded), spec_json, model, prompt_version, reason, created_at`（`reason` = 模型给的 ≤ 12 字理由，供人工审核）；`words` 加 `active_dance_id`、`dance_state(none|queued|ready|failed)`。**实际落地为迁移 0016**（0015 已被 `dance_mode` 用掉）：因为 `jobs.type` 与 `ai_calls.kind` 的 CHECK 列表写死在初始迁移里，新增任务类型 `generate_dance` 和调用种类 `dance` 需要重建这两张表，所以 0016 是停机迁移（和 0011 / 0013 一样）。
+新表 `word_dances`（照 `word_images` 的模式）：`id, word_id, status(active|superseded), spec_json, model, prompt_version, reason, created_at`（`reason` = 模型给的 ≤ 12 字理由，供人工审核；P3b 的迁移 0017 加 `corrected`：模型是否改过规则层给它的切块 / 重音，见 §13）；`words` 加 `active_dance_id`、`dance_state(none|queued|ready|failed)`。**实际落地为迁移 0016**（0015 已被 `dance_mode` 用掉）：因为 `jobs.type` 与 `ai_calls.kind` 的 CHECK 列表写死在初始迁移里，新增任务类型 `generate_dance` 和调用种类 `dance` 需要重建这两张表，所以 0016 是停机迁移（和 0011 / 0013 一样）。
 
 `spec_json`（与 API.md §9 `DanceSpec` 一致，P2 实际写入的样子）：
 
@@ -184,7 +184,7 @@
 ### 6.2 生成
 
 - **规则层**（P1，无 AI）：`backend/wd/dance/syllables.py`：从 `phonetic` 得音节数与重音下标（两种重音记号都认），用启发式把字母分组；对 600 个小学词跑一遍，人工抽 50 个核对，正确率 < 85% 就把分组交给校对层、只保留重音。
-- **校对 + 选舞层**（P2）：新任务类型 `generate_dance`（`kind='dance'`，复用 `ClaudeWorker` 与预算模块，独立日预算 `WD_AI_DANCE_DAILY_BUDGET_USD`，默认 0.50）：20 词一组，输入 lemma、音标、`meaning_zh` 第一义项、规则层的分组建议，输出每词 `letters`（确认或改正）、`semantic.primitive`（枚举或 null）、一句理由；JSON schema 强制枚举。成本：文本输出很短，≈ $0.003/词；小学 600 词 ≈ $2，一个晚上跑完（受每小时 60 次调用上限，20 词一组只要 30 次调用）。其余 9000 词像 SVG 一样**学到才生成**。
+- **校对 + 选舞层**（P2；§13 起服务端改为规则为准、只叠加模型改过的切块 / 重音和语义动作）：新任务类型 `generate_dance`（`kind='dance'`，复用 `ClaudeWorker` 与预算模块，独立日预算 `WD_AI_DANCE_DAILY_BUDGET_USD`，默认 0.50）：20 词一组，输入 lemma、音标、`meaning_zh` 第一义项、规则层的分组建议，输出每词 `letters`（确认或改正）、`semantic.primitive`（枚举或 null）、一句理由；JSON schema 强制枚举。成本：文本输出很短，≈ $0.003/词；小学 600 词 ≈ $2，一个晚上跑完（受每小时 60 次调用上限，20 词一组只要 30 次调用）。其余 9000 词像 SVG 一样**学到才生成**。
 - **审核**：一个只读的审核页（像 2026-11-07 的「小学全部词卡」那样由脚本生成的 Artifact 即可，不必进产品）按原语分组列出所有词，一眼扫出选错的（例如把 close 的「近」当成「关」）。错的在管理页改原语或置 null（`reviewed: true`）。
 
 ### 6.3 前端
@@ -262,11 +262,11 @@
 - **何时跳**：语义舞只在**翻面**时随背面挂载播放一次（决定 ③），正面只有拼读两舞；背面的 🔊 / `P` 重放 = 拼读 + 重音 + 语义；`dance_mode = form_only` 不播、不摆姿态（P2 起有实际含义；设置页暂时仍是开关，`form_only` 只能通过接口设置 —— P3 第一批已改为三档，见 §12）。
 - **标注管线**：新任务类型 `generate_dance`（每次 20 词，kind `dance`，独立日预算 `WD_AI_DANCE_DAILY_BUDGET_USD` 默认 0.50，单次 `WD_AI_BUDGET_DANCE` 0.25，超时 120 s）；提示词 `dance_system.txt`（dance-v1），schema `dance_v1.json`（扁平：`primitive` 含 `none`，`n` / `color` 以 0 / "" 表示不适用，因为 CLI 已验证的关键字集合没有 oneOf）；输入给模型的是词形、音标、`meaning_zh` 第一义项（没有内容时取词典里主要词性那一行——ECDICT 按词性排列，fly 的第一行是「n. 苍蝇」而它八成是动词；内容任务还在路上时舞步任务顺延 10 分钟等卡片上的义项，最多 6 次）和规则层的切块；运行时再查一遍词是否被合并 / 判无效（跳过）；后验证：切块拼不回词形就回退规则切块，重读越界则切块和重读一起回退规则层（不混用两层），字母标记永远取规则层，最终用 `schemas.DanceSpec` 校验后写入 `word_dances`（旧行 superseded）并指向 `words.active_dance_id`；缺失或不合格的词任务失败重试，全军覆没则按 invalid_output 走 §6.3。
 - **入队**：`bank.enqueue_content_if_needed` 在内容任务**之后**顺带 `dance.enqueue_if_needed`，优先级比内容任务低一档（11 / 21 / 31），等内容的学习者永远不用排在舞步调用后面；门控：词有效、未合并、有规则 spec、没有仍能拼回词形的 Claude spec、没有存活的 `dance:<id>` 任务；子预算为 0 时什么都不排（关掉功能不产生任务抖动）；词形改名导致旧 spec 拼不回、或任务在 worker 崩溃路径上死掉留下 `queued` 的词会被重新排队。批量 `wd dance-annotate --stage xs` 跑小学 600 词（30 次调用 ≈ $2，一个晚上，预算临时抬高后脚本回退）。
-- **读取**：`dance.spec_for_word` 先取存储的 Claude spec，没有再按规则现算；卡片从不等任务。
+- **读取**：`dance.spec_for_word` 先取存储的 Claude spec，没有再按规则现算；卡片从不等任务。（§13 起改为：先算规则 spec，再叠加存储标注的语义动作，切块 / 重音只在模型真改过时用模型的。）
 - **数据与运维**：迁移 0016 重建 `jobs` / `ai_calls`（CHECK 列表加新值）、新建 `word_dances`、`words` 加两列 —— 停机迁移；`wd check db` 不变；管理页 `ai` 多两项 `dance_today_usd` / `dance_daily_budget_usd`。
 - **测试**：`test_db_0016`（重建保留全部行与索引、CHECK 生效、唯一活动行）、`test_dance_annotate`（入队门控与去重、worker 整批标注、存储 spec 优先于规则、坏切块回退、预算为 0 时跳过、CLI）、契约与 fake claude 测试扩到 `dance_v1`；前端 `dances.test`（28 原语全部 ≤ 2.5 s、目标合法）、`DancingWord`（舞台物件 / 分身 / 姿态色 / 三种播放方式 / form_only）、`StudyCard`（背面翻面播放、form_only 不播）。
 - **回填与评审（2026-11-08）**：小学 600 词中 592 个标注完成（30 次调用 $0.675），67 个有动作；评审确认动作全部合库、无漏判；切块改正 12 处里 10 处更好。确认的两处**库空缺**：`jump`（库里没有「跳」——rise 是向上 / 高处的位置义，不是跳）和 `on`（in / on / under 三件套缺 on）；提议 P3 加两个原语 `hop`（整词向上弹一下落回）和 `onto`（词落到舞台物件顶上停住），各自对应的典型词：jump、hop、skip / on、on top of。
-- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关（§12 已做）；标注结果的人工审核页（本次用一次性 Artifact）；上面两个库空缺（§12 已做：`hop` / `onto`）；规则层的 `-er` 后缀切分（work·er / farm·er 而不是 wor·ker / far·mer）。
+- **留给 P3**：线索复习；按学段默认 `form_only`；设置页三档开关（§12 已做）；标注结果的人工审核页（本次用一次性 Artifact）；上面两个库空缺（§12 已做：`hop` / `onto`）；规则层的 `-er` 后缀切分（work·er / farm·er 而不是 wor·ker / far·mer；§13 已做）。
 
 ## 12. P3 第一批实现记录（2026-11-08 晚，sqin：「P3 加 hop 和 onto 两个原语，设置页开三档」）
 
@@ -275,4 +275,14 @@
 - **设置页三档**：学习设置里的「单词之舞」从开关改为分段控件 全部 / 只拼读 / 关（`dance_mode` = `full` / `form_only` / `off`，和例句译文、口音同一控件），说明文字另起一行；文案 `settings.danceModes` + 改写的 `settings.danceHint`，FRONTEND §8 镜像。
 - **不变**：数据库（无迁移）、入队与预算、P1 / P2 的播放时机、`form_only` 的含义。
 - **测试**：`dances.test`（30 原语 ≤ 2.5 s；hop 整词起跳后回到原样；onto 从左上方进场、落定后回到原样，台子步不带效果级 easing、在落地偏移之后才下沉）、`DancingWord`（onto 画 shelf，台子步真的落在舞台物件上）、`test_docs_contract`（API.md §9 与 types.ts 逐字相同）、`SettingsPage`（三档保存 form_only / off / full，顺序 全部 / 只拼读 / 关）、`test_dance_annotate.build_spec`（hop / onto 不带参数，多余的 n / color 丢弃）、`test_schemas`（三份枚举与提示词同序）。
-- **留给以后**：线索复习（§4.5）；按学段默认 `form_only`；规则层 -er 后缀切分；标注审核页进产品；手势版（§4.6）。
+- **留给以后**：线索复习（§4.5）；按学段默认 `form_only`；规则层 -er 后缀切分（§13 已做）；标注审核页进产品；手势版（§4.6）。
+
+## 13. P3 第二批实现记录（2026-11-09，sqin：「把规则层的 -er 后缀切分做了」）
+
+- **起因**：P2 评审确认 worker / farmer 的切块是规则层机械的 VC·CV 切分（wor·ker / far·mer），11-09 00:05 用 dance-v2 强制重标也没改——提示词第 1 条让模型「除非明显错误否则保留规则层建议」，音节上 wor·ker 并不明显错误。结论：机械切分要在规则层做，并且已存的标注不能把规则层的旧错误冻结住。
+- **规则层 -er 切分**（`wd.dance.er_evidence` / `er_stem` / `rule_spec`，`spec_for(..., er_stem=)`）：去掉 -er 后的词干本身是词库里的公开、有效、未合并词条（`er_stem` 查这一次；`er_evidence` 是纯函数，只看两行数据），词只认全小写、至少 4 个字母的（Easter 这类大写开头的不切）、两个音标能拼上（词干 + /ə/ /ər/ /ɚ/；num·ber 的 /bə/、lon·ger 的 /gə/ 拼不上）、词干是实词（ECDICT 词性含 n / v / j；with·er、quar·ter 不算）、并且有派生证据：ECDICT 的 exchange 把这个词标为词干的比较级（low·er），或者（名词，或形容词派生形容词——for·mer、ten·der、in·ner 被挡住）英文释义提到词干（a person who **works**）、两边中文释义共享一个双字词（农场 / 农场主）、或中文释义里直接写了词干（old的比较级）。满足就把词干按普通规则切，再加一块 er：work·er、farm·er、sell·er（双写 l 留在词干里）、qui·et·er、re·port·er；词干末尾的音节辅音被词的音标吞掉时也认（lis·ten·er /ˈlɪsnə/、trav·el·er，和 in·ter·est·ing 的省读 schwa 一个道理）。全库 9618 词里拼写 + 音标能对上的候选 95 个（种子文件里 97 个，多出的 easter、mister 不在词库里），证据过关 65 个（`backend/tests/fixtures/dance_er_splits.json` 钉死这份名单；cor·ner、cen·ter、but·ter、mas·ter、mis·ter、por·ter、of·fer、prop·er、quar·ter、cus·to·mer 全部保持原切法）。证据不够的派生词维持原切（fighter 仍是 figh·ter、teller 仍是 tel·ler），不比 P1 差。哑音标记在 -er 切分时取词干自己的标记加整词的模式规则（lis·ten·er 标哑音 t，不标 ten 的 e）。
+- **`word_dances.corrected`（迁移 0017，加列不重建）**：标注器 `build_spec` 一直在算「模型是否改了规则建议」并写进任务结果，现在 `store_spec` 把它存进行里。`spec_for_word` 的服务规则改为：先算当前规则 spec，再叠加已存标注——语义动作永远叠加，切块和重音只在 `corrected = 1` 时用模型的；模型只是「确认」的词（小学 592 个里 580 个）从此跟着规则层走，worker / farmer 不用再调模型就变成 work·er / farm·er；模型真改过的 13 个（小学 12 个：teach·er、grand·moth·er、Jan·u·ar·y、health·y……，加四级词 So·vi·et）保留它的切块和重音（哑音 / 双写标记一律用规则层的）。迁移文件只加列（全部 NULL），`backfill_corrected` 在下一次服务启动时用「存的 spec 与普通规则是否一致」逐行算出，重音按模型实际收到的建议比较（规则层给不出重音时发给模型的是 0，`suggested_stress`），之后每次启动只补新出现的 NULL 行；NULL 期间按 corrected 处理，保守。
+- **提示词**：不变（模型拿到的 `rule_letters` 现在已是 work·er，按第 1 条会保留）；`DANCE_PROMPT_VERSION` 仍为 dance-v2。
+- **影响**（在数据库副本上彩排 0017 后逐词比对）：全库 47 个词的服务端切块改变，全部是「词干 + er」——小学 2 个（worker、farmer，存的标注跟着规则走），其余 45 个只有规则 spec：中考 5 个（foreigner、owner、poster、reporter、waiter），高考 2 个（leader、speaker），35 个四六级词，3 个不在任何学段表里的词（cleaner / sneaker / traveler）；lis·ten·er、trav·el·er、fas·ten·er 的哑音标记同时改为词干自己的（bank·er、paint·er、print·er……）；语义动作一个没变，所有服务端 spec 仍通过 `DanceSpec` 校验。
+- **测试**：`test_dance`（-er 金表 11 词；提示无法套用时回到普通切法；`er_evidence` 对真派生 / 假亲戚的判定；`er_stem` 只认公开、有效、未合并的词干；全量种子 -er 切分与夹具逐字相同）、`test_db_0017`（只加列、CHECK、旧 INSERT 形状留 NULL、启动回填逐行算对——含重音为空的一块词、服务端合并）、`test_main_dance_corrected`（第一次启动回填、第二次不动、回填出错不影响启动）、`test_dance_annotate`（模型拿到 work·er 建议并存 `corrected = 0`；服务端只在 corrected = 1 时用模型切块；NULL 行先保守后回填）。
+- **留给以后**：线索复习（§4.5）；按学段默认 `form_only`；其他后缀的同类切分（-ing / -ly / -est / -ness：先看评审有没有再报）；标注审核页进产品；手势版（§4.6）。

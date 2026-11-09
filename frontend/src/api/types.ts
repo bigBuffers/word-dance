@@ -70,12 +70,12 @@ export interface UserWord {
   srs: Srs; times_pushed: number; times_added: number;
   added_at: string; first_added_at: string; mastered_at: string | null;
 }
-export interface DanceSpec {                                 // 单词之舞 (docs/WORD_DANCE_DESIGN.md §4): the stored Claude spec (word_dances, P2) when the word has one, else derived by backend/wd/dance.py from display + phonetic at serialisation time
+export interface DanceSpec {                                 // 单词之舞 (docs/WORD_DANCE_DESIGN.md §4): built by wd.dance.spec_for_word at serialisation time — the rule spec from display + phonetic, overlaid with the stored word_dances row's semantic (and its chunks / stress only where the model corrected the suggestion, P3b)
   version: 1; letters: string[];                            // display cut into syllable chunks, letters.join('') === display; one chunk when the rules cannot split the word
   stress: number | null;                                     // index into letters of the primary-stressed chunk (an unmarked split word takes its first non-schwa chunk); null only when the word stays one chunk with two or more nuclei
   marks: { double: [number, number][]; silent: number[] };   // letter indexes into display: doubled letters jump together, silent letters stay put (night's gh, knife's k, the magic e)
   semantic: { primitive: DancePrimitive; params: { n?: number; color?: DanceColor } } | null;   // 语义舞 (§4.3): the word's one meaning motion, played at the reveal; null = no semantic dance (nouns with a picture, function words, rule-only specs)
-  source: 'rule' | 'claude';                                 // rule = backend/wd/dance.py at serialisation time; claude = the stored word_dances row (chunks confirmed or corrected, semantic chosen)
+  source: 'rule' | 'claude';                                 // rule = backend/wd/dance.py at serialisation time; claude = the word has a stored word_dances row (its semantic; its chunks and stress only where the model corrected the rule suggestion, else the current rules')
 }
 export interface Example { en: string; zh: string }
 export interface Content {

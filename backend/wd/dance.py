@@ -19,13 +19,20 @@ syllables, the spec keeps the whole word as ONE chunk (``letters == [display]``;
 ``None``) so the card still plays the plain entrance and one beat; a display that is not plain letters (phrases, ``Mr.``,
 ``o'clock``, ``ping-pong``) or a word without a phonetic gets no spec at all (``None``) and the card shows the headword as
 today. The 2026-11-08 review of all 600 小学 splits against dictionary and phonics rules (docs/WORD_DANCE_DESIGN.md §10)
-shaped the rules below; what it left to P2's Claude pass is listed there (suffix-aware cuts such as teach·er, heteronyms,
-hyphenated words).
+shaped the rules below; what it left to P2's Claude pass is listed there (heteronyms, hyphenated words).
+
+P3b (docs/WORD_DANCE_DESIGN.md §13) moved the one suffix cut the review kept flagging into the rules: a derived -er word is cut
+after its stem (work·er, farm·er, low·er) when :func:`er_evidence` can prove the derivation from the bank rows of the word
+and its stem — :func:`er_stem` looks the stem up, :func:`rule_spec` is ``spec_for`` with that hint. The same release made the
+rules the authority for everything mechanical in a stored annotation too: ``word_dances.corrected`` (0017) records whether
+Claude changed the chunks or stress it was given, and :func:`spec_for_word` serves the stored chunks only where it did,
+so every later rule improvement reaches the words whose cut the model merely confirmed.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -35,7 +42,9 @@ from . import db
 from .config import Settings, get_settings
 from .jobs import queue
 
-__all__ = ["DANCE_SPEC_VERSION", "DANCE_JOB", "spec_for", "spec_for_word", "active_spec", "store_spec", "mark_failed", "enqueue_if_needed", "nuclei", "ortho_groups", "split_letters", "silent_letters", "double_letters", "first_variant"]
+__all__ = ["DANCE_SPEC_VERSION", "DANCE_JOB", "spec_for", "spec_for_word", "rule_spec", "suggested_stress", "er_stem", "er_evidence", "active_spec", "active_record", "store_spec", "backfill_corrected", "mark_failed", "enqueue_if_needed", "nuclei", "ortho_groups", "split_letters", "silent_letters", "double_letters", "first_variant"]
+
+log = logging.getLogger(__name__)
 
 DANCE_SPEC_VERSION = 1
 
@@ -454,15 +463,9 @@ def double_letters(word: str) -> list[list[int]]:
     return [[i, i + 1] for i in range(len(w) - 1) if w[i] == w[i + 1] and w[i].isalpha()]
 
 
-def silent_letters(word: str, phonetic: str) -> list[int]:
-    """Indexes of letters the transcription does not sound, by a few safe patterns: kn- wr- wh- (who) h- (hour) tw- (two),
-    -mb -mn, gh after a vowel (night, eight, daughter, though — not laugh), the l of -alk/-alf/-alm/-ould, the t of
-    -sten/-ften/-stle/-stm-, the w of -sw-, the d of -dn- (Wednesday), and the magic e (final, or internal as in care·ful)
-    the split found silent."""
-    w = word.lower()
-    p = first_variant(phonetic)
-    if not p or not _LETTERS_RE.fullmatch(w):
-        return []
+def _pattern_silent(w: str, p: str) -> set[int]:
+    """The pattern-based silent letters of :func:`silent_letters` (everything but the magic e the split finds): ``w`` lower-case
+    letters, ``p`` the first phonetic variant."""
     out: set[int] = set()
     q = p.lstrip(_PRIMARY + _SECONDARY)  # 'ɒnist: the leading-letter tests look past a stress mark
     if w.startswith("kn") and not q.startswith("k"):
@@ -494,6 +497,19 @@ def silent_letters(word: str, phonetic: str) -> list[int]:
     if p.count("d") < w.count("d"):
         for m in re.finditer(r"(d)n", w):
             out.add(m.start(1))  # Wed·nes·day's first d
+    return out
+
+
+def silent_letters(word: str, phonetic: str) -> list[int]:
+    """Indexes of letters the transcription does not sound, by a few safe patterns: kn- wr- wh- (who) h- (hour) tw- (two),
+    -mb -mn, gh after a vowel (night, eight, daughter, though — not laugh), the l of -alk/-alf/-alm/-ould, the t of
+    -sten/-ften/-stle/-stm-, the w of -sw-, the d of -dn- (Wednesday), and the magic e (final, or internal as in care·ful)
+    the split found silent."""
+    w = word.lower()
+    p = first_variant(phonetic)
+    if not p or not _LETTERS_RE.fullmatch(w):
+        return []
+    out = _pattern_silent(w, p)
     groups = ortho_groups(w, silent_w="w" not in p, y_between_vowels="j" not in p)
     split = split_letters(w, phonetic)
     final_e = split[2].final_e if split is not None else (_drop_final_e(w, groups) is not None and len(groups) > len(nuclei(phonetic)))
@@ -505,8 +521,10 @@ def silent_letters(word: str, phonetic: str) -> list[int]:
 
 
 # ----------------------------------------------------------------------------------------------- the spec
-def spec_for(display: str | None, phonetic: str | None) -> dict[str, Any] | None:
-    """API.md §9 ``DanceSpec`` for a word, or ``None`` when the display is not plain letters or no phonetic is stored."""
+def spec_for(display: str | None, phonetic: str | None, *, er_stem: tuple[str, str] | None = None) -> dict[str, Any] | None:
+    """API.md §9 ``DanceSpec`` for a word, or ``None`` when the display is not plain letters or no phonetic is stored. ``er_stem`` =
+    ``(stem display, stem phonetic)`` from :func:`er_stem` cuts a derived -er word after its stem (work·er); without the hint the
+    word is cut by the ordinary rules alone (the pure P1 behaviour)."""
     text = (display or "").strip()
     if not text or not _LETTERS_RE.fullmatch(text):
         return None
@@ -516,8 +534,19 @@ def spec_for(display: str | None, phonetic: str | None) -> dict[str, Any] | None
     nucs = nuclei(phonetic)
     if not nucs:
         return None
-    split = split_letters(text, phonetic)
-    marks = {"double": double_letters(text), "silent": silent_letters(text, phonetic)}
+    suffix = _er_split(text, phonetic, nucs, er_stem) if er_stem is not None else None
+    split: tuple[list[str], list[Nucleus], Reading | None] | None
+    if suffix is not None:
+        # work·er: the stem's own silent letters (same offsets — the stem is a prefix of the display) plus the whole word's pattern
+        # letters; the ordinary reading of the whole word (liste·ner with a "dropped" internal e) is the one this cut rejected, so
+        # none of its marks — lis·ten·er keeps listen's silent t and sounds the e of ten
+        letters, used, stem = suffix
+        split = (letters, used, None)
+        silent = sorted(_pattern_silent(text.lower(), first_variant(phonetic)) | set(stem["marks"]["silent"]))
+    else:
+        split = split_letters(text, phonetic)
+        silent = silent_letters(text, phonetic)
+    marks = {"double": double_letters(text), "silent": silent}
     if split is None:
         return {"version": DANCE_SPEC_VERSION, "letters": [text], "stress": 0 if len(nucs) == 1 else None, "marks": marks, "semantic": None, "source": "rule"}
     letters, used, _reading = split
@@ -532,17 +561,156 @@ def spec_for(display: str | None, phonetic: str | None) -> dict[str, Any] | None
     return {"version": DANCE_SPEC_VERSION, "letters": letters, "stress": stress, "marks": marks, "semantic": None, "source": "rule"}
 
 
+# ----------------------------------------------------------------------------------------------- the -er suffix (P3b)
+# work·er, farm·er, low·er — not wor·ker / far·mer: a word that is a bank word plus -er keeps that stem whole and gives the suffix
+# its own chunk, the way Merriam-Webster / Longman divide agent nouns and comparatives (the two VC·CV splits the P2 review kept
+# flagging, docs/WORD_DANCE_DESIGN.md §11 / §13). Spelling alone cannot tell work·er from cor·ner, cen·ter, but·ter or mas·ter,
+# so ``er_evidence`` demands four things of the pair (word row, stem row — ``er_stem`` supplies only public, valid, unmerged stem
+# rows): the stem row is spelled exactly ``display[:-2]`` (lower-case letters only — a capitalised display such as Easter never gets
+# the cut); the two transcriptions compose (stem + /ə/, /ər/ or /ɚ/ — num·ber's
+# /bə/ and lon·ger's /gə/ fail); the stem is a content word (ECDICT pos has n / v / j — with·er, quar·ter fail); and the word is
+# derived from it: ECDICT's exchange links a comparative to its base (``{"0": "low", "1": "r"}``), or — for a noun, or an
+# adjective from an adjective, which keeps for·mer, ten·der, prop·er and in·ner out — the English definition names the stem
+# (``a person who works …``), the two Chinese translations share a two-character word (农场 / 农场主) or the translation names
+# the stem (``old的比较级``). 65 of the live bank's 95 spelling-plus-phonetic candidates pass (97 in the shipped seed, which
+# still carries easter / mister; tests/fixtures/dance_er_splits.json pins the list); a derived word the evidence misses keeps the
+# ordinary cut — fighter stays figh·ter, teller tel·ler — never worse than P1.
+_ER_TAILS = frozenset({"ə", "ər", "ɚ", "ɝ", "ɜ", "ɜː"})
+_ER_BARE_RE = re.compile(r"\(r\)|ʳ|[ˈˌ'.,\s]")
+_LOWER_RE = re.compile(r"[a-z]+")
+_POS_RE = re.compile(r"([a-z]):(\d+)")
+_HAN_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
+# two-character words so common in ECDICT glosses that sharing one proves nothing
+_ER_GENERIC_BIGRAMS = frozenset({"的人", "东西", "一个", "起来", "使成", "成为", "进行", "某人", "某物", "某事", "使得", "一种", "一样", "一起", "的物", "可以", "没有", "不是", "表示", "用于", "用来", "或者", "做事"})
+
+
+def _text(value: Any) -> str:
+    """A ``words`` column the seed file stores as a list of lines and the table as newline-joined text."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(v) for v in value)
+    return str(value)
+
+
+def _bare_phonetic(phonetic: str | None) -> str:
+    """The first variant without stress marks, syllable dots, spaces and the optional-r notation: just the segments."""
+    return _ER_BARE_RE.sub("", first_variant(phonetic or ""))
+
+
+def _pos_shares(pos: Any) -> dict[str, int]:
+    """ECDICT's ``v:4/n:96`` → ``{"v": 4, "n": 96}`` (``j`` = adjective, ``r`` = adverb, ``i`` = preposition, ``d`` = determiner)."""
+    return {m.group(1): int(m.group(2)) for m in _POS_RE.finditer(_text(pos))}
+
+
+def _han_bigrams(text: str) -> set[str]:
+    out: set[str] = set()
+    for run in _HAN_RUN_RE.findall(text):
+        out.update(run[i : i + 2] for i in range(len(run) - 1))
+    return out - _ER_GENERIC_BIGRAMS
+
+
+def er_evidence(word: Mapping[str, Any], stem: Mapping[str, Any]) -> str | None:
+    """Why ``word`` is ``stem`` + -er — ``"comparative"``, ``"definition"`` or ``"translation"`` — or ``None`` when the pair fails
+    any test of the section comment above. Pure: both arguments are ``words`` rows (or seed records with list-valued columns)."""
+    display = str(word.get("display") or word.get("lemma") or "")
+    stem_display = str(stem.get("display") or stem.get("lemma") or "")
+    if len(display) < 4 or not display.endswith("er") or not _LOWER_RE.fullmatch(display) or display[:-2] != stem_display:
+        return None
+    w, s = _bare_phonetic(word.get("phonetic")), _bare_phonetic(stem.get("phonetic"))
+    if not w or not s or not w.startswith(s) or w[len(s) :] not in _ER_TAILS:
+        return None
+    stem_pos, word_pos = _pos_shares(stem.get("pos")), _pos_shares(word.get("pos"))
+    if not (stem_pos.keys() & {"n", "v", "j"}):
+        return None
+    exchange: Any = word.get("exchange_json") if word.get("exchange_json") is not None else word.get("exchange")
+    if isinstance(exchange, str):
+        try:
+            exchange = json.loads(exchange)
+        except ValueError:
+            exchange = None
+    if isinstance(exchange, Mapping) and str(exchange.get("0") or "") == stem_display and "r" in str(exchange.get("1") or ""):
+        return "comparative"
+    top = max(word_pos, key=word_pos.__getitem__) if word_pos else None
+    if not (top in (None, "n") or ("j" in stem_pos and "j" in word_pos)):
+        return None
+    if re.search(rf"(?<![a-z]){re.escape(stem_display)}(?:s|es|ed|d|ing)?(?![a-z])", _text(word.get("definition")).lower()):
+        return "definition"
+    translation = _text(word.get("translation"))
+    if _han_bigrams(translation) & _han_bigrams(_text(stem.get("translation"))) or re.search(rf"(?<![A-Za-z]){re.escape(stem_display)}(?![A-Za-z])", translation):
+        return "translation"
+    return None
+
+
+def er_stem(conn: sqlite3.Connection, word: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(stem display, stem phonetic)`` when ``word`` is a bank word plus -er by :func:`er_evidence`, else ``None`` — the hint
+    :func:`spec_for` needs to cut work·er. One lookup on ``ux_words_lemma`` among public, valid, unmerged words."""
+    display = str(word.get("display") or word.get("lemma") or "")
+    if len(display) < 4 or not display.endswith("er") or not _LOWER_RE.fullmatch(display):
+        return None
+    cur = conn.execute(
+        "SELECT display, lemma, phonetic, translation, definition, pos FROM words "
+        "WHERE lemma = ? AND is_public = 1 AND is_valid_english = 1 AND merged_into_word_id IS NULL",
+        (display[:-2],),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    stem = {col[0]: row[i] for i, col in enumerate(cur.description)}
+    if er_evidence(word, stem) is None:
+        return None
+    return display[:-2], str(stem["phonetic"] or "")
+
+
+def suggested_stress(rule: Mapping[str, Any]) -> int:
+    """The ``rule_stress`` the prompt sends for a rule spec: its stress, or 0 when the rules could not tell (a degraded one-chunk
+    polysyllable). ``corrected`` compares the model's stress with THIS, never with the raw ``None``."""
+    stress = rule.get("stress")
+    return int(stress) if stress is not None else 0
+
+
+def rule_spec(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The rule layer's spec for a ``words`` row: :func:`spec_for` with the -er stem hint when the bank knows the stem."""
+    return spec_for(word.get("display") or word.get("lemma"), word.get("phonetic"), er_stem=er_stem(conn, word))
+
+
+def _er_split(text: str, phonetic: str, nucs: list[Nucleus], er_stem: tuple[str, str]) -> tuple[list[str], list[Nucleus], dict[str, Any]] | None:
+    """work·er: ``(letters, nuclei used, the stem's spec)`` — the stem's own chunks (ordinary rules; a stem is never suffix-split
+    again) plus the -er chunk, when the two transcriptions compose and the word has exactly one syllable more than the stem has
+    chunks (or the transcription swallowed the stem's syllabic consonant, lis·ten·er); ``None`` sends the word to the ordinary cut."""
+    stem_text, stem_phonetic = er_stem
+    if len(text) < 4 or not text.endswith("er") or text[:-2] != stem_text:
+        return None
+    w, s = _bare_phonetic(phonetic), _bare_phonetic(stem_phonetic)
+    if not w or not s or not w.startswith(s) or w[len(s) :] not in _ER_TAILS:
+        return None
+    stem = spec_for(stem_text, stem_phonetic)
+    if stem is None or "".join(stem["letters"]) != stem_text:
+        return None
+    letters = [*stem["letters"], text[-2:]]
+    if len(letters) == len(nucs):
+        return letters, nucs, stem
+    stem_nucs = nuclei(stem_phonetic)
+    if len(letters) == len(nucs) + 1 and stem_nucs and stem_nucs[-1].syllabic and len(stem["letters"]) == len(stem_nucs):
+        # lis·ten·er /ˈlɪsnə/, trav·el·er /ˈtrævlə/: the transcription swallows the stem's syllabic consonant before the suffix vowel;
+        # the spelling keeps the syllable, as the elided-schwa rule does for in·ter·est·ing — a stressless ə stands in for it
+        return letters, [*nucs[:-1], Nucleus("ə", False, False), nucs[-1]], stem
+    return None
+
+
 # ----------------------------------------------------------------------------------------------- stored specs (P2)
 DANCE_JOB = "generate_dance"
 
 
-def active_spec(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The Claude-made spec of a word (``word_dances`` row ``words.active_dance_id`` points at, ``source == 'claude'``), or
-    ``None``; a stored spec whose chunks no longer spell the display form (a later rename) is ignored."""
+def active_record(conn: sqlite3.Connection, word: Mapping[str, Any]) -> tuple[dict[str, Any], int | None] | None:
+    """The word's stored annotation (the ``word_dances`` row ``words.active_dance_id`` points at, ``source == 'claude'``) as
+    ``(spec, corrected)`` — ``corrected`` 1 when Claude changed the chunks or stress it was given, 0 when it confirmed them, ``None``
+    for a row the 0017 backfill has not reached — or ``None`` without one; a stored spec whose chunks no longer spell the display
+    form (a later rename) is ignored."""
     dance_id = word.get("active_dance_id")
     if not dance_id:
         return None
-    row = conn.execute("SELECT spec_json FROM word_dances WHERE id = ? AND status = 'active'", (int(dance_id),)).fetchone()
+    row = conn.execute("SELECT spec_json, corrected FROM word_dances WHERE id = ? AND status = 'active'", (int(dance_id),)).fetchone()
     if row is None:
         return None
     try:
@@ -552,26 +720,86 @@ def active_spec(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, 
     display = str(word.get("display") or word.get("lemma") or "")
     if not isinstance(spec, dict) or "".join(spec.get("letters") or []) != display:
         return None
-    return spec
+    return spec, (None if row[1] is None else int(row[1]))
+
+
+def active_spec(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored spec alone (see :func:`active_record`); what the card gets is :func:`spec_for_word`."""
+    record = active_record(conn, word)
+    return None if record is None else record[0]
 
 
 def spec_for_word(conn: sqlite3.Connection, word: Mapping[str, Any]) -> dict[str, Any] | None:
-    """API.md §9.1: the stored Claude spec when the word has one, else the rule-based spec of display + phonetic."""
-    return active_spec(conn, word) or spec_for(word.get("display") or word.get("lemma"), word.get("phonetic"))
+    """API.md §9.1: the rule spec of the word (:func:`rule_spec`), overlaid with its stored annotation when it has one — the semantic
+    primitive always, the chunks and stress only where Claude corrected the suggestion it was given (``word_dances.corrected``;
+    a row the backfill has not reached counts as corrected). A stored row the model merely confirmed therefore follows every later
+    improvement of the rules (work·er); the marks are always the rules'. Without a rule spec the stored spec serves as it is;
+    without a stored row the rule spec serves (``source: 'rule'``)."""
+    rule = rule_spec(conn, word)
+    record = active_record(conn, word)
+    if record is None:
+        return rule
+    spec, corrected = record
+    if rule is None:
+        return spec
+    if corrected != 0:
+        return {**spec, "marks": rule["marks"]}  # the model's chunks and stress; the letter marks are the rules' whatever the row says
+    return {**rule, "semantic": spec.get("semantic"), "source": "claude"}
 
 
-def store_spec(conn: sqlite3.Connection, word_id: int, spec: Mapping[str, Any], *, model: str | None, prompt_version: str, now: str, reason: str | None = None) -> int:
-    """Insert the new active ``word_dances`` row (``reason`` = the model's short justification, kept for the human review), supersede
-    the previous one and point the word at it (one transaction)."""
+def store_spec(
+    conn: sqlite3.Connection,
+    word_id: int,
+    spec: Mapping[str, Any],
+    *,
+    model: str | None,
+    prompt_version: str,
+    now: str,
+    reason: str | None = None,
+    corrected: bool | None = None,
+) -> int:
+    """Insert the new active ``word_dances`` row (``reason`` = the model's short justification, kept for the human review;
+    ``corrected`` = whether the model changed the chunks or stress of the rule suggestion, ``None`` only for rows written without that
+    knowledge), supersede the previous one and point the word at it (one transaction)."""
     with db.maybe_tx(conn):
         conn.execute("UPDATE word_dances SET status = 'superseded' WHERE word_id = ? AND status = 'active'", (int(word_id),))
         cur = conn.execute(
-            "INSERT INTO word_dances(word_id, status, spec_json, model, prompt_version, reason, created_at) VALUES (?, 'active', ?, ?, ?, ?, ?)",
-            (int(word_id), json.dumps(dict(spec), ensure_ascii=False), model, prompt_version, (reason or None), now),
+            "INSERT INTO word_dances(word_id, status, spec_json, model, prompt_version, reason, created_at, corrected) VALUES (?, 'active', ?, ?, ?, ?, ?, ?)",
+            (int(word_id), json.dumps(dict(spec), ensure_ascii=False), model, prompt_version, (reason or None), now, None if corrected is None else int(bool(corrected))),
         )
         dance_id = int(cur.lastrowid)
         conn.execute("UPDATE words SET active_dance_id = ?, dance_state = 'ready', updated_at = ? WHERE id = ?", (dance_id, now, int(word_id)))
     return dance_id
+
+
+def backfill_corrected(conn: sqlite3.Connection) -> int:
+    """Fill ``word_dances.corrected`` where it is NULL — every row right after migration 0017 (the file only adds the column) and any
+    row written without the flag: 1 when the stored chunks or stress differ from the suggestion the model was given — the ordinary
+    rules without the -er hint (which did not exist before 0017), the stress as the prompt sends it (0 when the rules had none) —
+    else 0; a word without a rule spec today counts as corrected (its stored chunks keep serving). Called at every service start
+    (``main.startup``); returns the number of rows filled."""
+    rows = conn.execute(
+        "SELECT d.id, d.spec_json, w.display, w.lemma, w.phonetic FROM word_dances d JOIN words w ON w.id = d.word_id WHERE d.corrected IS NULL"
+    ).fetchall()
+    if not rows:
+        return 0
+    updates: list[tuple[int, int]] = []
+    for dance_id, spec_json, display, lemma, phonetic in rows:
+        try:
+            spec = json.loads(spec_json)
+        except (TypeError, ValueError):
+            spec = {}
+        if not isinstance(spec, dict):
+            spec = {}
+        letters = spec.get("letters")
+        if not isinstance(letters, list):
+            letters = []
+        base = spec_for(display or lemma, phonetic)
+        corrected = 1 if base is None else int(letters != base["letters"] or spec.get("stress") != suggested_stress(base))
+        updates.append((corrected, int(dance_id)))
+    with db.maybe_tx(conn):
+        conn.executemany("UPDATE word_dances SET corrected = ? WHERE id = ?", updates)
+    return len(updates)
 
 
 def mark_failed(conn: sqlite3.Connection, word_id: int, *, now: str) -> None:

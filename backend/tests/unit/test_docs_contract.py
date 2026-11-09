@@ -288,6 +288,9 @@ def test_types_ts_is_api_section_9_verbatim():
     assert header[0].startswith("// word-Dance — shared DTOs. FROZEN CONTRACT") and all(l.startswith("//") for l in header[:3]) and header[3] == ""
     assert lines[0].startswith("export type Stage")
     assert "\n".join(lines).rstrip("\n") == block.group(1).rstrip("\n")
+    # the DanceSpec header describes the P3b serving rule (spec_for_word), not P2's "stored spec wins"
+    header_line = next(l for l in block.group(1).splitlines() if l.startswith("export interface DanceSpec"))
+    assert "spec_for_word" in header_line and "when the word has one, else derived" not in header_line
 
 
 # ------------------------------------------------------ learning order (docs/analysis/2026-11-06-learn-order/DESIGN.md §4.1 item 23)

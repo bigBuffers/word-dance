@@ -1,0 +1,392 @@
+{
+ "farmer": {
+  "chunks": "farm·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "sweater": {
+  "chunks": "sweat·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "teacher": {
+  "chunks": "teach·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "worker": {
+  "chunks": "work·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "foreigner": {
+  "chunks": "for·eign·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "owner": {
+  "chunks": "own·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "player": {
+  "chunks": "play·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "poster": {
+  "chunks": "post·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "reporter": {
+  "chunks": "re·port·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "singer": {
+  "chunks": "sing·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "waiter": {
+  "chunks": "wait·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "leader": {
+  "chunks": "lead·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "lower": {
+  "chunks": "low·er",
+  "stress": 0,
+  "evidence": "comparative",
+  "applied": true
+ },
+ "speaker": {
+  "chunks": "speak·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "commander": {
+  "chunks": "com·mand·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "counter": {
+  "chunks": "count·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "employer": {
+  "chunks": "em·ploy·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "interpreter": {
+  "chunks": "in·ter·pret·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "keeper": {
+  "chunks": "keep·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "layer": {
+  "chunks": "lay·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "listener": {
+  "chunks": "lis·ten·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "painter": {
+  "chunks": "paint·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "reader": {
+  "chunks": "read·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "recorder": {
+  "chunks": "re·cord·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "roller": {
+  "chunks": "roll·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "seller": {
+  "chunks": "sell·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "steamer": {
+  "chunks": "steam·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "banker": {
+  "chunks": "bank·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "burner": {
+  "chunks": "burn·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "buyer": {
+  "chunks": "buy·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "conditioner": {
+  "chunks": "con·di·tion·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "cooker": {
+  "chunks": "cook·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "cracker": {
+  "chunks": "crack·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "dealer": {
+  "chunks": "deal·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "designer": {
+  "chunks": "de·sign·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "developer": {
+  "chunks": "de·vel·op·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "dryer": {
+  "chunks": "dry·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "fastener": {
+  "chunks": "fas·ten·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "founder": {
+  "chunks": "found·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "heater": {
+  "chunks": "heat·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "hunter": {
+  "chunks": "hunt·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "interviewer": {
+  "chunks": "in·ter·view·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "learner": {
+  "chunks": "learn·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "lighter": {
+  "chunks": "light·er",
+  "stress": 0,
+  "evidence": "comparative",
+  "applied": true
+ },
+ "locker": {
+  "chunks": "lock·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "mixer": {
+  "chunks": "mix·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "opener": {
+  "chunks": "o·pen·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "pensioner": {
+  "chunks": "pen·sion·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "performer": {
+  "chunks": "per·form·er",
+  "stress": 1,
+  "evidence": "definition",
+  "applied": true
+ },
+ "petitioner": {
+  "chunks": "pe·ti·tion·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "preacher": {
+  "chunks": "preach·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "printer": {
+  "chunks": "print·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "reminder": {
+  "chunks": "re·mind·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "retailer": {
+  "chunks": "re·tail·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "reviewer": {
+  "chunks": "re·view·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "starter": {
+  "chunks": "start·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "supporter": {
+  "chunks": "sup·port·er",
+  "stress": 1,
+  "evidence": "translation",
+  "applied": true
+ },
+ "tanker": {
+  "chunks": "tank·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "thriller": {
+  "chunks": "thrill·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "trailer": {
+  "chunks": "trail·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "trainer": {
+  "chunks": "train·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ },
+ "cleaner": {
+  "chunks": "clean·er",
+  "stress": 0,
+  "evidence": "comparative",
+  "applied": true
+ },
+ "sneaker": {
+  "chunks": "sneak·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "traveler": {
+  "chunks": "trav·el·er",
+  "stress": 0,
+  "evidence": "translation",
+  "applied": true
+ },
+ "viewer": {
+  "chunks": "view·er",
+  "stress": 0,
+  "evidence": "definition",
+  "applied": true
+ }
+}

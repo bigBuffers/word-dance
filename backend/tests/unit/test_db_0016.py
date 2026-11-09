@@ -81,8 +81,8 @@ def test_0016_rebuilds_jobs_and_ai_calls_keeping_rows_and_adds_word_dances(setti
         assert [tuple(r) for r in c.execute("SELECT active_dance_id, dance_state FROM words ORDER BY id")] == [(None, "none"), (None, "none")]
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             c.execute("UPDATE words SET dance_state = 'dancing' WHERE id = 1")
-        # word_dances: one active row per word; the columns the handler writes
-        assert [r["name"] for r in c.execute("PRAGMA table_info(word_dances)")] == ["id", "word_id", "status", "spec_json", "model", "prompt_version", "reason", "created_at"]
+        # word_dances: one active row per word; the columns the handler writes (+ `corrected`, appended by 0017 which runs in the same call)
+        assert [r["name"] for r in c.execute("PRAGMA table_info(word_dances)")] == ["id", "word_id", "status", "spec_json", "model", "prompt_version", "reason", "created_at", "corrected"]
         c.execute("INSERT INTO word_dances(word_id, status, spec_json) VALUES (1, 'active', '{}')")
         with pytest.raises(sqlite3.IntegrityError):
             c.execute("INSERT INTO word_dances(word_id, status, spec_json) VALUES (1, 'active', '{}')")

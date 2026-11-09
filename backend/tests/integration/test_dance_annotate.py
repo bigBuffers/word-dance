@@ -1,6 +1,8 @@
 """generate_dance end to end (docs/WORD_DANCE_DESIGN.md §6.2; CLAUDE_INTEGRATION §6.8): the bank enqueue rides along with the content
 job, the worker annotates 20 words per call through the fake claude, the stored spec wins over the rule spec in the DTOs, a bad
-answer falls back to the rule chunks, a missing item fails its job, and `wd dance-annotate` enqueues a stage."""
+answer falls back to the rule chunks, a missing item fails its job, and `wd dance-annotate` enqueues a stage. P3b: the suggestion
+the model gets is `rule_spec` (work·er when the bank knows the stem), `store_spec` records whether the model corrected it, and
+`spec_for_word` serves the stored chunks only where it did — a merely confirmed cut follows the rules."""
 
 from __future__ import annotations
 
@@ -286,3 +288,78 @@ def test_already_annotated_job_without_force_is_skipped(ctx, seeded):
     assert _word(conn, "happy")["dance_state"] == "ready"
     assert conn.execute("SELECT COUNT(*) FROM word_dances WHERE word_id = ?", (happy["id"],)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 1
+
+
+def _insert_word(conn, display: str, phonetic: str, **cols) -> dict:
+    cols.setdefault("is_valid_english", 1)  # what the seed import sets; the stem lookup only trusts validated public words
+    keys = ["lemma", "display", "source", "phonetic", *cols]
+    conn.execute(f"INSERT INTO words({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})", [display.lower(), display, "seed", phonetic, *cols.values()])
+    return _word(conn, display.lower())
+
+
+def test_the_model_gets_the_er_suggestion_and_the_stored_row_records_whether_it_corrected_it(ctx, seeded, settings, user):
+    conn = seeded
+    with db.tx(conn):
+        _insert_word(conn, "work", "wɜːk", translation="n. 工作, 劳动 v. 工作", pos="n:38/v:62")
+        word = _insert_word(conn, "worker", "'wɜːkə", translation="n. 工人", definition="n. a person who works at a specific occupation", pos="n:100")
+    entry = handler.prompt_entry(conn, word, rules.rule_spec(conn, word))
+    assert entry["rule_letters"] == ["work", "er"] and entry["rule_stress"] == 0
+    assert _enqueue(conn, "worker") is not None and worker.drain(ctx, ("generate_dance",)) >= 1
+    stored = conn.execute("SELECT spec_json, corrected FROM word_dances WHERE word_id = ? AND status = 'active'", (word["id"],)).fetchone()
+    assert json.loads(stored["spec_json"])["letters"] == ["work", "er"] and stored["corrected"] == 0  # the fake keeps the suggestion
+    job = conn.execute("SELECT result_json FROM jobs WHERE dedupe_key = ? ORDER BY id DESC LIMIT 1", (f"dance:{word['id']}",)).fetchone()
+    assert json.loads(job["result_json"])["corrected"] is False
+    served = words.word_detail(conn, int(word["id"]), user)["word"]["dance"]
+    assert served["letters"] == ["work", "er"] and served["source"] == "claude"
+
+
+def test_spec_for_word_serves_the_stored_chunks_only_where_the_model_corrected_them(seeded, user):
+    conn = seeded
+    with db.tx(conn):
+        _insert_word(conn, "work", "wɜːk", translation="n. 工作", pos="n:38/v:62")
+        worker = _insert_word(conn, "worker", "'wɜːkə", translation="n. 工人", definition="a person who works", pos="n:100")
+    semantic = {"primitive": "wave", "params": {}}
+    kept = {"version": 1, "letters": ["wor", "ker"], "stress": 0, "marks": {"double": [], "silent": []}, "semantic": semantic, "source": "claude"}
+    # the model kept the (old) rule cut: the current rules win, the semantic and the source stay
+    with db.tx(conn):
+        rules.store_spec(conn, int(worker["id"]), kept, model="m", prompt_version="dance-v1", now=NOW, corrected=False)
+    worker = _word(conn, "worker")
+    assert rules.active_record(conn, worker) == (kept, 0)
+    assert rules.spec_for_word(conn, worker) == {**kept, "letters": ["work", "er"]}
+    assert words.word_detail(conn, int(worker["id"]), user)["word"]["dance"]["letters"] == ["work", "er"]
+    # … including the stress and the marks: a confirmed row whose stored stress / marks differ from today's rules serves the rules'
+    stale = {**kept, "stress": 1, "marks": {"double": [], "silent": [0]}}
+    with db.tx(conn):
+        rules.store_spec(conn, int(worker["id"]), stale, model="m", prompt_version="dance-v1", now=NOW, corrected=False)
+    served = rules.spec_for_word(conn, _word(conn, "worker"))
+    assert served["letters"] == ["work", "er"] and served["stress"] == 0 and served["marks"] == {"double": [], "silent": []} and served["semantic"] == semantic
+    # the model corrected the cut: its chunks and stress serve, whatever the rules say today — the marks are still the rules'
+    odd = {**kept, "letters": ["w", "orker"], "stress": 1, "marks": {"double": [], "silent": [0]}}
+    with db.tx(conn):
+        rules.store_spec(conn, int(worker["id"]), odd, model="m", prompt_version="dance-v1", now=NOW, corrected=True)
+    worker = _word(conn, "worker")
+    assert rules.active_record(conn, worker) == (odd, 1) and rules.spec_for_word(conn, worker) == {**odd, "marks": {"double": [], "silent": []}}
+    # a row written without the flag (NULL) counts as corrected until the backfill runs — then it follows the rules again
+    with db.tx(conn):
+        rules.store_spec(conn, int(worker["id"]), kept, model="m", prompt_version="dance-v1", now=NOW)
+    worker = _word(conn, "worker")
+    assert rules.active_record(conn, worker) == (kept, None) and rules.spec_for_word(conn, worker) == kept
+    assert rules.backfill_corrected(conn) == 1 and rules.active_record(conn, worker) == (kept, 0)
+    assert rules.spec_for_word(conn, worker)["letters"] == ["work", "er"]
+    # the stored spec of a word that lost its phonetic serves as it is (no rule spec to merge with, marks included)
+    with db.tx(conn):
+        conn.execute("UPDATE words SET phonetic = NULL WHERE id = ?", (worker["id"],))
+    assert rules.spec_for_word(conn, _word(conn, "worker")) == kept
+    # a word without a stored row: the rule spec, source rule
+    assert rules.spec_for_word(conn, _word(conn, "work"))["source"] == "rule"
+
+
+def test_corrected_compares_with_the_stress_the_model_was_given():
+    """A degraded rule spec (one chunk, stress None) is sent to the model as rule_stress 0; echoing it is a confirmation, not a correction."""
+    rule = rules.spec_for("rhythm", "'riðəm")
+    assert rule["letters"] == ["rhythm"] and rule["stress"] is None and rules.suggested_stress(rule) == 0
+    echoed, corrected = handler.build_spec("rhythm", {"word": "rhythm", "letters": ["rhythm"], "stress": 0, "primitive": "none", "n": 0, "color": "", "reason": "x"}, rule)
+    assert echoed["letters"] == ["rhythm"] and echoed["stress"] == 0 and corrected is False
+    split, corrected = handler.build_spec("rhythm", {"word": "rhythm", "letters": ["rhy", "thm"], "stress": 0, "primitive": "none", "n": 0, "color": "", "reason": "x"}, rule)
+    assert split["letters"] == ["rhy", "thm"] and corrected is True
+    assert rules.suggested_stress(rules.spec_for("happy", "'hæpi")) == 0 and rules.suggested_stress(rules.spec_for("abandon", "ə'bændən")) == 1

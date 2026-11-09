@@ -121,7 +121,9 @@ columns, indexes; never `DROP`/`RENAME`/type changes). The script prints that re
 never `--no-restart`; `0012_word_images_meta.sql` and `0014_learn_rank.sql` (the learning-order release,
 `docs/releases/2026-11-learn-order.md`: one `ADD COLUMN` on `words`, filled at the next service start or by the `wd learn-order`
 step install.sh runs after `import-seed`) and `0015_dance_mode.sql` (the 单词之舞 release,
-`docs/releases/2026-11-word-dance-p1.md`: one `ADD COLUMN` on `user_settings` with its default) are additive. Rehearse before the real run: copy the database to a
+`docs/releases/2026-11-word-dance-p1.md`: one `ADD COLUMN` on `user_settings` with its default) and `0017_word_dances_corrected.sql` (the 单词之舞 P3b release,
+`docs/releases/2026-11-word-dance-p3b.md`: one nullable `ADD COLUMN` on `word_dances`, filled by
+`wd.dance.backfill_corrected` at the next service start) are additive. Rehearse before the real run: copy the database to a
 private directory and `.venv/bin/python -I scripts/rehearse_migration.py <copy>` (applies the pending files through the
 real runner and exits 0 only when every check of the release note passes — SQLite ≥ 3.26 on the box), then
 `wd check db` after the upgrade for the eight invariants (the four stage-model lines and, from schema 14, the four

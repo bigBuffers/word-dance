@@ -3,11 +3,13 @@
 
 One job per word (``{"word_id": N, "force"?: true}``, dedupe ``dance:<id>``); the queue claims up to 20 of them per call
 (``queue.limit_for``). The user prompt carries, per word, the display form, the phonetic, the first sense of ``meaning_zh`` and
-the rule layer's chunks (``wd.dance.spec_for``); Claude confirms or corrects the chunks and the stressed chunk and picks the ONE
+the rule layer's chunks (``wd.dance.rule_spec`` — ``spec_for`` with the -er stem hint, work·er); Claude confirms or corrects the
+chunks and the stressed chunk and picks the ONE
 semantic primitive of the closed library (``dance_v1.json``) or ``none``. Post-validation keeps the rules in charge of anything
 mechanical: chunks that do not spell the display form fall back to the rule chunks, an out-of-range stress falls back too, the
 letter marks (silent / doubled) are always the rules', and the final spec must validate against ``schemas.DanceSpec`` before
-``wd.dance.store_spec`` writes the ``word_dances`` row and points ``words.active_dance_id`` at it. Budget kind ``dance`` has its
+``wd.dance.store_spec`` writes the ``word_dances`` row — with ``corrected`` = whether the model changed the chunks or stress it was
+given, which decides whose chunks ``wd.dance.spec_for_word`` serves — and points ``words.active_dance_id`` at it. Budget kind ``dance`` has its
 own daily sub-cap (``WD_AI_DANCE_DAILY_BUDGET_USD``, §7). The CLI ``wd dance-annotate`` enqueues a stage or a list of words.
 """
 
@@ -105,7 +107,7 @@ def prompt_entry(conn: sqlite3.Connection, word: Mapping[str, Any], rule: Mappin
         "phonetic": str(word.get("phonetic") or ""),
         "meaning_zh": first_sense(word, content),
         "rule_letters": list(rule["letters"]),
-        "rule_stress": rule["stress"] if rule["stress"] is not None else 0,
+        "rule_stress": rules.suggested_stress(rule),
     }
 
 
@@ -123,7 +125,8 @@ def build_user_prompt(entries: list[dict[str, Any]]) -> str:
 
 def build_spec(display: str, item: Mapping[str, Any], rule: Mapping[str, Any]) -> tuple[dict[str, Any], bool] | None:
     """The stored spec from Claude's ``item`` over the rule spec ``rule``; ``(spec, corrected)`` or ``None`` when even the fallback
-    fails validation. ``corrected`` = Claude's chunks or stress were used and differ from the rules'."""
+    fails validation. ``corrected`` = Claude's chunks or stress were used and differ from the suggestion it was given
+    (``rule_letters`` / ``rule_stress`` — the stress as :func:`wd.dance.suggested_stress` sends it)."""
     letters = [str(x) for x in (item.get("letters") or [])]
     stress = item.get("stress")
     own_chunks = bool(letters) and "".join(letters) == display and all(letters)
@@ -153,7 +156,7 @@ def build_spec(display: str, item: Mapping[str, Any], rule: Mapping[str, Any]) -
         DanceSpec.model_validate(spec)
     except Exception:  # noqa: BLE001 — pydantic.ValidationError; the rule spec is the floor, nothing stored
         return None
-    corrected = letters != list(rule["letters"]) or stress != rule["stress"]
+    corrected = letters != list(rule["letters"]) or stress != rules.suggested_stress(rule)
     return spec, corrected
 
 
@@ -194,7 +197,7 @@ def handle_generate_dance(ctx: JobContext, jobs: list[Job]) -> None:
                 rules.mark_unattempted(conn, wid, now=now)
                 queue.finish(conn, job.id, {"skipped": "dance_budget_disabled"}, now=now)
                 continue
-            rule = rules.spec_for(word.get("display") or word.get("lemma"), word.get("phonetic"))
+            rule = rules.rule_spec(conn, word)
             if rule is None:
                 rules.mark_unattempted(conn, wid, now=now)
                 queue.finish(conn, job.id, {"skipped": "no_spec"}, now=now)
@@ -252,7 +255,7 @@ def handle_generate_dance(ctx: JobContext, jobs: list[Job]) -> None:
             spec, corrected = built
             reason = str(item.get("reason") or "").strip()[:40] or None
             try:
-                dance_id = rules.store_spec(conn, int(word["id"]), spec, model=model, prompt_version=DANCE_PROMPT_VERSION, now=now, reason=reason)
+                dance_id = rules.store_spec(conn, int(word["id"]), spec, model=model, prompt_version=DANCE_PROMPT_VERSION, now=now, reason=reason, corrected=corrected)
             except sqlite3.Error as e:  # the word vanished during the call (an account purge) or a local write failed: only this job fails
                 failures.append((job, f"store failed for {display}: {e}"))
                 continue

@@ -1,0 +1,15 @@
+-- 0017_word_dances_corrected.sql — word_dances.corrected: did Claude change the chunks or stress of the rule suggestion it was given?
+-- (docs/WORD_DANCE_DESIGN.md §13, docs/releases/2026-11-word-dance-p3b.md, API.md §9.1.) The rules now own everything mechanical in a
+-- stored annotation: wd.dance.spec_for_word serves the stored chunks and stress only where corrected = 1 and the current rule layer's
+-- otherwise (the letter marks are always the rules'), so a word whose VC·CV cut the model merely confirmed (wor·ker) follows the P3b
+-- -er rule (work·er) without another call.
+--
+-- Additive only, the 0012 / 0014 / 0015 precedent: ONE ADD COLUMN (nullable, CHECK 0/1), no table rebuild, no index (the row is read
+-- by primary key), no data step — every existing row is left NULL and wd.dance.backfill_corrected computes the flag at the next
+-- service start (main.startup, right after the migrations) from the stored spec and the ordinary rules, exactly as ai/dance.py
+-- computes it for new rows; until then a NULL row serves its stored chunks (the conservative reading). Safe under
+-- `deploy/install.sh --no-restart` and a plain `launchctl kickstart -k` on the Mac. The runner wraps this file in BEGIN IMMEDIATE and
+-- records schema_migrations(17, 'word_dances_corrected') itself (SCHEMA.sql §1) — nothing else belongs here. docs/SCHEMA.sql stays the
+-- 0001 baseline byte for byte (test_db.py). Rollback = `git checkout` alone: the old code never reads the column (its INSERT names its
+-- columns) and a NULL-able column needs no default.
+ALTER TABLE word_dances ADD COLUMN corrected INTEGER CHECK (corrected IN (0,1));

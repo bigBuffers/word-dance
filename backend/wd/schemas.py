@@ -629,8 +629,9 @@ class DanceSemantic(Model):
 
 class DanceSpec(Model):
     """API.md §9 ``DanceSpec`` — the 「单词之舞」 data: syllable chunks (``"".join(letters) == display``), the primary-stressed chunk,
-    letter marks and the optional semantic dance. ``source="rule"`` = ``wd.dance.spec_for`` at serialisation time (P1, no semantic);
-    ``source="claude"`` = the stored ``word_dances`` row (chunks confirmed or corrected, semantic chosen; P2)."""
+    letter marks and the optional semantic dance. ``source="rule"`` = ``wd.dance.rule_spec`` at serialisation time (P1, no semantic);
+    ``source="claude"`` = the word has a stored ``word_dances`` row: its semantic, and its chunks and stress where the model corrected
+    the rule suggestion (``word_dances.corrected``), else the current rules' chunks and stress (P2 / P3b)."""
 
     version: Literal[1]
     letters: list[str]
