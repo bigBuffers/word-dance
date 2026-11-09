@@ -26,4 +26,7 @@
 
 ## 5 上线记录
 
-（上线后补。）
+- 提交 `ee0c933`（133 个文件，含 `mobile/` 两个原生工程与图标；签名密钥、构建产物、`www/index.html`、`android/keystore.properties` 均不入库）。
+- 11-09 18:21 前端快照 `frontend-releases/ee0c933` 上线（后端代码不变，重启后 3 秒内健康）；线上主包含 `isNativePlatform`，即原生接入已生效。
+- 安装包放在快照的 `dl/` 下，手机与 Mac 同一网络时用浏览器打开 `http://<Mac 地址>:8000/dl/` 加文件名下载：`word-dance-debug-home-192.168.1.250.apk`（家里网络）、`word-dance-debug-lan-10.23.147.103.apk`（Mac 当前所在网络）、`word-dance-release-signed-TESTONLY-home-192.168.1.250.apk`（签名的正式构建，但嵌的是家里的明文地址，只用于试装）。换地址只需 `WD_APP_SERVER_URL=http://<新地址>:8000 WD_APP_ALLOW_HTTP=1 npm run android:debug` 重新出包。
+- iOS：工程已就绪（`mobile/ios`，iPhone-only，0.1.0 / 2026110901），等 Xcode 与开发者账号后按手册 §4.3 归档；Android 正式包等公网 HTTPS 地址后按 §4.2 出 AAB。
