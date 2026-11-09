@@ -36,3 +36,6 @@ data/seed/vocab.jsonl
 /tmp-*
 .claude/worktrees/
 .claude/settings.local.json
+
+# Deploy helper scratch (pre-deploy counters of the live database; written by the ad-hoc Mac deploy scripts, never meant to be tracked)
+/pre.json
