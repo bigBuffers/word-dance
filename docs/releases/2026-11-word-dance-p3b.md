@@ -36,4 +36,8 @@
 
 ## 6 上线记录
 
-（上线后补：时间、提交、健康、`corrected` 分布、抽查结果。）
+- 评审：对抗式评审 `review-word-dance-p3b`（5 个视角 × 每条 3 个反驳者，74 个 agent）确认 20 条（去重 16 条），全部修掉——其中两条影响行为：`corrected` 在「规则层只给一块、重音为空」的词上把模型的原样回答误判为改过（提示词发的是 `rule_stress: 0`，比较却拿 None），改为按 `suggested_stress` 比较；-er 切分的哑音标记沿用了被否掉的普通切法（lis·ten·er 把 ten 的 e 标成哑音），改为词干标记加整词模式。顺带把 0017 简化成只加列、回填全部交给启动时的 `backfill_corrected`，并给彩排脚本加了 `check_0017`。验证评审 `verify-word-dance-p3b-fixes`（16 个验证者 + 3 个新视角，20 个 agent）确认 16 条全部修复，余下只有注释和文档措辞，已一并改掉。
+- 门禁：后端 2202 通过（失败的 21 个全是环境相关：`test_config` 的 Mac 专属用例、20 个 Linux 部署脚本用例因这台 Mac 新增了 `/sbin/sha256sum` 不再跳过而败在 BSD `df`），HEAD 与工作区的纯规则层在全部 9618 个种子词上 `spec_for` / `silent_letters` 零差异，契约审计、`test_docs_contract`、前端 tsc / lint / 364 条 vitest 通过；数据库副本彩排 71 项检查通过。
+- 11-09 14:40 `20dc00e` 上线（后端重启，前端快照仍为 `frontend-releases/bb2d1b5`）：启动时写快照 `backups/pre-migrate-16-to-17.db.gz`，套用 0017，`word_dances.corrected backfilled for 637 row(s)`（624 行 = 0、13 行 = 1），3 秒内健康；`jobs` 2940 / `ai_calls` 892 / `word_dances` 637 行数不变，integrity ok。
+- 抽查（服务端 `spec_for_word`）：worker → work·er、farmer → farm·er（source 仍为 claude，语义动作仍为无）、teacher → teach·er、sweater → sweat·er；jump / on 仍为 hop / onto。
+- 审核页按服务端切法重建并发布到原链接（卡片显示的切块 = 卡片实际播放的切块；橙边 = 模型改过规则建议的 12 个小学词）。
