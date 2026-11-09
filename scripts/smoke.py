@@ -103,7 +103,8 @@ class Api:
 
         headers = {"X-WD-Request": "1"} if csrf_header else {}
         self.name = name
-        self.client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout, follow_redirects=False)
+        # trust_env=False: the run talks to 127.0.0.1 only — a shell that exports HTTP_PROXY (the owner's Mac) must not route it
+        self.client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout, follow_redirects=False, trust_env=False)
         self.last: Any = None
 
     def close(self) -> None:
@@ -219,7 +220,7 @@ class Smoke:
             if self.server.poll() is not None:
                 raise SmokeFailure("start", f"server exited with {self.server.returncode} during startup\n{self.log_tail()}")
             try:
-                r = httpx.get(f"{self.base_url}/api/health", timeout=2.0)
+                r = httpx.get(f"{self.base_url}/api/health", timeout=2.0, trust_env=False)
                 if r.status_code == 200:
                     return
             except httpx.HTTPError:
@@ -638,6 +639,29 @@ def run_scenario(s: Smoke) -> None:
         expect(users["total"] == 2, f"users {users['total']}")
         alice.get("/api/admin/events")
         bob.get("/api/admin/overview", expect_status=403)
+
+    with s.step("pronunciation clip: GET /media/audio — the real `say` on a Mac (headers, cache, range), 503 off elsewhere; text rule"):
+        me = alice.get("/api/auth/me")
+        alice.get("/media/audio", params={"text": "farmer"}, expect_status=(200, 503))
+        if alice.last.status_code == 200:
+            expect(me["server"]["audio"] is True, "server.audio false although a clip was served")
+            ctype = alice.last.headers.get("content-type", "")
+            expect(ctype.startswith("audio/"), f"content-type {ctype!r}")
+            expect(alice.last.headers.get("cache-control") == "private, max-age=604800", f"cache-control {alice.last.headers.get('cache-control')!r}")
+            expect(alice.last.headers.get("accept-ranges") == "bytes", "no Accept-Ranges: the client plays the URL in an <audio> element")
+            body = alice.last.content
+            expect(len(body) >= 256, f"clip of {len(body)} bytes")
+            alice.get("/media/audio", params={"text": "farmer"})
+            expect(alice.last.content == body, "the second request served a different clip (cache miss)")
+            alice.get("/media/audio", params={"text": "farmer"}, headers={"Range": "bytes=0-9"}, expect_status=206)
+            expect(alice.last.content == body[:10], "the range answer differs from the clip's first bytes")
+            alice.get("/media/audio", params={"text": "\"Hello,\" she said — it\u2019s 5 o\u2019clock\u2026"})  # an example sentence with typographic punctuation
+            expect(alice.last.headers.get("content-type", "").startswith("audio/"), "sentence clip is not audio")
+        else:
+            expect(me["server"]["audio"] is False, "server.audio true although the endpoint answers 503")
+            expect(alice.error_code() == "audio_unavailable" and alice.last.json()["error"]["details"].get("reason") == "off", f"503 {alice.last.text[:200]}")
+        alice.get("/media/audio", params={"text": "-ish"}, expect_status=400)
+        expect(alice.error_code() == "validation_error", f"code {alice.error_code()}")
 
     with s.step("logout → 401"):
         alice.post("/api/auth/logout", expect_status=204)

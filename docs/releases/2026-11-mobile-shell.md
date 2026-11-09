@@ -1,5 +1,7 @@
 # 发布说明 · 2026-11 · 手机 App 壳（Capacitor，iOS / Android）与网站侧原生接入（无后端改动）
 
+> 后记 2026-11-10：标题里的「无后端改动」只对本次发布成立。家里的鸿蒙 NEXT 平板在安卓兼容环境里装上 APK 后，TTS 插件拿不到任何引擎（每次 `speak()` 都以 `UNAVAILABLE` 拒绝，重试无用），发音改由后端 `GET /media/audio` 兜底——见 [`2026-11-server-audio.md`](2026-11-server-audio.md)。下文「缺英文语音时提示安装」与对 `UNAVAILABLE` 的处理已被取代。
+
 基线 `main @ 6407787`（P3b 已上线）；本次发布 = `mobile/` 下的 iOS 与 Android 壳工程，和网站侧的原生接入（`frontend/src/native/`）。手册：`docs/MOBILE_APP.md`（架构、构建、上架步骤）；前端契约：`docs/FRONTEND.md` §1 / §6.4 / §6.6 / §8。
 
 ## 1 变更概览

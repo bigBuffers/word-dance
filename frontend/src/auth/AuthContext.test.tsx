@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_EXPIRED_EVENT } from '@/api/client';
 import type { MeResponse } from '@/api/endpoints';
 import type { Settings, User } from '@/api/types';
+import { serverAudioEnabled, setServerAudio } from '@/audio/serverAudio';
 import { AuthProvider, RequireAdmin, RequireAuth, RequireOnboarded, loginPathFor, safeNext, useAuth } from './AuthContext';
 
 const settings: Settings = {
@@ -44,7 +45,7 @@ function me(user: Partial<User> = {}): MeResponse {
       ...user,
     },
     settings,
-    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false },
+    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false, audio: true },
     counters: { suggestions_open: 2, attention: 1 },
   };
 }
@@ -122,6 +123,15 @@ describe('guards', () => {
     renderAt('/today');
     expect(await screen.findByText('today-page')).toBeTruthy();
     expect(screen.getByTestId('probe').textContent).toBe('2/1/-');
+  });
+
+  it('mirrors ServerFlags.audio into the server-audio module when /api/auth/me lands (the module-level speak() reads it)', async () => {
+    setServerAudio(false);
+    mockFetch({ '/api/auth/me': () => json(200, me()) }); // server.audio true in the fixture
+    renderAt('/today');
+    expect(await screen.findByText('today-page')).toBeTruthy();
+    expect(serverAudioEnabled()).toBe(true);
+    setServerAudio(false);
   });
 
   it('RequireAdmin sends non-admins to /today and lets admins through', async () => {

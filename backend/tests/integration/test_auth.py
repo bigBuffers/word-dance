@@ -90,7 +90,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert me.status_code == 200, me.text
     body = me.json()
     assert body["user"]["username"] == "alice" and body["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
-    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False}
+    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False}
     assert body["counters"] == {"suggestions_open": 0, "attention": 0}
     bob = register(client, "bob")
     assert bob["user"]["role"] == "user" and bob["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"

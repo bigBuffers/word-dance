@@ -116,8 +116,9 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 - [ ] 反馈问题 sheet: reasons 释义有误 / 例句不地道 / 翻译有误 / 配图无关 / 配图不合适 / 其他 + note (≤ 300) →
       `POST …/report` with the right target (image reasons → image; 释义有误 without Claude content → dictionary).
 - [ ] 易混 chips from `confusables` link to `/words/<lemma>`.
-- [ ] TTS: 🔊 works in Chrome, Edge and Safari (first tap unlocks audio on iOS); the button is disabled with the
-      tooltip 「当前浏览器不支持语音」 where `speechSynthesis` is absent.
+- [ ] TTS: 🔊 works in Chrome, Edge and Safari (first tap unlocks audio on iOS); where `speechSynthesis` is absent or lists no English
+      voice, the server clip plays when `ServerFlags.audio` is true (an example sentence with quotes and dashes too; a double tap plays
+      only the second); the button is disabled with the tooltip 「当前浏览器不支持语音」 only when the server has no provider either.
 
 ## 5. 记录 (`/history`, `/history/:batchId`)
 

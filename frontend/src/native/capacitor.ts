@@ -139,7 +139,10 @@ let interruptCurrent: (() => void) | null = null;
 /**
  * The system TTS of the shell (Android's WebView has no speechSynthesis). Resolves when the utterance has finished — or when a later
  * `speakNative` / `stopNativeSpeech` flushes it: the Android plugin discards the callback of an interrupted utterance and never settles
- * that call, so the previous caller is settled here (resolved, not rejected) before the next plugin call goes out.
+ * that call, so the previous caller is settled here (resolved, not rejected) before the next plugin call goes out. Rejects with the
+ * plugin's error — code `UNAVAILABLE` when the engine never initialised (the plugin tries once at launch and never again: the Android
+ * container of HarmonyOS NEXT has no engine it can reach), "This language is not supported." without an English voice — and
+ * `useSpeech` then plays the server's clip instead (FRONTEND §6.4).
  */
 export async function speakNative(text: string, lang: string, rate: number): Promise<void> {
   interruptCurrent?.();
@@ -159,11 +162,6 @@ export async function stopNativeSpeech(): Promise<void> {
   interruptCurrent?.();
   interruptCurrent = null;
   await TextToSpeech.stop();
-}
-
-/** The TTS plugin's "engine not initialised yet / not available" rejection (Android), as opposed to a missing voice. */
-export function isSpeechUnavailable(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'UNAVAILABLE';
 }
 
 export interface NativeHandlers {

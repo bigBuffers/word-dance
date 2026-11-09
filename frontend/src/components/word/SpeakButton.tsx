@@ -1,6 +1,7 @@
-// SpeakButton — speaker icon button wrapping useSpeech() (FRONTEND §4); disabled with the
-// zh.word.speechUnsupported tooltip when speechSynthesis is absent — unless an `onClick` (the word dance replay, §6.5) is
-// passed: then the button stays usable with the zh.word.replayDance label and only skips the speech. Defaults to the user's accent setting.
+// SpeakButton — speaker icon button wrapping useSpeech() (FRONTEND §4); disabled with the zh.word.speechUnsupported tooltip when
+// nothing can pronounce here — no speechSynthesis, not the native shell, and no server clips (`ServerFlags.audio` false) — unless an
+// `onClick` (the word dance replay, §6.5) is passed: then the button stays usable with the zh.word.replayDance label and only skips
+// the speech. Defaults to the user's accent setting.
 import type { MouseEvent } from 'react';
 import { useOptionalAuth } from '@/auth/AuthContext';
 import { Button, type ButtonSize } from '@/components/ui/Button';

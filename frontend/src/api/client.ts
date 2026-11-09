@@ -113,7 +113,8 @@ async function send(method: Method, path: string, body: unknown, options: Reques
   }
 }
 
-async function toApiError(res: Response, path: string): Promise<ApiError> {
+/** The `ApiError` for a non-OK response (envelope parsed when present); a 401 `unauthorized` also dispatches `auth:expired`. */
+export async function toApiError(res: Response, path: string): Promise<ApiError> {
   const text = await res.text().catch(() => '');
   let parsed: unknown = null;
   if (text) {

@@ -32,6 +32,7 @@ export interface ServerFlags {
   version: string; registration_mode: 'open' | 'invite' | 'closed'; email_configured: boolean;
   ai_enabled: boolean; images_enabled: boolean; dev: boolean;
   needs_setup: boolean;                 // true while no user exists (also in GET /api/health)
+  audio: boolean;                       // GET /media/audio serves pronunciation clips (WD_AUDIO_PROVIDER is not off; endpoint 76) — the fallback for devices without an English voice
 }
 export interface Counters { suggestions_open: number; attention: number }   // GET /api/auth/me → badges
 export interface Settings {

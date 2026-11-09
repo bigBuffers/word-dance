@@ -37,8 +37,9 @@ const config: CapacitorConfig = {
     cleartext: allowHttp,
     errorPath: 'index.html',
     allowNavigation: [], // signed-out links (署名链接等) open in the system browser
-    appendUserAgent: 'word-Dance-App/1',
   },
+  // a top-level option (not under `server`, where Capacitor ignores it): the server's session rows then tell app traffic apart
+  appendUserAgent: 'word-Dance-App/1',
   ios: {
     limitsNavigationsToAppBoundDomains: false,
   },

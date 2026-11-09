@@ -160,6 +160,7 @@ class ServerFlags(Model):
     images_enabled: bool
     dev: bool
     needs_setup: bool
+    audio: bool
 
 
 class Counters(Model):

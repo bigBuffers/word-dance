@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetServerAudio, setServerAudio } from '@/audio/serverAudio';
 import { zh } from '@/i18n/zh';
 import { SpeakButton } from './SpeakButton';
 import { WordHeader } from './WordHeader';
@@ -56,6 +57,26 @@ describe('SpeakButton', () => {
     expect(button.disabled).toBe(true);
     expect(button.getAttribute('title')).toBe(zh.word.speechUnsupported);
     expect(button.getAttribute('aria-label')).toBe(zh.word.speechUnsupported);
+  });
+
+  it('is enabled by the server\'s clips alone (ServerFlags.audio) and plays the clip URL on click', () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    setServerAudio(true);
+    try {
+      render(<SpeakButton text="abandon" lang="en-GB" />);
+      const button = screen.getByRole('button') as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+      expect(button.getAttribute('aria-label')).toBe(zh.word.speak);
+      fireEvent.click(button);
+      expect(play).toHaveBeenCalledTimes(1);
+      const element = play.mock.instances[0] as HTMLAudioElement;
+      expect(element.getAttribute('src')).toBe('/media/audio?text=abandon&accent=en-GB');
+      expect(element.playbackRate).toBeCloseTo(0.92);
+    } finally {
+      resetServerAudio();
+      vi.restoreAllMocks();
+    }
   });
 
   it('speaks the text with the requested accent and does not bubble the click', () => {

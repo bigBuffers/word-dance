@@ -61,6 +61,7 @@ def server_flags(conn: sqlite3.Connection, cfg: Settings) -> dict[str, Any]:
         "images_enabled": cfg.images_enabled,
         "dev": cfg.dev,
         "needs_setup": users == 0,
+        "audio": cfg.audio_provider_effective != "off",  # GET /media/audio serves clips (API.md 76)
     }
 
 

@@ -55,6 +55,7 @@ from .routers import (
     admin_ops,
     admin_reports,
     admin_users,
+    audio as audio_router,
     auth,
     bank,
     health,
@@ -88,6 +89,7 @@ ROUTERS = (
     today,
     history,
     media,
+    audio_router,
     admin_users,
     admin_ops,
     admin_reports,
@@ -509,6 +511,7 @@ def startup(app: FastAPI) -> None:
         if guess:
             db.kv_set(conn, "public_url_guess", f"http://{guess}:{cfg.port}")
         registry.load_handlers()
+        log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
         if cfg.worker_enabled:
             start_background(app, conn)
         else:

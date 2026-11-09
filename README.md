@@ -12,7 +12,7 @@
 - **Claude Code 整理**：后端以无头方式调用 `claude` CLI，校验并规范化自添生词（词形还原、拼写提示、合并重复），夜间整理生词库并把结果放进「整理建议」收件箱，由你决定是否采纳。
 - **每日推送**：按你设置的时间与时区，每天生成一组「今日词汇」（复习 + 新词 + 推荐词），以站内学习为准，可选邮件或企业微信 / 飞书 / Server酱 / Bark 通知。
 - **记忆算法**：WD-SRS 间隔重复（1 → 3 → 8 → 20 → 51 → 133 → 180 天），评分「不熟悉 / 模糊 / 记住了」；达到建议条件后由你确认「已掌握」，单词即从生词库移出，15 分钟内可撤销。
-- **例句与配图**：每个推送的单词都有 AI 生成的地道例句（中英对照）、常用搭配与助记；配图来自 Wikimedia Commons / Openverse 并带版权署名，没有合适照片时退回 AI 示意图或系统生成卡片；发音使用浏览器内置 TTS。
+- **例句与配图**：每个推送的单词都有 AI 生成的地道例句（中英对照）、常用搭配与助记；配图来自 Wikimedia Commons / Openverse 并带版权署名，没有合适照片时退回 AI 示意图或系统生成卡片；发音用浏览器 / 系统语音，没有英文语音的设备（如鸿蒙平板里的 App）由服务器生成发音。
 - **记录**：学习热力图、连续学习天数、历史批次回放；数据可导出（CSV / JSON）、导入，账号可自助删除。
 - **多用户与管理**：邀请码 / 开放 / 关闭三种注册模式，首个注册的账号自动成为管理员；管理页可查看 AI 花费、任务队列、图片来源命中率，并可一键暂停 AI。
 
@@ -99,7 +99,7 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 | [`docs/ops.md`](docs/ops.md) | 运维手册：日常检查、备份与恢复、升级与回滚、配置修改、故障处理表 |
 | [`docs/qa.md`](docs/qa.md) | 手工验收索引：部署验收、真实 Claude 验收、推送渠道检查；链接前端 / 学习流程清单 `qa-frontend.md`、`qa-study.md` |
 | [`docs/TASKS.md`](docs/TASKS.md) · [`docs/P0_STATUS.md`](docs/P0_STATUS.md) | 实现工作包（文件归属、依赖关系、验收标准）与 Phase 0 验证记录 |
-| [`docs/releases/`](docs/releases/) | 发布说明，每次需要停机迁移的发布一份：[`2026-11-k12-stages.md`](docs/releases/2026-11-k12-stages.md)——小学阶段与官方词表、阶段重编号、配图一期的变更、上线步骤、回滚与假设清单 |
+| [`docs/releases/`](docs/releases/) | 发布说明，每次发布一份（有无迁移都有）：[`2026-11-k12-stages.md`](docs/releases/2026-11-k12-stages.md)——小学阶段与官方词表、阶段重编号、配图一期的变更、上线步骤、回滚与假设清单；[`2026-11-server-audio.md`](docs/releases/2026-11-server-audio.md)——服务器发音兜底（`GET /media/audio`，没有英文语音的设备也能出声） |
 
 ## 数据来源与许可
 

@@ -7,6 +7,8 @@ through python-dotenv for manual runs; monkeypatched env in tests).
 Validation rules:
 * paths are resolved to absolute ``Path`` objects (directories are *not* created here —
   see :func:`ensure_dirs`);
+* ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a host with
+  ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``); ``WD_AUDIO_CACHE_MB`` bounds the clip cache;
 * ``WD_TZ`` must be a known IANA zone;
 * numeric ranges raise :class:`ConfigError`, except ``WD_AI_BATCH_SIZE`` (clamped to 1–12
   because ``content_v1.json`` has ``items.maxItems: 12``), ``WD_AI_FALLBACK_BATCH_SIZE`` (the same
@@ -60,6 +62,8 @@ FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
 FALLBACK_THINKING_MODES = ("off", "on", "default")
 FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg`, `dance` and `probe` are never routed by WD_AI_FALLBACK_KINDS
 FALLBACK_PRICE_KEYS = frozenset({"input", "output", "cache_read"})  # WD_AI_FALLBACK_PRICE_JSON names (CNY per million tokens)
+AUDIO_PROVIDERS = ("auto", "say", "youdao", "off")  # WD_AUDIO_PROVIDER (wd/audio.py): auto = say when SAY_BIN exists, else off
+SAY_BIN = "/usr/bin/say"  # macOS text-to-speech; its presence decides the `auto` audio provider
 
 # values masked as "***" by GET /api/admin/config (API.md 73) and never logged
 SECRET_KEYS = frozenset(
@@ -170,6 +174,10 @@ class Settings:
     openverse_client_secret: str = ""
     pixabay_key: str = ""
     pexels_key: str = ""
+    # --- pronunciation audio (wd/audio.py, API.md 76) ----------------------------------
+    audio_provider: str = "auto"  # auto | say | youdao | off — server-side clips for clients without an English voice
+    audio_say_voice: str = ""  # macOS `say -v` voice for both accents; empty = the best installed one of audio.PREFERRED_VOICES
+    audio_cache_mb: int = 256  # cap of the clip cache under audio/; the least recently played clips are removed beyond it
     # --- e-mail ---------------------------------------------------------------------
     smtp_host: str = ""
     smtp_port: int = 587
@@ -248,9 +256,21 @@ class Settings:
     def tmp_dir(self) -> Path:
         return self.data_dir / "tmp"
 
+    @property
+    def audio_dir(self) -> Path:
+        """Cached pronunciation clips (``audio/<2hex>/<sha256>.m4a|.mp3``, wd/audio.py); safe to delete."""
+        return self.data_dir / "audio"
+
+    @property
+    def audio_provider_effective(self) -> str:
+        """``WD_AUDIO_PROVIDER`` with ``auto`` resolved: ``say`` when ``SAY_BIN`` exists on this host, else ``off``."""
+        if self.audio_provider != "auto":
+            return self.audio_provider
+        return "say" if Path(SAY_BIN).is_file() else "off"
+
     def runtime_dirs(self) -> tuple[Path, ...]:
         """Directories that must exist under the data dir (DEPLOY §1)."""
-        return (self.data_dir, self.images_dir, self.claude_cwd, self.claude_logs_dir, self.backups_dir, self.tmp_dir)
+        return (self.data_dir, self.images_dir, self.claude_cwd, self.claude_logs_dir, self.backups_dir, self.tmp_dir, self.audio_dir)
 
     # ------------------------------------------------------------------- constructors
     @classmethod
@@ -568,6 +588,9 @@ class Settings:
             openverse_client_secret=text("WD_OPENVERSE_CLIENT_SECRET", ""),
             pixabay_key=pixabay_key,
             pexels_key=pexels_key,
+            audio_provider=choice("WD_AUDIO_PROVIDER", "auto", AUDIO_PROVIDERS),
+            audio_say_voice=text("WD_AUDIO_SAY_VOICE", ""),
+            audio_cache_mb=integer("WD_AUDIO_CACHE_MB", 256, 16, 1_000_000),
             smtp_host=text("WD_SMTP_HOST", ""),
             smtp_port=integer("WD_SMTP_PORT", 587, 1, 65535),
             smtp_user=text("WD_SMTP_USER", ""),

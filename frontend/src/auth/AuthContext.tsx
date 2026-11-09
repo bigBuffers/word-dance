@@ -10,6 +10,7 @@ import { Navigate, Outlet, useLocation, useSearchParams } from 'react-router';
 import { AUTH_EXPIRED_EVENT, AUTH_SIGNED_OUT_EVENT, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { HealthResponse, RegisterBody, SettingsUpdate } from '@/api/endpoints';
+import { setServerAudio } from '@/audio/serverAudio';
 import type { Counters, ServerFlags, Settings, User } from '@/api/types';
 import { useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
@@ -67,6 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadMe = useCallback(async (): Promise<boolean> => {
     try {
       const me = await endpoints.getMe();
+      setServerAudio(me.server.audio); // the module-level speak() (auto-pronounce, key P) reads the flag without the context
       setState((s) => ({ ...s, user: me.user, settings: me.settings, server: me.server, counters: me.counters }));
       return true;
     } catch (e) {

@@ -86,6 +86,50 @@ def data_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def fake_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], dict[str, Path]]]:
+    """Installs `say` / `afconvert` stand-ins for wd.audio (tests call it with a `say -v ?` listing). `say -v ?` prints the
+    listing; `say -v V -o X` writes `V:<stdin>` to X when V is a listed name and `fallback:<stdin>` otherwise — like the real
+    say, which exits 0 and substitutes one fixed voice for every name it cannot resolve — and appends `V|<stdin>` to calls.log
+    (the voice probes of wd.audio appear there as `…|hello`); `afconvert` copies its input to its output padded past
+    MIN_CLIP_BYTES. The paths are patched into wd.audio; its voice and cache accounting are reset before and after."""
+    from wd import audio
+
+    def install(listing_text: str) -> dict[str, Path]:
+        listing = tmp_path / "voices.txt"
+        listing.write_text(listing_text, encoding="utf-8")
+        calls = tmp_path / "calls.log"
+        say = tmp_path / "say"
+        say.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = "-v" ] && [ "$2" = "?" ]; then cat "{listing}"; exit 0; fi\n'
+            'while [ $# -gt 0 ]; do case "$1" in -v) voice=$2; shift;; -o) out=$2; shift;; esac; shift; done\n'
+            "text=$(cat)\n"
+            f'if grep -q -F -- "$voice " "{listing}"; then printf \'%s:%s\' "$voice" "$text" > "$out"; else printf \'fallback:%s\' "$text" > "$out"; fi\n'
+            f'printf \'%s|%s\\n\' "$voice" "$text" >> "{calls}"\n',
+            encoding="utf-8",
+        )
+        afconvert = tmp_path / "afconvert"
+        afconvert.write_text(
+            "#!/bin/sh\n"
+            "for last; do :; done\n"
+            "n=$#; i=0; for a; do i=$((i+1)); [ $i -eq $((n-1)) ] && src=$a; done\n"
+            '{ cat "$src"; head -c 400 /dev/zero; } > "$last"\n',
+            encoding="utf-8",
+        )
+        for script in (say, afconvert):
+            script.chmod(0o755)
+        monkeypatch.setattr(audio, "SAY_BIN", str(say))
+        monkeypatch.setattr(audio, "AFCONVERT_BIN", str(afconvert))
+        audio.reset_voice_cache()
+        audio.reset_cache_accounting()
+        return {"say": say, "afconvert": afconvert, "calls": calls, "listing": listing}
+
+    yield install
+    audio.reset_voice_cache()
+    audio.reset_cache_accounting()
+
+
+@pytest.fixture
 def test_env(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> dict[str, str]:
     """The ``WD_*`` test environment; also drops ``CLAUDECODE`` (fake_claude exits 3 when it is present)."""
     env = {
@@ -103,6 +147,7 @@ def test_env(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> dict[str, str]:
         "WD_LOG_FORMAT": "text",
         "WD_AI_ENABLED": "1",
         "WD_IMAGES_ENABLED": "1",
+        "WD_AUDIO_PROVIDER": "off",  # `auto` would pick `say` on a Mac; the audio tests opt in explicitly
         "WD_SMOKE_MOCK_HTTP": "1",
         "WD_PUBLIC_URL": "",
         "WD_CONTACT_EMAIL": "tests@example.com",
