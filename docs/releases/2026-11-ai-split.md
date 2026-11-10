@@ -33,4 +33,6 @@
 
 ## 5 上线记录
 
-（上线后补）
+- 门禁（提交前）：pytest 2298 通过 / 3 跳过（Mac 专属的 `test_defaults_without_environment` 与 Linux 专属的 `test_deploy_files` 除外），`make smoke` 29 步；前端无改动。
+- 2026-11-10 17:53（Mac，`8329511`）：`.env` 先备份为 `.env.bak-20261110-175257`（0600），写入 `WD_AI_PROVIDER="split"`、`WD_AI_FALLBACK_KIND="openai_http"`、`WD_AI_FALLBACK_BASE_URL="https://open.bigmodel.cn/api/paas/v4"`、`WD_AI_FALLBACK_MODEL="glm-4.7-flash"`、`WD_AI_FALLBACK_DIALECT="zhipu"`、`WD_AI_FALLBACK_API_KEY_FILE="/Users/sqin/word-dance-data/zhipu.key"`（业主放置的 0600 文件，49 字符）；`launchctl kickstart -k` 重启，4 秒后健康；启动日志 `AI provider mode split (fallback: openai_http glm-4.7-flash for content,lookup,consolidate)`（事件 `ai_provider_mode`）；`wd check`：`provider mode: split; active: claude`，`fallback … available=1`；`wd ai-check --provider fallback` 成功（高峰时段 43 秒：1305 退避重试后成功）。无迁移；回滚 = `.env` 改回 `WD_AI_PROVIDER="claude_cli"` + 重启（备选配置可留着）。
+- 待办：错峰（23:00 后或上午）重跑 `docs/AI_FALLBACK_MODEL.md` §5 的配对评测，决定 `content` 是否留在 `WD_AI_FALLBACK_KINDS`；若高峰可用性仍不够，同一把 key 可换 `glm-4.7-flashx`（付费、限流更宽）；观察第一周 `ai_calls.provider` 分布与 `fallback_paused` 通知。
