@@ -58,7 +58,7 @@ COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.diag": ("stats", "check", "logs"),
     "wd.services.learn_order": ("learn-order",),
     "wd.ai.dance": ("dance-annotate",),
-    "wd.audio": ("audio-voices", "audio-prewarm"),
+    "wd.audio": ("audio-voices", "audio-prewarm", "audio-texts"),
 }
 
 LEASE_HINT = "word-dance.service is running — watch `journalctl -u word-dance -f` or GET /api/admin/jobs instead"

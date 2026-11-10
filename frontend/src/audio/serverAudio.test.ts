@@ -97,6 +97,9 @@ describe('playServerAudio', () => {
     expect(await reason(playServerAudio('a', 'en-US'))).toBe('busy');
     fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'failed' }));
     expect(await reason(playServerAudio('b', 'en-US'))).toBe('failed');
+    fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'missing' }));
+    expect(await reason(playServerAudio('b2', 'en-US'))).toBe('missing'); // the read-only cache lacks this clip: the route stays on
+    expect(serverAudioEnabled()).toBe(true);
     fetchMock.mockResolvedValueOnce(errorResponse(429, 'rate_limited', { retry_after_s: 30 }));
     expect(await reason(playServerAudio('c', 'en-US'))).toBe('busy');
     fetchMock.mockResolvedValueOnce(errorResponse(400, 'validation_error', { fields: { text: 'x' } }));
@@ -108,7 +111,7 @@ describe('playServerAudio', () => {
     fetchMock.mockResolvedValueOnce(audioResponse());
     expect(await reason(playServerAudio('g', 'en-US'))).toBe('decode'); // the server serves it: the element is the problem
     expect(serverAudioEnabled()).toBe(true); // none of these switches the server off
-    expect(fetchMock).toHaveBeenCalledTimes(7); // one diagnosis per failure, nothing on success
+    expect(fetchMock).toHaveBeenCalledTimes(8); // one diagnosis per failure, nothing on success
   });
 
   it('the error event of the element leads to the same diagnosis, once', async () => {
@@ -182,5 +185,21 @@ describe('clipUrl (FRONTEND §6.4)', () => {
     setServerAudio(true, 'k1a2b3c4');
     resetServerAudio();
     expect(clipUrl('farmer', 'en-US')).not.toContain('v=');
+  });
+});
+
+describe('a diagnosis a newer call overtook', () => {
+  it('reports the older call as interrupted, never with its reason (the hook must not speak the older text)', async () => {
+    playImpl = notSupported;
+    let answer!: (r: Response) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { answer = resolve; }));
+    const older = playServerAudio('older', 'en-US');
+    await new Promise((r) => setTimeout(r, 0)); // the element's rejection reached explain(): the diagnosis is in flight
+    playImpl = () => Promise.resolve();
+    const newer = playServerAudio('newer', 'en-US');
+    answer(errorResponse(503, 'audio_unavailable', { reason: 'missing' }));
+    expect(await reason(older)).toBe('interrupted');
+    stopServerAudio();
+    await newer;
   });
 });

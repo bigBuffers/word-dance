@@ -52,7 +52,7 @@ export const zh = {
           resetConfirm: '确定重置进度？该词的复习进度将归零并回到「待学」，学习记录保留。', removeConfirm: '确定移除？该词将从列表中移除，不计入已掌握，之后可在「已移除」中重新加入。',
           report: '反馈问题', reportReasons: { wrong_meaning: '释义有误', unnatural_example: '例句不地道', bad_translation: '翻译有误', irrelevant_image: '配图无关', inappropriate_image: '配图不合适', other: '其他' },
           reported: '已收到反馈，谢谢', changingImage: '正在换图…', imageSource: '图片', generatedCard: '系统生成卡片', aiImage: 'AI 生成示意图', history: '我的记录', redirected: (f: string) => `已从“${f}”跳转`,
-          generateExamples: '生成例句', examplesQueued: '例句生成中，稍后自动显示', speak: '发音', speechUnsupported: '当前浏览器不支持语音', voiceMissing: '这台设备没有英文语音，服务器也没有配置发音；可到系统设置安装英文语音包（设置 → 语音 / 文字转语音输出）', voiceFetchFailed: '发音加载失败，请检查网络后再试', voiceBusy: '发音服务器正忙，请稍后再试', voiceServerFailed: '服务器暂时无法生成这条发音，请稍后再试', voiceTextUnsupported: '这段文字无法发音', voicePlayFailed: '发音音频无法播放，请稍后再试', syllables: '音节', replayDance: '再跳一次' },
+          generateExamples: '生成例句', examplesQueued: '例句生成中，稍后自动显示', speak: '发音', speechUnsupported: '当前浏览器不支持语音', voiceMissing: '这台设备没有英文语音，服务器也没有配置发音；可到系统设置安装英文语音包（设置 → 语音 / 文字转语音输出）', voiceFetchFailed: '发音加载失败，请检查网络后再试', voiceBusy: '发音服务器正忙，请稍后再试', voiceServerFailed: '服务器暂时无法生成这条发音，请稍后再试', voiceTextUnsupported: '这段文字无法发音', voicePlayFailed: '发音音频无法播放，请稍后再试', voiceClipMissing: '这条发音还没有生成，请稍后再试', syllables: '音节', replayDance: '再跳一次' },
   bank: { title: '生词库', tabs: { new: '待学', learning: '学习中', mastered: '已掌握', known: '已认识', removed: '已移除', attention: '待处理' },
           add: '添加生词', addMany: '粘贴多个词，用换行或逗号分隔', note: '备注（可选，比如在哪里遇到的）', studyToday: '今天就学', submit: '添加',
           status: { added: '已添加', readded: '重新加入', exists: '已在生词库', pending_ai: '待 AI 校验', ambiguous: '需选择原形', invalid: '无效', validated: '已校验' },

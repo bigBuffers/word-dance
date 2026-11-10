@@ -515,7 +515,10 @@ def startup(app: FastAPI) -> None:
         if guess:
             db.kv_set(conn, "public_url_guess", f"http://{guess}:{cfg.port}")
         registry.load_handlers()
-        log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
+        if cfg.audio_provider_effective == "cache":
+            log.info("pronunciation clips: provider cache — a read-only mirror of say clips (%s)", cfg.audio_cache_voices, extra={"event": "audio_provider"})
+        else:
+            log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
         app.state.audio_warm_up = audio.warm_up_async(cfg)  # `say -v ?` and the voice probes (1–3 s) on a daemon thread: before the first tap, never on its request
         if cfg.worker_enabled:
             start_background(app, conn)

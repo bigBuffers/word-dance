@@ -4,11 +4,13 @@ files: the ``/api/*`` middleware stamps ``Cache-Control: no-store`` on every API
 Query ``text`` (≤ 300 chars: Latin letters, digits, the punctuation of an English sentence — ``wd.audio.TEXT_RE``) and
 ``accent`` (``en-US`` default | ``en-GB``). Session cookie required — any logged-in user, the 推荐词 of the welcome screening
 speak too. A cache hit costs nothing; a miss counts against ``audio:user:<id>`` (``SYNTH_PER_MINUTE``) and synthesises through
-the configured provider. Answers ``audio/mp4`` (``say``) or ``audio/mpeg`` (``youdao``) with ``Cache-Control: private,
+the configured provider — except under the read-only ``cache`` provider, where a miss is 503 ``missing`` at once (event
+``audio_clip_missing`` at INFO, nothing to protect). Answers ``audio/mp4`` (``say``) or ``audio/mpeg`` (``youdao``) with ``Cache-Control: private,
 max-age=604800`` (the clip for a text changes only when the operator switches provider or voice; a week bounds how long a
 browser keeps the old one), ``Accept-Ranges`` (the client plays the URL in an ``<audio>`` element) and ``nosniff``; 400
-``validation_error`` (``details.fields.text`` / ``.accent``); 503 ``audio_unavailable`` ``{reason: "off" | "busy" | "failed"}``
-— ``off`` tells the client to stop asking for the rest of its session. The learner's text is logged at DEBUG only (DESIGN §10).
+``validation_error`` (``details.fields.text`` / ``.accent``); 503 ``audio_unavailable`` ``{reason: "off" | "busy" | "failed" | "missing"}``
+— ``off`` tells the client to stop asking for the rest of its session, ``missing`` (the read-only ``cache`` provider has no clip for
+this text) to use its own voice for this one. The learner's text is logged at DEBUG only (DESIGN §10).
 """
 
 from __future__ import annotations
@@ -51,10 +53,14 @@ def pronunciation(
     try:
         clip = audio.lookup(cfg, accent, spoken)
         if clip is None:
-            security.rate_limit(conn, f"audio:user:{user['id']}", limit=SYNTH_PER_MINUTE, window_s=60, now=request.app.state.clock.now_utc())
+            if audio.provider_for(cfg) != "cache":  # a read-only mirror synthesises nothing: no budget to protect, `missing` follows
+                security.rate_limit(conn, f"audio:user:{user['id']}", limit=SYNTH_PER_MINUTE, window_s=60, now=request.app.state.clock.now_utc())
             clip = audio.synthesize(cfg, accent, spoken)
     except audio.AudioError as e:
-        log.warning("pronunciation unavailable (%s) for a %d-char %s text: %s", e.reason, len(spoken), accent, e.detail or "-", extra={"event": "audio_unavailable"})
+        if e.reason == "missing":  # not a fault: the mirror has not been synced since this text appeared (ops.md §5)
+            log.info("no mirrored clip for a %d-char %s text", len(spoken), accent, extra={"event": "audio_clip_missing"})
+        else:
+            log.warning("pronunciation unavailable (%s) for a %d-char %s text: %s", e.reason, len(spoken), accent, e.detail or "-", extra={"event": "audio_unavailable"})
         log.debug("pronunciation unavailable for %r", spoken)
         raise ApiError("audio_unavailable", details={"reason": e.reason}) from None
     return FileResponse(clip.path, media_type=clip.media_type, headers={"Cache-Control": CACHE_CONTROL, "X-Content-Type-Options": "nosniff"})

@@ -147,3 +147,33 @@ def test_me_without_a_provider_has_an_empty_voice_fingerprint(client: TestClient
     login("alice")
     server = client.get("/api/auth/me").json()["server"]
     assert server["audio"] is False and server["audio_key"] == ""
+
+
+@pytest.fixture
+def cache_client(test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, fakes: dict[str, Path]) -> TestClient:
+    """A client whose app serves a read-only mirror of `say` clips (WD_AUDIO_PROVIDER=cache) — the Linux server of DEPLOY §4."""
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "cache")
+    monkeypatch.setenv("WD_AUDIO_CACHE_VOICES", "en-US=Samantha;en-GB=Daniel")  # this module's LISTING: what the fake say made them with
+    return request.getfixturevalue("client")
+
+
+def test_a_read_only_cache_serves_mirrored_clips_and_answers_missing_for_the_rest(cache_client: TestClient, login, fakes, test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    from wd import audio
+    from wd.config import Settings
+
+    login("alice")
+    mac = Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "say"})
+    audio.synthesize(mac, "en-US", "farmer")  # the Mac made it; rsync brought it here (the same directory in this test)
+    server = cache_client.get("/api/auth/me").json()["server"]
+    assert server["audio"] is True and server["audio_key"] == hashlib.sha256(b"cache\nSamantha\nDaniel").hexdigest()[:8]  # the pair of WD_AUDIO_CACHE_VOICES, not say's key
+    r = cache_client.get("/media/audio", params={"text": "farmer"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("audio/mp4") and r.headers["cache-control"] == "private, max-age=604800"
+    monkeypatch.setattr(audio_router, "SYNTH_PER_MINUTE", 1)  # a miss costs no budget here: nothing is synthesised
+    with caplog.at_level(logging.INFO, logger="wd.routers.audio"):
+        for text in ("zebra", "lion"):
+            r = cache_client.get("/media/audio", params={"text": text})
+            assert r.status_code == 503 and r.json()["error"]["details"] == {"reason": "missing"}
+    events = [r for r in caplog.records if getattr(r, "event", "") == "audio_clip_missing"]
+    assert len(events) == 2 and all(r.levelno == logging.INFO and "zebra" not in r.getMessage() for r in events)
+    assert not [r for r in caplog.records if getattr(r, "event", "") == "audio_unavailable"]
+    assert len(calls(fakes)) == 1  # the server synthesised nothing

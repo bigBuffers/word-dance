@@ -7,8 +7,10 @@ through python-dotenv for manual runs; monkeypatched env in tests).
 Validation rules:
 * paths are resolved to absolute ``Path`` objects (directories are *not* created here —
   see :func:`ensure_dirs`);
-* ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a host with
-  ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``); ``WD_AUDIO_CACHE_MB`` bounds the clip cache;
+* ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``cache`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a host with
+  ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``); ``cache`` serves the ``say`` clips another host
+  synthesised and needs ``WD_AUDIO_CACHE_VOICES`` naming both accents' voices (``en-US=Ava (Premium);en-GB=Serena (Premium)``);
+  ``WD_AUDIO_CACHE_MB`` bounds the clip cache;
 * ``WD_TZ`` must be a known IANA zone;
 * numeric ranges raise :class:`ConfigError`, except ``WD_AI_BATCH_SIZE`` (clamped to 1–12
   because ``content_v1.json`` has ``items.maxItems: 12``), ``WD_AI_FALLBACK_BATCH_SIZE`` (the same
@@ -62,7 +64,8 @@ FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
 FALLBACK_THINKING_MODES = ("off", "on", "default")
 FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg`, `dance` and `probe` are never routed by WD_AI_FALLBACK_KINDS
 FALLBACK_PRICE_KEYS = frozenset({"input", "output", "cache_read"})  # WD_AI_FALLBACK_PRICE_JSON names (CNY per million tokens)
-AUDIO_PROVIDERS = ("auto", "say", "youdao", "off")  # WD_AUDIO_PROVIDER (wd/audio.py): auto = say when SAY_BIN exists, else off
+AUDIO_PROVIDERS = ("auto", "say", "youdao", "cache", "off")  # WD_AUDIO_PROVIDER (wd/audio.py): auto = say when SAY_BIN exists, else off; cache = another host's say clips, read-only
+AUDIO_ACCENTS = ("en-US", "en-GB")  # mirrors wd.audio.ACCENTS (which imports this module)
 SAY_BIN = "/usr/bin/say"  # macOS text-to-speech; its presence decides the `auto` audio provider
 
 # values masked as "***" by GET /api/admin/config (API.md 73) and never logged
@@ -82,6 +85,22 @@ SECRET_KEYS = frozenset(
 class ConfigError(ValueError):
     """An invalid ``WD_*`` value; the message names the variable."""
 
+
+
+def parse_cache_voices(raw: str) -> dict[str, str]:
+    """``WD_AUDIO_CACHE_VOICES`` — ``en-US=Ava (Premium);en-GB=Serena (Premium)`` → ``{accent: voice}`` (the names exactly as
+    ``say -v '?'`` prints them on the host that synthesises); :class:`ConfigError` on a malformed pair, an unknown accent or a repeat."""
+    out: dict[str, str] = {}
+    for part in (p.strip() for p in raw.split(";")):
+        if not part:
+            continue
+        accent, sep, voice = (x.strip() for x in part.partition("="))
+        if not sep or accent not in AUDIO_ACCENTS or not voice:
+            raise ConfigError(f"WD_AUDIO_CACHE_VOICES must be `en-US=<say voice>;en-GB=<say voice>` (as `say -v '?'` lists them on the host that synthesises), got {part!r}")
+        if accent in out:
+            raise ConfigError(f"WD_AUDIO_CACHE_VOICES names {accent} twice")
+        out[accent] = voice
+    return out
 
 @dataclass(frozen=True)
 class Settings:
@@ -175,8 +194,9 @@ class Settings:
     pixabay_key: str = ""
     pexels_key: str = ""
     # --- pronunciation audio (wd/audio.py, API.md 76) ----------------------------------
-    audio_provider: str = "auto"  # auto | say | youdao | off — server-side clips for clients without an English voice
+    audio_provider: str = "auto"  # auto | say | youdao | cache | off — server-side clips for clients without an English voice
     audio_say_voice: str = ""  # macOS `say -v` voice for both accents; empty = the best installed one of audio.PREFERRED_VOICES
+    audio_cache_voices: str = ""  # provider cache: "en-US=Ava (Premium);en-GB=Serena (Premium)" — the voices the mirrored say clips were made with
     audio_cache_mb: int = 256  # cap of the clip cache under audio/; the least recently played clips are removed beyond it
     # --- e-mail ---------------------------------------------------------------------
     smtp_host: str = ""
@@ -267,6 +287,11 @@ class Settings:
         if self.audio_provider != "auto":
             return self.audio_provider
         return "say" if Path(SAY_BIN).is_file() else "off"
+
+    @property
+    def audio_cache_voice_map(self) -> dict[str, str]:
+        """``accent → say voice`` of ``WD_AUDIO_CACHE_VOICES`` (validated by :func:`parse_cache_voices` in ``from_env``)."""
+        return parse_cache_voices(self.audio_cache_voices)
 
     def runtime_dirs(self) -> tuple[Path, ...]:
         """Directories that must exist under the data dir (DEPLOY §1)."""
@@ -425,6 +450,13 @@ class Settings:
             raise ConfigError(f"WD_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
 
         # fallback provider (docs/AI_FALLBACK_MODEL.md §4.3)
+        audio_provider = choice("WD_AUDIO_PROVIDER", "auto", AUDIO_PROVIDERS)
+        audio_cache_voices = text("WD_AUDIO_CACHE_VOICES", "")
+        if set(parse_cache_voices(audio_cache_voices)) != set(AUDIO_ACCENTS) and audio_provider == "cache":
+            raise ConfigError(
+                "WD_AUDIO_PROVIDER=cache needs WD_AUDIO_CACHE_VOICES naming both accents, e.g. `en-US=Ava (Premium);en-GB=Serena (Premium)` "
+                "— the voices the mirrored clips were made with (`wd audio-voices` on the host that synthesises)"
+            )
         ai_provider = choice("WD_AI_PROVIDER", "claude_cli", AI_PROVIDER_MODES)
         fallback_kind = choice("WD_AI_FALLBACK_KIND", "none", FALLBACK_KINDS)
         fallback_model = text("WD_AI_FALLBACK_MODEL", "")
@@ -588,8 +620,9 @@ class Settings:
             openverse_client_secret=text("WD_OPENVERSE_CLIENT_SECRET", ""),
             pixabay_key=pixabay_key,
             pexels_key=pexels_key,
-            audio_provider=choice("WD_AUDIO_PROVIDER", "auto", AUDIO_PROVIDERS),
+            audio_provider=audio_provider,
             audio_say_voice=text("WD_AUDIO_SAY_VOICE", ""),
+            audio_cache_voices=audio_cache_voices,
             audio_cache_mb=integer("WD_AUDIO_CACHE_MB", 256, 16, 1_000_000),
             smtp_host=text("WD_SMTP_HOST", ""),
             smtp_port=integer("WD_SMTP_PORT", 587, 1, 65535),

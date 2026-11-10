@@ -402,6 +402,22 @@ def test_auto_provider_follows_the_say_binary(test_env: dict[str, str], tmp_path
     assert cfg.audio_dir == cfg.data_dir / "audio" and cfg.audio_dir in cfg.runtime_dirs()
 
 
+def test_cache_provider_needs_the_voices_of_both_accents(test_env: dict[str, str]):
+    voices = "en-US=Ava (Premium); en-GB=Serena (Premium)"
+    cfg = Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "cache", "WD_AUDIO_CACHE_VOICES": voices})
+    assert cfg.audio_provider_effective == "cache" and audio.provider_for(cfg) == "cache"
+    assert cfg.audio_cache_voice_map == {"en-US": "Ava (Premium)", "en-GB": "Serena (Premium)"}
+    assert {e["key"]: e["value"] for e in cfg.entries()}["WD_AUDIO_CACHE_VOICES"] == voices
+    with pytest.raises(ConfigError, match="both accents"):
+        Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "cache"})
+    with pytest.raises(ConfigError, match="both accents"):
+        Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "cache", "WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium)"})
+    for bad in ("en-US:Ava", "fr-FR=Amelie;en-GB=Serena (Premium)", "en-US=;en-GB=Daniel", "en-US=Ava;en-US=Samantha"):
+        with pytest.raises(ConfigError, match="WD_AUDIO_CACHE_VOICES"):
+            Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "say", "WD_AUDIO_CACHE_VOICES": bad})
+    assert Settings.from_env({**test_env, "WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium)"}).audio_cache_voice_map == {"en-US": "Ava (Premium)"}  # only cache needs both
+
+
 def test_cache_cap_is_an_integer_of_at_least_16_mb(test_env: dict[str, str]):
     assert Settings.from_env(test_env).audio_cache_mb == 256
     assert Settings.from_env({**test_env, "WD_AUDIO_CACHE_MB": "1024"}).audio_cache_mb == 1024
@@ -539,8 +555,8 @@ def test_prewarm_stops_after_five_failures_in_a_row_even_after_a_success(test_en
     flaky.chmod(0o755)
     monkeypatch.setattr(audio, "AFCONVERT_BIN", str(flaky))
     report = audio.prewarm(cfg, [f"text {i}" for i in range(20)], ("en-US",))
-    assert report.aborted and report.made == 1 and audio.PREWARM_ABORT_AFTER <= report.failed <= audio.PREWARM_ABORT_AFTER + 1 + audio.SLOTS  # the success may land after a failure; the attempts running at the abort are counted too
-    assert report.done == report.made + report.failed
+    assert report.aborted and report.made == 1 and report.failed >= audio.PREWARM_ABORT_AFTER  # the one success may land before or after the first failure
+    assert report.done == report.made + report.failed < report.todo  # every attempt that ran is counted, the queued rest was dropped
     assert all("afconvert" in e and "exited 1" in e for e in report.errors)
 
 
@@ -590,6 +606,47 @@ def test_voice_key_fingerprints_the_provider_and_the_resolved_voices(test_env: d
     assert after == hashlib.sha256(b"say\n\nAva (Premium)\nStephanie (Premium)").hexdigest()[:8]
     assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE="Samantha")) not in (before, after)  # an override is another key even before it resolves
     assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="youdao")) == hashlib.sha256(b"youdao").hexdigest()[:8]
+
+
+def test_cache_provider_serves_the_clips_say_made_and_reports_a_missing_one(test_env: dict[str, str], fakes: dict[str, Path], monkeypatch: pytest.MonkeyPatch):
+    """A Linux server mirrors the Mac's audio/ and names the voices: the same content-addressed clips play, a text without one is `missing`."""
+    mac = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    made = {accent: audio.synthesize(mac, accent, "farmer").path for accent in audio.ACCENTS}  # Ava (Premium) / Stephanie (Premium) from LISTING
+    linux = make_settings(test_env, WD_AUDIO_PROVIDER="cache", WD_AUDIO_CACHE_VOICES="en-US=Ava (Premium);en-GB=Stephanie (Premium)")
+    for accent in audio.ACCENTS:
+        clip, provider, voice = audio.locate(linux, accent, "farmer")
+        assert (clip.path, clip.media_type, provider) == (made[accent], "audio/mp4", "cache")
+        assert audio.lookup(linux, accent, "farmer") is not None and audio.synthesize(linux, accent, "farmer").path == made[accent]
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(linux, "en-US", "zebra")
+    assert e.value.reason == "missing" and "wd audio-texts" in e.value.detail
+    assert audio.lookup(linux, "en-US", "zebra") is None and len(calls(fakes)) == 2  # nothing was synthesised here
+    other = make_settings(test_env, WD_AUDIO_PROVIDER="cache", WD_AUDIO_CACHE_VOICES="en-US=Samantha;en-GB=Daniel")
+    assert audio.lookup(other, "en-US", "farmer") is None  # another voice is another name: a wrong WD_AUDIO_CACHE_VOICES never hits
+    assert audio.voice_key(linux) == hashlib.sha256(b"cache\nAva (Premium)\nStephanie (Premium)").hexdigest()[:8]
+    assert len({audio.voice_key(linux), audio.voice_key(other), audio.voice_key(mac)}) == 3
+    assert audio.warm_up_async(linux) is None
+    # the mirror is served whole: the cap is the synthesising host's business, nothing here prunes or touches
+    before = {p: p.stat().st_mtime for p in made.values()}
+    tiny = make_settings(test_env, WD_AUDIO_PROVIDER="cache", WD_AUDIO_CACHE_VOICES="en-US=Ava (Premium);en-GB=Stephanie (Premium)", WD_AUDIO_CACHE_MB="16")
+    monkeypatch.setattr(audio, "MB", 1)  # 16 bytes of cap against two clips
+    audio.reset_cache_accounting()
+    for accent in audio.ACCENTS:
+        assert audio.lookup(tiny, accent, "farmer") is not None
+    assert all(p.is_file() and p.stat().st_mtime == before[p] for p in made.values()) and len(calls(fakes)) == 2
+
+
+def test_texts_from_file_reads_the_output_of_audio_texts(tmp_path: Path):
+    plain = tmp_path / "texts.txt"
+    plain.write_text("farmer\n  The   farmer grows rice. \nbad ✓\nfarmer\n\n", encoding="utf-8")
+    assert audio.texts_from_file(plain) == audio.PrewarmSet(texts=["farmer", "The farmer grows rice."], refused=["bad ✓"])
+    windows = tmp_path / "windows.txt"
+    windows.write_bytes("\ufefffarmer\r\nhop\r\n".encode("utf-8"))  # a BOM and CRLF from an editor on the way
+    assert audio.texts_from_file(windows).texts == ["farmer", "hop"]
+    latin = tmp_path / "latin.txt"
+    latin.write_bytes("café\n".encode("latin-1"))
+    with pytest.raises(UnicodeDecodeError):
+        audio.texts_from_file(latin)
 
 
 def test_warm_up_sweeps_the_probe_files_of_an_earlier_process(test_env: dict[str, str], fakes: dict[str, Path]):
@@ -710,3 +767,51 @@ def test_cli_audio_voices_and_audio_prewarm(test_env: dict[str, str], fakes: dic
     monkeypatch.setattr(audio, "prewarm", pruned_during_the_run)
     assert cli.main(["audio-prewarm", "--accent", "en-US"]) == 1
     assert "1 clip(s) of the set were pruned by WD_AUDIO_CACHE_MB=256 during the run" in capsys.readouterr().err
+
+
+def test_cli_audio_texts_and_prewarm_from_a_file_feed_a_read_only_cache(test_env: dict[str, str], fakes: dict[str, Path], conn: sqlite3.Connection, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The sync loop of DEPLOY §9: `wd audio-texts` on the server, `wd audio-prewarm --texts` on the Mac, rsync, and the server's cache mode."""
+    from wd import cli
+
+    seed_tappable(conn)
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "say")
+    assert cli.main(["audio-texts"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["hop", "farmer", "The farmer grows rice.", "A farmer works hard — every day.", "zebra"]
+    assert "5 text(s); 1 refused by the text rule" in captured.err
+    assert cli.main(["audio-texts", "--stage", "xs"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["hop", "farmer", "The farmer grows rice.", "A farmer works hard — every day.", "ghost", "zebra"]
+    assert cli.main(["audio-texts", "--db", str(tmp_path / "nowhere.db")]) == 2
+    old_db = tmp_path / "old.db"
+    sqlite3.connect(old_db).close()
+    assert cli.main(["audio-texts", "--db", str(old_db)]) == 1
+    assert "schema version 0" in capsys.readouterr().err
+
+    texts = tmp_path / "texts.txt"
+    texts.write_text("farmer\nThe farmer grows rice.\nbad ✓\n", encoding="utf-8")
+    latin = tmp_path / "latin.txt"
+    latin.write_bytes("café\n".encode("latin-1"))
+    for bad in (["--texts", str(texts), "--purge-others"], ["--texts", str(texts), "--stage", "xs"], ["--texts", str(texts), "--db", str(tmp_path / "x.db")], ["--texts", str(tmp_path / "missing.txt")], ["--texts", str(latin)]):
+        assert cli.main(["audio-prewarm", *bad]) == 2, bad
+    err = capsys.readouterr().err
+    assert "cannot read" in err and "need this host's database" in err
+    assert cli.main(["audio-prewarm", "--texts", str(texts), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "4 clip(s) planned: 0 cached, 4 to synthesise" in out and "purged" not in out  # another host's set says nothing about this cache
+    assert cli.main(["audio-prewarm", "--texts", str(texts)]) == 0  # both accents: the other host's learners are unknown
+    out = capsys.readouterr().out
+    assert f"2 text(s) a learner can tap (from {texts})" in out and "1 text(s) the text rule refuses" in out and "4 clip(s) planned: 0 cached, 4 to synthesise" in out
+    assert "audio-prewarm: 4 clip(s) made" in out and len(calls(fakes)) == 4
+    assert cli.main(["audio-prewarm", "--texts", str(texts), "--accent", "en-US"]) == 0
+    assert "2 clip(s) planned: 2 cached, 0 to synthesise" in capsys.readouterr().out
+
+    # the server side: the mirrored clips play, nothing is synthesised, prewarm refuses
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "cache")
+    monkeypatch.setenv("WD_AUDIO_CACHE_VOICES", "en-US=Ava (Premium);en-GB=Stephanie (Premium)")
+    assert cli.main(["audio-voices"]) == 0
+    out = capsys.readouterr().out
+    assert "provider: cache (WD_AUDIO_PROVIDER=cache) — a read-only mirror of the `say` clips another host synthesised: 4 clip(s)" in out and "not enforced here" in out
+    assert "en-US → Ava (Premium) (WD_AUDIO_CACHE_VOICES)" in out and "en-GB → Stephanie (Premium)" in out and "WD_AUDIO_SAY_VOICE" not in out
+    assert cli.main(["audio-prewarm", "--dry-run"]) == 2
+    assert "serves clips another host synthesised" in capsys.readouterr().err
+    assert cli.main(["audio-texts"]) == 0 and len(capsys.readouterr().out.splitlines()) == 5

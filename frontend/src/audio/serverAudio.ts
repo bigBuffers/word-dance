@@ -14,6 +14,7 @@ export type ServerAudioReason =
   | 'off' // no provider on the server (WD_AUDIO_PROVIDER=off) — stop asking
   | 'busy' // synthesis slot or per-user budget exhausted — try again later
   | 'failed' // the provider failed for this text
+  | 'missing' // the server's read-only cache has no clip for this text (synced from the host that synthesises): use the device's voice for this one
   | 'invalid' // the server refused the text (400)
   | 'auth' // 401: the session is gone (client.ts dispatched auth:expired)
   | 'network' // the clip could not be fetched at all
@@ -79,6 +80,7 @@ export async function diagnose(text: string, accent: Accent): Promise<ServerAudi
       enabled = false;
       return 'off';
     }
+    if (reason === 'missing') return 'missing';
     return reason === 'busy' ? 'busy' : 'failed';
   }
   if (err.status === 401) return 'auth';
@@ -134,8 +136,8 @@ export function playServerAudio(text: string, accent: Accent, rate = 1): Promise
       done = true;
       cleanup();
       diagnose(text, accent).then(
-        (reason) => reject(new ServerAudioError(reason)),
-        () => reject(new ServerAudioError('failed')),
+        (reason) => reject(new ServerAudioError(mine !== generation ? 'interrupted' : reason)), // a newer call took over meanwhile: its outcome matters, not this one's
+        () => reject(new ServerAudioError(mine !== generation ? 'interrupted' : 'failed')),
       );
     };
     const onEnd = () => settle();

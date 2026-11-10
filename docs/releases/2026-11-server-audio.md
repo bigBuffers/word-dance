@@ -29,7 +29,7 @@
 
 1. Mac：`git pull`，构建前端快照并切换符号链接，`launchctl kickstart -k gui/$(id -u)/com.word-dance.server`（后端代码变了，必须重启；`auto` 在 Mac 上自动等于 `say`，`.env` 不用改）。可选：先在 系统设置 → 辅助功能 → 朗读内容 → 系统语音 下载「Ava（高级）」或「Samantha（增强）」（`say -v '?'` 里叫 `Ava (Premium)`），重启后自动选用（启动日志 `audio_voice`；`WD_DATA_DIR=/Users/sqin/word-dance-data .venv/bin/wd audio-voices` 直接打印选择），再跑 `… wd audio-prewarm --dry-run` 看计划、`… wd audio-prewarm --purge-others` 预生成有内容或在词库里的词及其例句并清掉旧语音的片段（§6）。
 2. 验证：`curl --noproxy '*' http://127.0.0.1:8000/media/audio?text=farmer` 未登录应答 401；启动日志有 `audio_provider … say`；登录后 `GET /api/auth/me` 的 `server.audio` 为 `true`；平板 App 里点单词和例句的发音都出声，连点两次只响后一次；华为浏览器里网页发音仍走系统语音。
-3. Linux 服务器：在 `.env` 里显式写 `WD_AUDIO_PROVIDER="youdao"`（或接受没有兜底）。
+3. Linux 服务器：`WD_AUDIO_PROVIDER="cache"` + `WD_AUDIO_CACHE_VOICES="en-US=Ava (Premium);en-GB=Serena (Premium)"`，把 Mac 的 `audio/` 同步过去（§7、ops.md §5）；退而求其次 `"youdao"`，或接受没有兜底。
 4. 回滚：`git checkout c4574cd`，重建前端快照并重启；`audio/` 目录可留可删（只是缓存）。无迁移，无数据风险。
 
 ## 5 上线记录
@@ -55,3 +55,10 @@
 - **门禁**：pytest 2280 通过 / 3 跳过（Mac 专属的 `test_defaults_without_environment` 与 Linux 专属的 `test_deploy_files` 除外），tsc，vitest 50 个文件 414 条，文案检查，构建，契约审计，`make smoke` 29 步（发音一步 1.1 秒——启动预热见效）。
 - **上线**（2026-11-10 13:29，Mac，`e40ad3d`）：前端快照 `frontend-releases/e40ad3d`（三份 APK 同步放入其 `dl/`），`launchctl kickstart -k` 重启后端，2 秒后 `/api/health` 正常；启动日志 13:29:11 `say voice for en-US: Ava (Premium)`、13:29:12 `en-GB: Daniel`（`audio_voice`，预热线程）；线上主包含 `audio_key`；`.env` 未改。`wd audio-voices` 与服务日志选择一致后，`wd audio-prewarm --purge-others` 分离运行：先清掉 11 条旧 Samantha 片段，再按学习顺序合成 3419 条（美音，词头 + 例句），17 分钟（1017 秒）、0 失败、47.9 MB（上限 256 MB），没有临时文件残留，服务期间健康检查正常。回滚 = `git checkout 703eb0b`，重建快照并重启；`audio/` 只是缓存。
 - 2026-11-10 14:09 真机确认：业主在鸿蒙平板的 App 里确认发音已换成 Ava；日志里 14:07–14:09 的 15 次 `/media/audio` 请求全部命中预生成缓存，答 206、13–22 毫秒（上午未预生成时每个新词要 600–800 毫秒），无 `audio_unavailable`、无裁剪。
+
+## 7 只读缓存提供方（2026-11-10 下午）：把 Mac 上的 Ava / Serena 片段原样搬到 Linux 服务器
+
+- **动机**：正式部署的目标机是 Linux（东京 / 新加坡轻量服务器），没有 `say`；`youdao` 非官方且音质不及 Ava。发音片段本来就是按内容寻址的文件（名字 = provider + 语音 + 口音 + 文本的 sha256），所以 Linux 侧只要知道「这些片段是 `say` 用哪两个语音做的」，就能算出同样的名字直接播放。
+- **实现**：`WD_AUDIO_PROVIDER="cache"` + `WD_AUDIO_CACHE_VOICES="en-US=Ava (Premium);en-GB=Serena (Premium)"`（两种口音都要写，名字要和 Mac 上 `say -v '?'` 一致；`wd audio-voices` 在两端分别打印选择与配置）。`locate` 在 cache 模式下按 `say` 的键定位；命中照常服务（缓存头、Range、`audio_key` 指纹）；没有的片段抛 `AudioError('missing')` → 503 `{reason:"missing"}`（API.md §1.1 / 76 新增；不计入每分钟 60 次的合成预算，日志记 INFO 级事件 `audio_clip_missing` 而非告警），前端收到后用设备自带语音读这一条（有 speechSynthesis 的浏览器静默降级；App 壳没有语音，提示 `voiceClipMissing`「这条发音还没有生成，请稍后再试」），不会像 `off` 那样关掉整条服务器路线；被后一次点击抢先的诊断按「被打断」处理，不会读出前一个词。cache 模式下 `lookup` 不再更新文件时间（否则每晚 rsync 都会重传播过的片段），`WD_AUDIO_CACHE_MB` 在该主机不生效。cache 模式下 `wd audio-prewarm` 拒绝运行（退出码 2），`warm_up` 不动。
+- **同步循环**（ops.md §5）：服务器 `wd audio-texts > texts.txt`（新命令：打印学习路径上的全部文本，一行一条，`--stage` 可加整个阶段的词头）→ Mac `wd audio-prewarm --texts texts.txt`（新选项：按 UTF-8 文件合成，容忍 BOM；两种口音，只补缺的；不能与 `--stage` / `--purge-others` / `--db` 同用，读不了文件退出码 2）→ `rsync -a --exclude='*.tmp*' --exclude='*.aiff'` 把 `audio/` 推回服务器。换语音（服务器不出现空窗）：Mac 装好语音并重启服务 → Mac `wd audio-prewarm --purge-others` → 不带 `--delete` 同步一次（新旧语音的片段并存）→ 服务器改 `WD_AUDIO_CACHE_VOICES` 并重启 → 再带 `--delete` 同步一次清掉旧语音的文件。服务器上新生成的内容在下一次同步后出声，之前由设备语音顶上；Mac 上做一个每日 cron 即可。
+- **评审与门禁**：`review-word-dance-audio-cache-provider`（5 个视角、62 条发现、每条 3 人复核：55 条确认、7 条驳回）——缓存模式下未命中不计预算、日志改 INFO 事件 `audio_clip_missing`，`lookup` 不再更新镜像文件时间（否则 rsync 每晚重传），`--texts` 文件容忍 BOM、读取失败退出码 2、不与 `--db` 同用且 `--dry-run` 不再打印清理预告，被后一次点击抢先的诊断按「被打断」处理，以及一批文案与范围修正；随后的复核（3 位）又指出 9 处（主要是哪类设备会用默认语音顶上、换语音的无空窗顺序、`audio/` 目录说明），同样修正。门禁：pytest 2285 通过 / 3 跳过，tsc，vitest 50 个文件 416 条，文案检查，构建（主包 105.4 KB gzip），契约审计，`make smoke` 29 步。

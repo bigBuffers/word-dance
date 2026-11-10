@@ -5,6 +5,7 @@
 //           satisfied because speak() is always triggered from a click/key handler),
 //   server  a clip from `GET /media/audio` (audio/serverAudio.ts) when the server has a provider (`ServerFlags.audio`) and the
 //           device lists no English voice — and the fallback when the native plugin rejects (no TTS engine, no English voice).
+//           A server that is off, or whose read-only cache misses this one text (`missing`), yields to the browser default voice.
 // One voice at a time: every call silences the other routes first. The hook reports a failure through the toast (unless a later
 // call superseded the failing one); the module-level speak() (auto-pronounce, key P) stays silent.
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -104,8 +105,8 @@ async function pronounce(text: string, accent: Accent, rate: number, route: Spee
     try {
       await playServerAudio(text, accent, rate);
     } catch (e) {
-      if (isServerAudioError(e) && e.reason === 'off' && speechSupported()) {
-        synthSpeak(text, accent, rate); // the browser default voice, as before clips existed
+      if (isServerAudioError(e) && (e.reason === 'off' || e.reason === 'missing') && speechSupported()) {
+        synthSpeak(text, accent, rate); // the browser default voice, as before clips existed (`missing`: for this one text)
         return;
       }
       throw e;
@@ -131,6 +132,8 @@ export function speechFailureCopy(e: unknown): string | null {
         return zh.word.voicePlayFailed;
       case 'off':
         return zh.word.voiceMissing;
+      case 'missing':
+        return zh.word.voiceClipMissing;
       default:
         return null;
     }

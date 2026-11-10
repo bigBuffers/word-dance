@@ -138,6 +138,29 @@ describe('speechRoute with the Web Speech API present', () => {
     }
   });
 
+  it("a clip the server's read-only cache lacks falls back to the browser default voice for that text, and the route stays on", async () => {
+    const speech = installSpeech([voice('Ting-Ting', 'zh-CN')]);
+    try {
+      server.enabled = true;
+      server.play.mockImplementationOnce(() => Promise.reject(new ServerAudioError('missing')));
+      const { result } = renderHook(() => useSpeech('en-US'));
+      act(() => {
+        result.current.speak('zebra');
+      });
+      await settle();
+      expect(server.play).toHaveBeenCalledWith('zebra', 'en-US', 0.92);
+      expect(speech.synth.speak).toHaveBeenCalledTimes(1); // the browser default voice spoke this one text
+      expect(toastApi.error).not.toHaveBeenCalled();
+      act(() => {
+        result.current.speak('zebra');
+      });
+      await settle();
+      expect(server.play).toHaveBeenCalledTimes(2); // the hook itself never switches the route off on `missing` (diagnose() keeping the flag on is covered in audio/serverAudio.test.ts)
+    } finally {
+      speech.remove();
+    }
+  });
+
   it('a server that turns out to be off falls back to the browser default voice, silently', async () => {
     const speech = installSpeech([voice('Ting-Ting', 'zh-CN')]);
     try {
@@ -191,6 +214,12 @@ describe('useSpeech hook without speechSynthesis', () => {
     });
     await settle();
     expect(toastApi.error).toHaveBeenLastCalledWith(zh.word.voiceMissing); // no browser voice to fall back to
+    server.play.mockImplementationOnce(() => Promise.reject(new ServerAudioError('missing')));
+    act(() => {
+      result.current.speak('apple');
+    });
+    await settle();
+    expect(toastApi.error).toHaveBeenLastCalledWith(zh.word.voiceClipMissing); // the read-only cache lacks it and the device has no voice either
     act(() => result.current.cancel());
     expect(server.stop).toHaveBeenCalled();
   });
@@ -204,6 +233,7 @@ describe('speechFailureCopy', () => {
     expect(speechFailureCopy(new ServerAudioError('invalid'))).toBe(zh.word.voiceTextUnsupported); // never "the server is not configured"
     expect(speechFailureCopy(new ServerAudioError('decode'))).toBe(zh.word.voicePlayFailed);
     expect(speechFailureCopy(new ServerAudioError('off'))).toBe(zh.word.voiceMissing);
+    expect(speechFailureCopy(new ServerAudioError('missing'))).toBe(zh.word.voiceClipMissing);
     expect(speechFailureCopy(new ServerAudioError('blocked'))).toBeNull();
     expect(speechFailureCopy(new ServerAudioError('auth'))).toBeNull();
     expect(speechFailureCopy(new ServerAudioError('interrupted'))).toBeNull();

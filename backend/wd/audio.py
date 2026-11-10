@@ -18,6 +18,10 @@ Providers (``WD_AUDIO_PROVIDER``, DEPLOY §4):
 * ``youdao`` — ``https://dict.youdao.com/dictvoice?audio=<text>&type=2|1`` (US / UK), the unofficial endpoint Chinese dictionary
   apps have used for years; opt-in because its terms are not published and every uncached text is sent to it. mp3.
 * ``off`` — the endpoint answers 503 ``audio_unavailable`` ``{reason: "off"}`` and the clients keep whatever voice they have.
+* ``cache`` — read-only: serves the ``say`` clips another host synthesised (the same content-addressed names, that host's voices
+  named in ``WD_AUDIO_CACHE_VOICES``); a text without a clip is 503 ``{reason: "missing"}`` and the client falls back to the
+  device's own voice. The loop that fills it: ``wd audio-texts`` on this host → ``wd audio-prewarm --texts FILE`` on the host with
+  ``say`` → ``rsync`` of ``audio/`` back (DEPLOY §9, ops.md §5). This is how a Linux server plays the Mac's Ava / Serena clips.
 * ``auto`` (the default) — ``say`` when ``/usr/bin/say`` exists (the Mac that hosts the family instance), else ``off``.
 
 Synthesis goes through :data:`SLOTS` semaphore slots (a stampede of cache misses must not fork twenty ``say`` processes); at
@@ -50,7 +54,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 
 import httpx
 
@@ -97,14 +101,15 @@ PREFERRED_VOICES: dict[str, tuple[str, ...]] = {
     "en-GB": ("Serena", "Kate", "Stephanie", "Jamie", "Oliver", "Daniel"),
 }
 VOICE_LANG = {"en-US": "en_US", "en-GB": "en_GB"}
-MEDIA = {"say": ("m4a", "audio/mp4"), "youdao": ("mp3", "audio/mpeg")}
+MEDIA = {"say": ("m4a", "audio/mp4"), "youdao": ("mp3", "audio/mpeg"), "cache": ("m4a", "audio/mp4")}  # cache mirrors say clips
 CLIP_SUFFIXES = (".m4a", ".mp3")
 MB = 1024 * 1024
 _PREMIUM_RE = re.compile(r"premium|高级", re.IGNORECASE)
 
 
 class AudioError(Exception):
-    """No clip. ``reason``: ``off`` (no provider), ``busy`` (no synthesis slot in time) or ``failed`` (provider error)."""
+    """No clip. ``reason``: ``off`` (no provider), ``busy`` (no synthesis slot in time), ``failed`` (provider error) or ``missing``
+    (the read-only ``cache`` provider has no clip for this text)."""
 
     def __init__(self, reason: str, detail: str = ""):
         super().__init__(detail or reason)
@@ -145,7 +150,7 @@ def normalize_text(text: str) -> str | None:
 
 
 def provider_for(cfg: Settings) -> str:
-    """``say`` / ``youdao`` / ``off`` (``auto`` resolved, ``Settings.audio_provider_effective``)."""
+    """``say`` / ``youdao`` / ``cache`` / ``off`` (``auto`` resolved, ``Settings.audio_provider_effective``)."""
     return cfg.audio_provider_effective
 
 
@@ -354,6 +359,9 @@ def voice_key(cfg: Settings) -> str:
         parts.append(cfg.audio_say_voice)
         with _choice_lock:
             parts.extend(_choices.get(f"{cfg.audio_say_voice}\n{accent}", _UNRESOLVED) for accent in ACCENTS)
+    elif provider == "cache":
+        voices = cfg.audio_cache_voice_map
+        parts.extend(voices.get(accent, "?") for accent in ACCENTS)
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:8]
 
 
@@ -366,21 +374,25 @@ def locate(cfg: Settings, accent: str, text: str) -> tuple[Clip, str, str]:
     provider = provider_for(cfg)
     if provider == "off":
         raise AudioError("off")
-    voice = say_voice_for(cfg, accent) if provider == "say" else ""
+    if provider == "cache":  # the clips another host made with `say`: the same key, that host's voices
+        key_provider, voice = "say", cfg.audio_cache_voice_map[accent]
+    else:
+        key_provider, voice = provider, (say_voice_for(cfg, accent) if provider == "say" else "")
     ext, media_type = MEDIA[provider]
-    digest = hashlib.sha256(f"{provider}\n{voice}\n{accent}\n{text}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{key_provider}\n{voice}\n{accent}\n{text}".encode("utf-8")).hexdigest()
     return Clip(cfg.audio_dir / digest[:2] / f"{digest}.{ext}", media_type), provider, voice
 
 
 def lookup(cfg: Settings, accent: str, text: str) -> Clip | None:
     """The cached clip (touched, so pruning removes the least recently played first), or None when it has to be synthesised."""
-    clip, _provider, _voice = locate(cfg, accent, text)
+    clip, provider, _voice = locate(cfg, accent, text)
     if not clip.path.is_file():
         return None
-    try:
-        os.utime(clip.path)
-    except OSError:
-        pass
+    if provider != "cache":  # a mirrored clip is pruned by the host that made it; touching it would only make rsync re-send it
+        try:
+            os.utime(clip.path)
+        except OSError:
+            pass
     return clip
 
 
@@ -393,6 +405,8 @@ def synthesize(cfg: Settings, accent: str, text: str) -> Clip:
     clip, provider, voice = locate(cfg, accent, text)
     if clip.path.is_file():
         return clip
+    if provider == "cache":
+        raise AudioError("missing", "the read-only cache has no clip for this text — synthesise it on the host with `say` and sync audio/ (DEPLOY §9: wd audio-texts, wd audio-prewarm --texts)")
     if not _waiters.acquire(blocking=False):
         raise AudioError("busy", f"{MAX_WAITERS} requests already wait for a synthesis slot")
     try:
@@ -627,32 +641,44 @@ def prewarm_texts(conn: sqlite3.Connection, stages: tuple[str, ...] = ()) -> Pre
         if not re.fullmatch(r"[a-z0-9]+", stage):
             raise ValueError(f"not a stage code: {stage!r}")
     stage_sql = "".join(f" OR (w.stage_{stage} = 1 AND w.is_public = 1 AND w.is_valid_english = 1)" for stage in stages)
+
+    def raws() -> Iterator[object]:
+        for display, content_json in conn.execute(PREWARM_TEXTS_SQL.format(stages=stage_sql)):
+            yield display
+            if not content_json:
+                continue
+            try:
+                content = json.loads(content_json)
+            except ValueError:
+                continue
+            examples = content.get("examples") if isinstance(content, dict) else None
+            for example in examples if isinstance(examples, list) else []:
+                if isinstance(example, dict):
+                    yield example.get("en")
+
+    return _collect(raws())
+
+
+def _collect(raws: Iterable[object]) -> PrewarmSet:
+    """Normalises and de-duplicates ``raws`` in order; what the text rule refuses goes to ``refused``."""
     seen: set[str] = set()
     chosen = PrewarmSet(texts=[], refused=[])
-
-    def add(raw: object) -> None:
+    for raw in raws:
         if not isinstance(raw, str) or not raw.strip():
-            return
+            continue
         spoken = normalize_text(raw)
         if spoken is None:
             chosen.refused.append(raw)
         elif spoken not in seen:
             seen.add(spoken)
             chosen.texts.append(spoken)
-
-    for display, content_json in conn.execute(PREWARM_TEXTS_SQL.format(stages=stage_sql)):
-        add(display)
-        if not content_json:
-            continue
-        try:
-            content = json.loads(content_json)
-        except ValueError:
-            continue
-        examples = content.get("examples") if isinstance(content, dict) else None
-        for example in examples if isinstance(examples, list) else []:
-            if isinstance(example, dict):
-                add(example.get("en"))
     return chosen
+
+
+def texts_from_file(path: Path) -> PrewarmSet:
+    """The texts of ``wd audio-texts`` written by another host (one per line, UTF-8, a BOM tolerated), for ``wd audio-prewarm
+    --texts``; ``OSError`` / ``UnicodeDecodeError`` are the caller's to report."""
+    return _collect(path.read_text(encoding="utf-8-sig").splitlines())
 
 
 def accents_in_use(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -799,6 +825,12 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
         print(f"wd audio-voices: configuration error: {e}", file=sys.stderr)
         return 2
     provider = provider_for(cfg)
+    if provider == "cache":
+        clips = _scan(cfg.audio_dir)
+        print(f"provider: cache (WD_AUDIO_PROVIDER={cfg.audio_provider}) — a read-only mirror of the `say` clips another host synthesised: {len(clips)} clip(s), {sum(size for _m, size, _p in clips) / MB:.1f} MB (WD_AUDIO_CACHE_MB is not enforced here: the host that synthesises bounds it)")
+        for accent in ACCENTS:
+            print(f"{accent} → {cfg.audio_cache_voice_map.get(accent, '?')} (WD_AUDIO_CACHE_VOICES)")
+        return 0
     print(
         f"provider: {provider} (WD_AUDIO_PROVIDER={cfg.audio_provider}); WD_AUDIO_SAY_VOICE: {cfg.audio_say_voice or '(unset — the best installed preferred voice)'}; "
         f"cache: {cache_bytes(cfg) / MB:.1f} MB of {cfg.audio_cache_mb} MB"
@@ -845,8 +877,8 @@ def _clip_estimate(cfg: Settings) -> int:
 
 
 def cmd_audio_prewarm(args: argparse.Namespace) -> int:
-    """``wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--db PATH]`` — synthesise the clips of
-    the study path (:func:`prewarm_texts`, plus the headwords of ``--stage``) for the accents in use, so those taps never wait for
+    """``wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--texts FILE] [--db PATH]`` — synthesise
+    the clips of the study path (:func:`prewarm_texts`, plus the headwords of ``--stage``) for the accents in use, so those taps never wait for
     `say`; ``--purge-others`` first deletes the clips outside the set; safe next to the live service (DEPLOY §9). Exit 0 when every
     clip is there, 1 when a clip failed / the voice does not resolve / the schema is too old / the cap is too small, 2 without a
     provider or a database, 130 on Ctrl-C."""
@@ -860,40 +892,59 @@ def cmd_audio_prewarm(args: argparse.Namespace) -> int:
     if provider == "off":
         print("wd audio-prewarm: WD_AUDIO_PROVIDER resolves to off — nothing can synthesise (say on a Mac, or youdao, in .env)", file=sys.stderr)
         return 2
-    from . import db  # local: the request path imports this module and never opens the database here
-
-    path = Path(args.db).expanduser() if args.db else cfg.db_path
-    if not path.is_file():
-        print(f"wd audio-prewarm: no database at {path} — set WD_DATA_DIR / WD_DB_PATH (the Mac: WD_DATA_DIR=/Users/sqin/word-dance-data) or pass --db", file=sys.stderr)
+    if provider == "cache":
+        print("wd audio-prewarm: WD_AUDIO_PROVIDER=cache serves clips another host synthesised — `wd audio-texts > texts.txt` here, `wd audio-prewarm --texts texts.txt` on the host with say, then sync audio/ back (DEPLOY §9)", file=sys.stderr)
         return 2
-    conn = db.connect(path)
-    try:
-        version = db.current_version(conn)
-        if version < PREWARM_FROM_VERSION:
-            print(f"wd audio-prewarm: schema version {version} has no words.learn_rank (migration {PREWARM_FROM_VERSION:04d}) — run `wd migrate` first", file=sys.stderr)
-            return 1
-        chosen = prewarm_texts(conn, stages=tuple(dict.fromkeys(args.stage or ())))
-        in_use = accents_in_use(conn)
-        accents = tuple(dict.fromkeys(args.accent)) if args.accent else in_use
-        keep_accents = tuple(a for a in ACCENTS if a in in_use or a in accents)  # --purge-others keeps every accent in use, --accent or not
-    finally:
-        conn.close()
+    if args.texts and (args.purge_others or args.stage or args.db):
+        print("wd audio-prewarm: --texts takes the texts from a file; --purge-others, --stage and --db need this host's database", file=sys.stderr)
+        return 2
+    if args.texts:
+        texts_path = Path(args.texts).expanduser()
+        try:
+            chosen = texts_from_file(texts_path)
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"wd audio-prewarm: cannot read {texts_path} as UTF-8 text, one per line (the output of `wd audio-texts`): {e}", file=sys.stderr)
+            return 2
+        accents = tuple(dict.fromkeys(args.accent)) if args.accent else ACCENTS  # another host's learners: both accents unless told
+        keep_accents = accents
+    else:
+        from . import db  # local: the request path imports this module and never opens the database here
+
+        path = Path(args.db).expanduser() if args.db else cfg.db_path
+        if not path.is_file():
+            print(f"wd audio-prewarm: no database at {path} — set WD_DATA_DIR / WD_DB_PATH (the Mac: WD_DATA_DIR=/Users/sqin/word-dance-data) or pass --db", file=sys.stderr)
+            return 2
+        conn = db.connect(path)
+        try:
+            version = db.current_version(conn)
+            if version < PREWARM_FROM_VERSION:
+                print(f"wd audio-prewarm: schema version {version} has no words.learn_rank (migration {PREWARM_FROM_VERSION:04d}) — run `wd migrate` first", file=sys.stderr)
+                return 1
+            chosen = prewarm_texts(conn, stages=tuple(dict.fromkeys(args.stage or ())))
+            in_use = accents_in_use(conn)
+            accents = tuple(dict.fromkeys(args.accent)) if args.accent else in_use
+            keep_accents = tuple(a for a in ACCENTS if a in in_use or a in accents)  # --purge-others keeps every accent in use, --accent or not
+        finally:
+            conn.close()
     ensure_dirs(cfg)
     try:
         voices = {accent: (say_voice_for(cfg, accent) if provider == "say" else provider) for accent in keep_accents}
     except AudioError as e:
         print(f"wd audio-prewarm: no voice — {e.detail}", file=sys.stderr)
         return 1
-    scope = "headwords with content or in a bank and their example sentences" + (f", the headwords of {', '.join(args.stage)}" if args.stage else "")
-    print(f"{len(chosen.texts)} text(s) a learner can tap ({scope}; learning order); " + ", ".join(f"{a} → {voices[a]}" for a in accents))
+    if args.texts:
+        scope = f"from {args.texts}"
+    else:
+        scope = "headwords with content or in a bank and their example sentences" + (f", the headwords of {', '.join(args.stage)}" if args.stage else "") + "; learning order"
+    print(f"{len(chosen.texts)} text(s) a learner can tap ({scope}); " + ", ".join(f"{a} → {voices[a]}" for a in accents))
     if chosen.refused:
         print(f"{len(chosen.refused)} text(s) the text rule refuses (no server clip for those): " + "; ".join(repr(t[:60]) for t in chosen.refused[:5]))
     paths = expected_paths(cfg, chosen.texts, accents)
     keep = expected_paths(cfg, chosen.texts, keep_accents)
     missing = sum(1 for p in paths if not p.is_file())
     todo = min(missing, args.limit) if args.limit else missing
-    others, other_bytes = _others(cfg, keep)
-    if args.purge_others or args.dry_run:
+    if (args.purge_others or args.dry_run) and not args.texts:  # --texts never purges (refused above): another host's set says nothing about this cache
+        others, other_bytes = _others(cfg, keep)
         print(f"{others} other clip(s) ({other_bytes / MB:.1f} MB) outside this set" + (" would be purged first" if args.dry_run else " are purged first") + " — another voice's, or texts outside the set; the service must already run the voice above (its log: event audio_voice)")
     if args.purge_others and not args.dry_run:
         removed, freed = purge_others(cfg, keep)
@@ -934,6 +985,38 @@ def cmd_audio_prewarm(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_audio_texts(args: argparse.Namespace) -> int:
+    """``wd audio-texts [--stage S …] [--db PATH]`` — the texts ``wd audio-prewarm`` would synthesise on this host, one per line on
+    stdout (the study path, ``--stage`` adding a stage's headwords), for the host that has `say` when this one serves a read-only
+    cache: ``wd audio-prewarm --texts FILE`` there, then sync ``audio/`` back (DEPLOY §9). Exit 1 below schema 14, 2 without a
+    database."""
+    _cli_logging()
+    try:
+        cfg = Settings.from_env()
+    except ConfigError as e:
+        print(f"wd audio-texts: configuration error: {e}", file=sys.stderr)
+        return 2
+    from . import db  # local, like cmd_audio_prewarm
+
+    path = Path(args.db).expanduser() if args.db else cfg.db_path
+    if not path.is_file():
+        print(f"wd audio-texts: no database at {path} — set WD_DATA_DIR / WD_DB_PATH or pass --db", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        version = db.current_version(conn)
+        if version < PREWARM_FROM_VERSION:
+            print(f"wd audio-texts: schema version {version} has no words.learn_rank (migration {PREWARM_FROM_VERSION:04d}) — run `wd migrate` first", file=sys.stderr)
+            return 1
+        chosen = prewarm_texts(conn, stages=tuple(dict.fromkeys(args.stage or ())))
+    finally:
+        conn.close()
+    for text in chosen.texts:
+        print(text)
+    print(f"{len(chosen.texts)} text(s); {len(chosen.refused)} refused by the text rule", file=sys.stderr)
+    return 0
+
+
 def _non_negative(value: str) -> int:
     n = int(value)
     if n < 0:
@@ -952,8 +1035,13 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--limit", type=_non_negative, default=0, metavar="N", help="synthesise at most N missing clips (default: all)")
     p.add_argument("--dry-run", action="store_true", help="count the texts, the clips still missing and the cache after the run, synthesise nothing")
     p.add_argument("--purge-others", action="store_true", help="first delete the cached clips outside this set (another voice's after a voice change; keeps every accent in use) — only after the service was restarted with the new voice")
+    p.add_argument("--texts", default=None, metavar="FILE", help="synthesise the texts of this UTF-8 file (one per line — the output of `wd audio-texts` on the host that serves a read-only cache) instead of this host's database; both accents unless --accent says; not with --stage / --purge-others / --db")
     p.add_argument("--db", default=None, metavar="PATH", help="use this database file instead of WD_DB_PATH")
     p.set_defaults(func=cmd_audio_prewarm)
+    p = sub.add_parser("audio-texts", help="print the texts `wd audio-prewarm` would synthesise here, one per line — for the host with `say` when this one serves a read-only cache (WD_AUDIO_PROVIDER=cache)")
+    p.add_argument("--stage", action="append", choices=list(STAGE_ORDER), metavar="STAGE", help="also the headwords of every public valid word of this stage (repeatable)")
+    p.add_argument("--db", default=None, metavar="PATH", help="use this database file instead of WD_DB_PATH")
+    p.set_defaults(func=cmd_audio_texts)
 
 
 __all__ = [
@@ -972,6 +1060,7 @@ __all__ = [
     "cache_bytes",
     "choose_voice",
     "cmd_audio_prewarm",
+    "cmd_audio_texts",
     "cmd_audio_voices",
     "expected_paths",
     "locate",
@@ -990,6 +1079,7 @@ __all__ = [
     "say_voice_for",
     "say_voices",
     "synthesize",
+    "texts_from_file",
     "warm_up",
     "warm_up_async",
 ]

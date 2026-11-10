@@ -227,19 +227,23 @@ def test_learn_order_report_is_refused_without_a_recompute(settings, seeded, cap
 
 
 def test_audio_commands_are_owned_and_registered_by_the_audio_module(settings):
-    """DEPLOY §9: `wd audio-voices` and `wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--db PATH]` under wd.audio."""
+    """DEPLOY §9: `wd audio-voices` and `wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--texts FILE] [--db PATH]` and `wd audio-texts [--stage S …] [--db PATH]` under wd.audio."""
     from wd import audio
 
-    assert cli.COMMAND_OWNERS["wd.audio"] == ("audio-voices", "audio-prewarm") and "wd.audio" in cli.CLI_MODULES
+    assert cli.COMMAND_OWNERS["wd.audio"] == ("audio-voices", "audio-prewarm", "audio-texts") and "wd.audio" in cli.CLI_MODULES
     parser = cli.build_parser()
-    args = parser.parse_args(["audio-prewarm", "--accent", "en-GB", "--accent", "en-US", "--stage", "xs", "--stage", "zk", "--limit", "7", "--dry-run", "--purge-others", "--db", "x.db"])
+    args = parser.parse_args(["audio-prewarm", "--accent", "en-GB", "--accent", "en-US", "--stage", "xs", "--stage", "zk", "--limit", "7", "--dry-run", "--purge-others", "--texts", "t.txt", "--db", "x.db"])
     assert args.func is audio.cmd_audio_prewarm
-    assert (args.accent, args.stage, args.limit, args.dry_run, args.purge_others, args.db) == (["en-GB", "en-US"], ["xs", "zk"], 7, True, True, "x.db")
+    assert (args.accent, args.stage, args.limit, args.dry_run, args.purge_others, args.texts, args.db) == (["en-GB", "en-US"], ["xs", "zk"], 7, True, True, "t.txt", "x.db")
     defaults = parser.parse_args(["audio-prewarm"])
-    assert (defaults.accent, defaults.stage, defaults.limit, defaults.dry_run, defaults.purge_others, defaults.db) == (None, None, 0, False, False, None)
+    assert (defaults.accent, defaults.stage, defaults.limit, defaults.dry_run, defaults.purge_others, defaults.texts, defaults.db) == (None, None, 0, False, False, None, None)
     sub = parser._subparsers._group_actions[0].choices["audio-prewarm"]  # type: ignore[union-attr]
-    assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--accent", "--stage", "--limit", "--dry-run", "--purge-others", "--db"}
+    assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--accent", "--stage", "--limit", "--dry-run", "--purge-others", "--texts", "--db"}
     assert parser.parse_args(["audio-voices"]).func is audio.cmd_audio_voices
+    texts = parser.parse_args(["audio-texts", "--stage", "xs", "--db", "y.db"])
+    assert texts.func is audio.cmd_audio_texts and (texts.stage, texts.db) == (["xs"], "y.db")
+    sub = parser._subparsers._group_actions[0].choices["audio-texts"]  # type: ignore[union-attr]
+    assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--stage", "--db"}
     for bad in (["--accent", "fr-FR"], ["--stage", "k12"], ["--limit", "-1"]):  # usage errors
         with pytest.raises(SystemExit) as e:
             parser.parse_args(["audio-prewarm", *bad])

@@ -122,6 +122,13 @@ describe('useSpeech in the native shell', () => {
     });
     await settle();
     expect(toastApi.error).toHaveBeenLastCalledWith(zh.word.voiceMissing);
+    server.play.mockImplementationOnce(() => Promise.reject(new ServerAudioError('missing'))); // the tablet's path: no plugin voice, the server's read-only cache lacks this clip
+    act(() => {
+      result.current.speak('apple');
+    });
+    await settle();
+    expect(toastApi.error).toHaveBeenLastCalledWith(zh.word.voiceClipMissing);
+    expect(result.current.speaking).toBe(false);
     server.play.mockImplementationOnce(() => Promise.reject(new ServerAudioError('blocked')));
     toastApi.error.mockClear();
     act(() => {
