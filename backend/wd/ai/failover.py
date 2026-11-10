@@ -93,7 +93,7 @@ log = logging.getLogger("wd.ai.failover")
 CLAUDE = "claude"
 FALLBACK = "fallback"
 PROVIDERS: tuple[str, ...] = (CLAUDE, FALLBACK)
-MODES: tuple[str, ...] = ("claude_cli", "openai_http", "auto")
+MODES: tuple[str, ...] = ("claude_cli", "openai_http", "auto", "split")
 
 # ---- kv keys (AI_FALLBACK_MODEL §4.3)
 KV_ACTIVE = "ai.active_provider"
@@ -201,7 +201,8 @@ class Decision:
 
 # ------------------------------------------------------------------------------------------ state
 def mode(cfg: Settings) -> str:
-    """``WD_AI_PROVIDER``: ``claude_cli`` (today), ``openai_http`` (fallback only) or ``auto`` (claude + automatic failover)."""
+    """``WD_AI_PROVIDER``: ``claude_cli`` (today), ``openai_http`` (fallback only), ``auto`` (claude + automatic failover) or
+    ``split`` (the learners' kinds on the fallback, the operator's work on claude — :func:`realtime`)."""
     m = str(getattr(cfg, "ai_provider", "claude_cli") or "claude_cli")
     return m if m in MODES else "claude_cli"
 
@@ -243,7 +244,9 @@ def choose(conn: sqlite3.Connection, cfg: Settings, *, kind: str, priority: int,
     """``(provider, None)`` for the provider that takes ``kind`` now, or ``(None, resumes_at)`` (AI_FALLBACK_MODEL §4.1 step 1).
 
     Kill switch off → ``(None, now + 30 min)``; the admin's global pause → ``(None, until)``. Then by mode: ``claude_cli``
-    → claude unless paused; ``openai_http`` → the fallback when eligible; ``auto`` → the sticky active provider first
+    → claude unless paused; ``openai_http`` → the fallback when eligible; ``split`` → the fallback for the learners' kinds
+    (:func:`realtime`; when it is paused or unavailable they wait for IT — never claude) and claude for everything else
+    (a claude pause holds only the operator's work); ``auto`` → the sticky active provider first
     (claude when not paused, else the fallback when eligible; the fallback when eligible, else claude when not paused),
     otherwise the earliest instant one of them may run again — in both ``auto`` branches (CLAUDE_INTEGRATION §10.5
     "the earlier of the two pauses"): a group that arrives during the fallback's 15-minute overload pause must not wait
@@ -263,6 +266,10 @@ def choose(conn: sqlite3.Connection, cfg: Settings, *, kind: str, priority: int,
     eligible, resumes = fallback_eligible(conn, cfg, kind=kind, priority=priority, now=now)
     if m == "openai_http":
         return (FALLBACK, None) if eligible else (None, resumes)
+    if m == "split":
+        if realtime(cfg, kind=kind, priority=priority):
+            return (FALLBACK, None) if eligible else (None, resumes)  # the learners' work waits for the fallback, never claude
+        return (CLAUDE, None) if claude_pause is None else (None, claude_pause)
     if active_provider(conn) == CLAUDE:
         if claude_pause is None:
             return CLAUDE, None
@@ -296,6 +303,11 @@ def availability(conn: sqlite3.Connection, cfg: Settings, *, kind: str, now: str
             reason = "claude_paused"
         elif m == "openai_http":
             reason = "fallback_paused" if fallback_pause is not None else "fallback_unavailable"
+        elif m == "split":
+            if realtime(cfg, kind=kind, priority=priority):
+                reason = "fallback_paused" if fallback_pause is not None else "fallback_unavailable"
+            else:
+                reason = "claude_paused"
         elif claude_pause is not None and fallback_pause is not None:
             reason = "both_paused"
         elif claude_pause is not None:
@@ -315,6 +327,19 @@ def availability(conn: sqlite3.Connection, cfg: Settings, *, kind: str, now: str
 
 
 # ------------------------------------------------------------------------------------------ claims
+def realtime(cfg: Settings, *, kind: str, priority: int) -> bool:
+    """Mode ``split``: whether ``kind`` at ``priority`` is learner-triggered work the fallback takes — a kind in
+    ``WD_AI_FALLBACK_KINDS`` (a custom word's lookup, a card requested at study time, the nightly consolidation of a
+    learner's bank) that is not a prewarm group (priority ≥ 90 without ``WD_AI_FALLBACK_PREWARM``). Everything else — prewarm
+    content, svg, dance, a kind removed from the list — is the operator's pre-generation and stays on claude: the learners'
+    input never reaches Claude (PUBLIC_LAUNCH_AND_IOS §2.3), the free domestic model never pre-generates the whole list. The
+    svg / dance jobs a learner's action would queue are therefore not queued at all in this mode (``images.handler._svg_allowed``,
+    ``dance.enqueue_if_needed``): the template card and the rule dance serve until the operator pre-generates them."""
+    if kind not in tuple(getattr(cfg, "ai_fallback_kinds", ()) or ()):
+        return False
+    return int(priority) < budget.PREWARM_PRIORITY or bool(getattr(cfg, "ai_fallback_prewarm", False))
+
+
 def group_cap(cfg: Settings, kind: str, provider: str) -> int | None:
     """Largest group ``provider`` may take for ``kind``: the fallback's content batch (``min(WD_AI_BATCH_SIZE,
     WD_AI_FALLBACK_BATCH_SIZE)``, ≥ 1 — AI_FALLBACK_MODEL §4.2 "切换期间：例句批大小 5") for ``content``; None (no extra cap)
@@ -584,9 +609,10 @@ def record_failure(
     whenever the fallback is usable at all (an outage noticed on a content group must still move lookups and
     consolidates over, schedule the probe and notify), a soft threshold only when ``kind`` itself may rerun there. ``retry_provider`` names the fallback whenever it may take ``kind`` — also when another thread flipped
     first: the group still reruns there. A trigger on the fallback names ``claude`` when it is not paused (no state flip:
-    a successful claude call flips back through :func:`record_success`). The other modes only pause. When the provider
-    that just got paused was the last one standing (the other is paused or marked unavailable) the admins get the
-    "both providers down" notification (§4.5).
+    a successful claude call flips back through :func:`record_success`). Mode ``split`` never flips and never names the
+    other provider (the learners' work must not reach claude, the operator's must not drain the free tier), but shares the
+    alert below; the other modes only pause. When the provider that just got paused was the last one standing (the other is
+    paused or marked unavailable) the admins get the "both providers down" notification (§4.5).
 
     ``priority`` is the group's job priority (``min(j.priority for j in jobs)``) and is required: a prewarm group (≥ 90)
     may rerun on the fallback only with ``WD_AI_FALLBACK_PREWARM``, and an omitted value would silently widen that rule.
@@ -652,14 +678,16 @@ def record_failure(
                 action = "pause"
             else:
                 db.kv_set(conn, key, str(streak), now=now)
-        if m == "auto" and triggered:
+        if m in ("auto", "split") and (triggered or (m == "split" and paused_until is not None)):  # split: every fallback pause alerts, whatever the auto soft threshold
             if provider == CLAUDE:
-                # hard: the CLI as such is down — the switch needs only a usable fallback (configured, not paused, not marked
-                # unavailable); whether THIS kind may rerun there (WD_AI_FALLBACK_KINDS / prewarm) decides retry_provider alone.
-                # soft: switch only when this kind is routable — a flip on a content streak would fail back on the next
-                # content success and flap between the providers every few minutes
-                eligible, _ = fallback_eligible(conn, cfg, kind=kind, priority=priority, now=now)
-                usable = fallback_eligible(conn, cfg, kind="probe", priority=0, now=now)[0] if klass == "hard" else eligible
+                # auto — hard: the CLI as such is down — the switch needs only a usable fallback (configured, not paused, not
+                # marked unavailable); whether THIS kind may rerun there (WD_AI_FALLBACK_KINDS / prewarm) decides retry_provider
+                # alone. soft: switch only when this kind is routable — a flip on a content streak would fail back on the next
+                # content success and flap between the providers every few minutes. split: no switch at all.
+                eligible = usable = False
+                if m == "auto":
+                    eligible, _ = fallback_eligible(conn, cfg, kind=kind, priority=priority, now=now)
+                    usable = fallback_eligible(conn, cfg, kind="probe", priority=0, now=now)[0] if klass == "hard" else eligible
                 if usable:
                     if _cas_active(conn, CLAUDE, FALLBACK, now=now):
                         next_probe = to_iso(parse_iso(now) + _probe_every(cfg))
@@ -687,8 +715,9 @@ def record_failure(
                     action = "switch"
                     retry = FALLBACK if eligible else None
                 elif paused_until is not None:
-                    # claude was just paused and the fallback cannot take over: nobody is left (§4.5 两边都挂 — the alert
-                    # that ends the unnoticed 8-hour outage); a soft threshold without a pause is not "down"
+                    # claude was just paused and the fallback cannot take over (auto) or never takes claude's work (split):
+                    # nobody is left when it is down too (§4.5 两边都挂 — the alert that ends the unnoticed 8-hour outage);
+                    # a soft threshold without a pause is not "down"
                     fb_pause = budget.provider_paused_until(conn, FALLBACK, now)
                     fb_unavailable = db.kv_get(conn, KV_FALLBACK_AVAILABLE) == "0"
                     if fb_pause is not None or fb_unavailable:
@@ -706,7 +735,23 @@ def record_failure(
                         )
             else:
                 claude_pause = budget.provider_paused_until(conn, CLAUDE, now)
-                if claude_pause is None:
+                if m == "split":
+                    if paused_until is not None:
+                        # the learners' only provider just paused (hard, or six overloads): the admins hear about it whatever
+                        # claude's state — claude never takes the learners' work in this mode, so "claude is up" is no comfort
+                        notice = (
+                            "fallback_paused",
+                            {
+                                "reason": reason,
+                                "status": result.status,
+                                "error": error_text,
+                                "kind": kind,
+                                "fallback_paused_until": paused_until,
+                                "claude_paused_until": claude_pause,
+                                "fallback_unavailable": result.status == "spawn_error" or reason == "not_found",
+                            },
+                        )
+                elif claude_pause is None:
                     retry = CLAUDE
                 elif paused_until is not None:
                     notice = (
@@ -983,7 +1028,7 @@ def maybe_probe(conn: sqlite3.Connection, cfg: Settings, *, now: str, probe_clau
 def reconcile_mode(conn: sqlite3.Connection, cfg: Settings, *, now: str) -> bool:
     """Start-up hook (``ClaudeWorker``'s first housekeeping, before the forced probe): end a stale failover episode in a
     non-``auto`` mode. A sticky ``ai.active_provider='fallback'`` left by an earlier ``auto`` tour is invisible to
-    :func:`choose` in ``claude_cli`` / ``openai_http``, yet the first successful claude call (a ``wd claude-check`` days
+    :func:`choose` in ``claude_cli`` / ``openai_http`` / ``split``, yet the first successful claude call (a ``wd claude-check`` days
     later in ``openai_http``) would still "fail back" from it: an ``ai_failback`` event with an inflated ``outage_min``,
     the 「已切回 Claude」 webhook and a requeue of everything dead since the stale ``since`` — in ``openai_http`` onto the
     very fallback those jobs died on. When ``mode(cfg) != 'auto'`` and the fallback is the active provider:
@@ -1065,7 +1110,9 @@ def notification_text(kind: str, detail: Mapping[str, Any], cfg: Settings) -> tu
     meanwhile: a queue while Claude is paused; "Claude 状态未知 … 先尝试 Claude" when its pause merely expired but nothing
     proved it back (``detail["active"]`` is still the fallback, or ``claude_available == '0'`` after a failed probe);
     "Claude 正常" only when claude is the active provider again — and in mode ``openai_http`` the CLI is never spawned,
-    so the jobs wait for the fallback's pause whatever Claude's state.
+    so the jobs wait for the fallback's pause whatever Claude's state; in mode ``split`` the learners' jobs wait for the
+    fallback too (``fallback_paused`` is that mode's own alert: the learners' provider paused while claude keeps the
+    operator's work).
     """
     tz = str(getattr(cfg, "tz", "Asia/Shanghai") or "Asia/Shanghai")
     model = str(getattr(cfg, "ai_fallback_model", "") or "备用模型")
@@ -1090,11 +1137,22 @@ def notification_text(kind: str, detail: Mapping[str, Any], cfg: Settings) -> tu
             fallback_state = "备用模型不可用"
         body = f"主模型与备用模型均失败（{cause}），任务已排队等待。Claude 暂停至 {_local_clock(detail.get('claude_paused_until'), tz)}，{fallback_state}。"
         return "word-Dance：AI 暂时不可用", body
+    if kind == "fallback_paused":
+        claude_until = detail.get("claude_paused_until")
+        claude_state = f"Claude 也暂停至 {_local_clock(claude_until, tz)}（预热等运营任务同样等待）。" if claude_until else "Claude 侧的预热 / 配图 / 舞步标注不受影响。"
+        if detail.get("fallback_unavailable"):
+            state = "已标记为不可用（配置或端点问题：模型名、地址或密钥），修正后运行 `wd ai-check --provider fallback` 或在管理页「探测」/「恢复」"
+        else:
+            state = f"已暂停至 {_local_clock(detail.get('fallback_paused_until'), tz)}"
+        body = f"备用模型 {model} 调用失败（{cause}），{state}。当前为分流模式：学习者的校验 / 例句 / 整理排队等待它恢复，不会改走 Claude。{claude_state}"
+        return "word-Dance：学习者的备用模型已暂停", body
     if kind == "fallback_quality":
         raw_error = str(detail.get("error") or detail.get("status") or "")[:160]
         claude_until = detail.get("claude_paused_until")
         if mode(cfg) == "openai_http":
             tail = "当前为仅备用模式，任务排队等待备用模型恢复。"
+        elif mode(cfg) == "split":
+            tail = "当前为分流模式，学习者的任务排队等待备用模型恢复；" + (f"Claude 也暂停至 {_local_clock(claude_until, tz)}。" if claude_until else "Claude 侧的预生成不受影响。")
         elif claude_until:
             tail = f"Claude 暂停至 {_local_clock(claude_until, tz)}，任务排队等待。"
         elif detail.get("active") == FALLBACK or detail.get("claude_available") == "0":
@@ -1111,7 +1169,7 @@ def notification_text(kind: str, detail: Mapping[str, Any], cfg: Settings) -> tu
 
 
 def notify(conn: sqlite3.Connection, cfg: Settings, kind: str, detail: Mapping[str, Any], *, now: str) -> None:
-    """Best effort: post ``kind`` (``failover`` / ``failback`` / ``both_paused`` / ``fallback_quality``) to every admin
+    """Best effort: post ``kind`` (``failover`` / ``failback`` / ``both_paused`` / ``fallback_paused`` / ``fallback_quality``) to every admin
     webhook (users.role='admin' with ``user_settings.webhook_enabled=1`` and a URL), at most once per kind per hour
     (``kv.ai.notify.<kind>.last_at``).
 

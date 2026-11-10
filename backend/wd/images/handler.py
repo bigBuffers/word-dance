@@ -125,7 +125,16 @@ def _used_refs(conn: sqlite3.Connection, word_id: int) -> set[str]:
 
 
 def _svg_allowed(cfg: Settings, priority: int, allow_svg: bool) -> bool:
-    return bool(allow_svg and cfg.svg_via_claude and priority < PREWARM_PRIORITY and cfg.ai_enabled and cfg.ai_svg_daily_budget_usd > 0)
+    """The automatic SVG card after every photo source failed: a learner-time fetch (priority < 90) — never in AI mode ``split``,
+    where a learner's action queues no Claude work (the template card serves; the admin's explicit `claude_svg` request bypasses this)."""
+    return bool(
+        allow_svg
+        and cfg.svg_via_claude
+        and priority < PREWARM_PRIORITY
+        and cfg.ai_enabled
+        and cfg.ai_svg_daily_budget_usd > 0
+        and str(getattr(cfg, "ai_provider", "") or "") != "split"
+    )
 
 
 def _with_prefix(prefix: str, detail: str) -> str:

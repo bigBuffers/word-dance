@@ -197,6 +197,12 @@ def handle_generate_dance(ctx: JobContext, jobs: list[Job]) -> None:
                 rules.mark_unattempted(conn, wid, now=now)
                 queue.finish(conn, job.id, {"skipped": "dance_budget_disabled"}, now=now)
                 continue
+            if str(getattr(cfg, "ai_provider", "") or "") == "split" and job.payload.get("operator") is not True:
+                # AI mode split: a learner's action (queued before the switch, or by a writer without the gate) must not reach
+                # Claude — the rule dance serves until `wd dance-annotate` annotates the word
+                rules.mark_unattempted(conn, wid, now=now)
+                queue.finish(conn, job.id, {"skipped": "split_mode"}, now=now)
+                continue
             rule = rules.rule_spec(conn, word)
             if rule is None:
                 rules.mark_unattempted(conn, wid, now=now)
@@ -326,7 +332,7 @@ def cmd_dance_annotate(args: argparse.Namespace) -> int:
                 print(f"would consider {row['display'] or row['lemma']} (state {row['dance_state']}, active {row['active_dance_id']})")
                 continue
             with db.tx(conn):
-                job_id = rules.enqueue_if_needed(conn, wid, priority=int(args.priority), now=now, force=bool(args.force), cfg=cfg)
+                job_id = rules.enqueue_if_needed(conn, wid, priority=int(args.priority), now=now, force=bool(args.force), cfg=cfg, operator=True)
             if job_id is None:
                 skipped += 1
             else:

@@ -155,6 +155,9 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
                 _skip(conn, job, wid, "svg_budget_disabled", now=now)
                 continue
             requested = job.payload.get("requested") is True
+            if not requested and str(getattr(cfg, "ai_provider", "") or "") == "split":
+                _skip(conn, job, wid, "split_mode", now=now)  # a learner-time card queued before the switch: the template card serves (AI_FALLBACK_MODEL §4.3)
+                continue
             if not requested and _has_active_image(conn, wid):
                 # DESIGN §9: a fallback SVG only stands in while the word has no image; one landed since this job was
                 # enqueued, so keep it (image_state stays 'ready') and spend nothing.

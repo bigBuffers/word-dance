@@ -500,6 +500,28 @@ def test_retry_after_within_ten_seconds_is_retried_once_inline(conn, cfg, instal
     assert ledger.get_call(conn, result.call_id)["exit_code"] == 429
 
 
+def test_a_plain_429_without_retry_after_is_retried_on_the_backoff(conn, cfg, install, monkeypatch):
+    """Zhipu 1305 「访问量过大」 carries no Retry-After and clears within seconds: 2 / 4 / 8 s inside the call's budget, the same
+    request each time; a persistent one is `overloaded` after the third retry (the job backs off, the streak counts)."""
+    slept: list[float] = []
+    monkeypatch.setattr(openai_http, "SLEEP", slept.append)
+    calls, _, _, _ = install("ok", modes=["1305", "1305", "ok"])
+    result = run(conn, cfg)
+    assert result.ok and len(calls) == 3 and slept == [2.0, 4.0]
+    assert calls[0]["json"] == calls[1]["json"] == calls[2]["json"]
+    assert conn.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 1 and ledger.get_call(conn, result.call_id)["status"] == "success"
+    slept.clear()
+    calls, _, _, _ = install("1305")
+    result = run(conn, cfg)
+    assert result.status == "overloaded" and "1305" in result.error and len(calls) == 4 and slept == [2.0, 4.0, 8.0]
+    assert ledger.get_call(conn, result.call_id)["exit_code"] == 429
+    # the header wins when there is one: Retry-After: 2 → one retry, no backoff schedule (see the test above); Retry-After: 120 → none (below)
+    slept.clear()
+    calls, _, _, _ = install("ok", modes=["1305", "429_long", "ok"])  # a long Retry-After on a retry ends the schedule: the job defers for it
+    result = run(conn, cfg)
+    assert result.status == "overloaded" and "1305" in result.error and len(calls) == 2 and slept == [2.0]
+
+
 def test_long_retry_after_is_not_slept_through(conn, cfg, install):
     calls, _, _, _ = install("429_long")  # SLEEP would raise (autouse fixture)
     result = run(conn, cfg)

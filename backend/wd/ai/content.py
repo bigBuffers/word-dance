@@ -321,20 +321,23 @@ def apply_item(
     call_id: int | None,
     now: str,
     provider: str = CLAUDE,
+    fallback_final: bool = False,
 ) -> Applied:
     """Apply one response item to ``word`` (§6.4). The job itself is finished / failed by the caller from the status.
 
     ``provider`` is who answered (``result.provider``): ``valid=false`` on a non-seed word invalidates it
     (:func:`reject_word`) only when the CLI said so; from the fallback it is an ``invalid`` post-validation failure with
     no write — the job follows §6.3 like any other miss (backoff → bisect → dead → ``mark_failed``), the word stays
-    valid / public and the fail-back requeue gives the CLI the final say (§10.4). Seed words keep the anomaly path.
+    valid / public and the fail-back requeue gives the CLI the final say (§10.4) — unless ``fallback_final`` (AI modes
+    ``split`` and ``openai_http``, where no CLI will ever see the learner's word): then the fallback's verdict is final and
+    the word is rejected like the CLI's. Seed words keep the anomaly path.
     """
     if item is None:
         return Applied("unmatched", "no item for this word in the response")
     if item.get("valid") is False:
         if word.get("source") == "seed":
             return Applied("anomaly", "valid=false on a seed word")
-        if provider == FALLBACK:
+        if provider == FALLBACK and not fallback_final:
             return Applied("invalid", "valid=false from the fallback: only the CLI may invalidate a word")
         reject_word(conn, word, str(item.get("meaning_zh") or ""), now=now)
         return Applied("rejected", "valid=false; word marked is_valid_english=0")
@@ -472,7 +475,7 @@ def handle_generate_content(ctx: JobContext, jobs: list[Job]) -> None:
         anomalies = 0
         for job, word in todo:
             item = index.get(str(word["lemma"]).lower()) or index.get(str(word["display"]).lower())
-            applied = apply_item(ctx, conn, job, word, item, model=model, cost_share=cost_share, call_id=result.call_id, now=now, provider=result.provider)
+            applied = apply_item(ctx, conn, job, word, item, model=model, cost_share=cost_share, call_id=result.call_id, now=now, provider=result.provider, fallback_final=str(getattr(ctx.cfg, "ai_provider", "") or "") in ("split", "openai_http"))
             if applied.status == "stored":
                 queue.finish(conn, job.id, {"content_id": applied.content_id, "version": applied.version, "cost_usd": round(cost_share, 6)}, now=now)
                 progressed += 1

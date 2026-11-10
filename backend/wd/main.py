@@ -520,6 +520,12 @@ def startup(app: FastAPI) -> None:
         else:
             log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
         app.state.audio_warm_up = audio.warm_up_async(cfg)  # `say -v ?` and the voice probes (1–3 s) on a daemon thread: before the first tap, never on its request
+        log.info(
+            "AI provider mode %s (fallback: %s)",
+            cfg.ai_provider,
+            f"{cfg.ai_fallback_kind} {cfg.ai_fallback_model} for {','.join(cfg.ai_fallback_kinds)}" if cfg.fallback_configured else "not configured",
+            extra={"event": "ai_provider_mode"},
+        )
         if cfg.worker_enabled:
             start_background(app, conn)
         else:

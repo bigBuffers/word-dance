@@ -10,7 +10,8 @@ The second implementation of the ``run_claude`` seam. One ``POST {base_url}/chat
   results (never a switch trigger, AI_FALLBACK_MODEL §4.2);
 * HTTP failures map onto the ledger's status vocabulary with the CLAUDE_INTEGRATION §10 error prefixes (``balance:`` ``quota:`` ``network:``
   ``not_found:`` ``content_filter:`` ``truncated:`` ``invalid_json:`` ``schema:``) that ``ai/failover.py`` reads; a
-  ``Retry-After`` of at most :data:`RETRY_AFTER_MAX_S` is honoured once inline; Zhipu's own ``finish_reason`` values are
+  ``Retry-After`` of at most :data:`RETRY_AFTER_MAX_S` is honoured once inline and a plain 429 without one is retried on
+  :data:`RATE_LIMIT_BACKOFF_S` (2 / 4 / 8 s) within the call's budget; Zhipu's own ``finish_reason`` values are
   read as well (``sensitive`` → ``content_filter:``, ``network_error`` → ``network:`` with status ``overloaded``);
 * ``timeout_s`` is the budget of the WHOLE call, not of one request: round 0, the inline retry and the repair round are
   each bounded by what is left of it (the connect phase by :data:`CONNECT_TIMEOUT_S`, never more than the remaining), the
@@ -63,6 +64,8 @@ CONNECT_TIMEOUT_S = 20.0
 #: are issued only when at least this many seconds of the budget would be left for them (retry: ``wait + MIN_REMAINING_S <= remaining``)
 MIN_REMAINING_S = 15.0
 RETRY_AFTER_MAX_S = 10.0  # AI_FALLBACK_MODEL §4.2: a short ``Retry-After`` is slept through once inside the adapter; longer ones defer the job
+RATE_LIMIT_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0)  # a plain 429 WITHOUT a usable Retry-After (Zhipu 1305 「访问量过大」 at peak hours answers ~70 % of
+# calls that way and recovers within seconds): up to three more POSTs with these waits, each only when it fits the call's budget
 BODY_EXCERPT_CHARS = 300
 CLASSIFY_CHARS = 4000
 MAX_SCHEMA_ERRORS = 5
@@ -533,41 +536,64 @@ def _post_once(client: httpx.Client, url: str, headers: dict[str, str], body: di
     return _Exchange(status_code=resp.status_code, text=text, data=data, headers={k.lower(): v for k, v in resp.headers.items()})
 
 
-def inline_retry_after(ex: _Exchange) -> float | None:
-    """Seconds to sleep before the one inline retry (AI_FALLBACK_MODEL §4.2): a 429 with ``Retry-After`` ≤ :data:`RETRY_AFTER_MAX_S`
-    whose body is a plain rate limit. None for a longer wait, and for a body that cannot clear within seconds — an
-    account in arrears (Zhipu 1113 / ``insufficient_quota``) or a windowed cap (1308 / ``next_flush_time``), which
-    :func:`classify_http` turns into ``balance:`` / ``quota:`` and ``failover`` pauses."""
+def plain_rate_limit(ex: _Exchange) -> bool:
+    """A 429 whose body is a plain rate limit — not an account in arrears (Zhipu 1113 / ``insufficient_quota``) nor a windowed
+    cap (1308 / ``next_flush_time``), which :func:`classify_http` turns into ``balance:`` / ``quota:`` and ``failover`` pauses."""
     if ex.status_code != 429:
-        return None
+        return False
     text = (ex.text or "")[:CLASSIFY_CHARS]
-    if BALANCE_RE.search(text) or QUOTA_RE.search(text) or "next_flush_time" in text:
+    return not (BALANCE_RE.search(text) or QUOTA_RE.search(text) or "next_flush_time" in text)
+
+
+def inline_retry_after(ex: _Exchange) -> float | None:
+    """Seconds to sleep before the first inline retry (AI_FALLBACK_MODEL §4.2): a plain rate limit (:func:`plain_rate_limit`)
+    with ``Retry-After`` ≤ :data:`RETRY_AFTER_MAX_S`; None for a longer wait or a body that cannot clear within seconds. A plain
+    rate limit WITHOUT a usable ``Retry-After`` (Zhipu 1302 / 1305 send none) is retried on :data:`RATE_LIMIT_BACKOFF_S` instead
+    — see :func:`_post`."""
+    if not plain_rate_limit(ex):
         return None
     wait = _retry_after_seconds(ex.headers.get("retry-after"))
     return wait if wait is not None and wait <= RETRY_AFTER_MAX_S else None
 
 
 def _post(client: httpx.Client, url: str, headers: dict[str, str], body: dict[str, Any], *, deadline: float, may_retry: bool, call_id: int) -> tuple[_Exchange, bool]:
-    """POST once within the budget left before ``deadline`` (a :data:`CLOCK` instant); when :func:`inline_retry_after` allows it
-    and the wait plus :data:`MIN_REMAINING_S` still fit into that budget, sleep and POST the same request once more. Otherwise
-    the 429 keeps its classification (``overloaded`` / ``rate_limit``: the job backs off, the streak counts)."""
+    """POST within the budget left before ``deadline`` (a :data:`CLOCK` instant), retrying a plain rate limit inline: once after
+    a ``Retry-After`` ≤ :data:`RETRY_AFTER_MAX_S` (:func:`inline_retry_after`), else on :data:`RATE_LIMIT_BACKOFF_S` (2, 4, 8 s —
+    Zhipu's 1302 / 1305 carry no header and clear within seconds) — each wait only when it plus :data:`MIN_REMAINING_S` still
+    fits the budget. A 429 that outlasts the retries keeps its classification (``overloaded`` / ``rate_limit``: the job backs
+    off, the streak counts); the second element says whether any retry ran."""
     ex = _post_once(client, url, headers, body, deadline=deadline)
-    wait = inline_retry_after(ex) if may_retry else None
-    if wait is None:
+    if not may_retry or not plain_rate_limit(ex):
         return ex, False
-    remaining = deadline - CLOCK()
-    if wait + MIN_REMAINING_S > remaining:
-        log.info(
-            "fallback call %s rate limited; a Retry-After of %ss does not fit the %ss left of the call's budget — not retried inline",
-            call_id,
-            _seconds(wait),
-            _seconds(max(remaining, 0.0)),
-            extra={"event": "fallback_call"},
-        )
-        return ex, False
-    log.info("fallback call %s rate limited; retrying once after %ss", call_id, _seconds(wait), extra={"event": "fallback_call"})
-    SLEEP(wait)
-    return _post_once(client, url, headers, body, deadline=deadline), True
+    header_wait = _retry_after_seconds(ex.headers.get("retry-after"))
+    if header_wait is None:
+        waits: tuple[float, ...] = RATE_LIMIT_BACKOFF_S  # no header (Zhipu 1302 / 1305): the vendor clears within seconds
+    elif header_wait <= RETRY_AFTER_MAX_S:
+        waits = (header_wait,)
+    else:
+        return ex, False  # the vendor asked for a long wait: the job defers for it, no inline retry
+    retried = False
+    for wait in waits:
+        remaining = deadline - CLOCK()
+        if wait + MIN_REMAINING_S > remaining:
+            log.info(
+                "fallback call %s rate limited; a wait of %ss does not fit the %ss left of the call's budget — not retried further",
+                call_id,
+                _seconds(wait),
+                _seconds(max(remaining, 0.0)),
+                extra={"event": "fallback_call"},
+            )
+            break
+        log.info("fallback call %s rate limited (%s); retrying after %ss", call_id, "Retry-After" if header_wait is not None else "no Retry-After: backoff", _seconds(wait), extra={"event": "fallback_call"})
+        SLEEP(wait)
+        ex = _post_once(client, url, headers, body, deadline=deadline)
+        retried = True
+        if not plain_rate_limit(ex):
+            break
+        later = _retry_after_seconds(ex.headers.get("retry-after"))
+        if later is not None and later > RETRY_AFTER_MAX_S:
+            break  # the vendor now asks for a long wait: the job defers for it
+    return ex, retried
 
 
 def _choice_text(data: dict) -> tuple[str | None, str | None]:
@@ -833,6 +859,7 @@ __all__ = [
     "extract_json",
     "FILTER_RE",
     "inline_retry_after",
+    "plain_rate_limit",
     "json_mode_for",
     "MIN_REMAINING_S",
     "NOT_FOUND_RE",
@@ -842,6 +869,7 @@ __all__ = [
     "repair_prompt",
     "request_timeout",
     "resolve_dialect",
+    "RATE_LIMIT_BACKOFF_S",
     "RETRY_AFTER_MAX_S",
     "retry_at_from_body",
     "run_openai",

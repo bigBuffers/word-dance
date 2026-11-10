@@ -927,3 +927,153 @@ def test_content_request_route_accepts_while_the_fallback_serves_content(seeded,
         assert api.get(f"/api/words/{other}").json()["content_state"] == "none"  # nothing was enqueued (deferred_until exists for queued words only)
     assert queue.live_job(seeded, f"content:{other}") is None
     assert bank.ai_paused_until(seeded, NOW, cfg=cli_content, kind="content") == CLAUDE_PAUSE_END  # the gate the route consulted
+
+
+# ------------------------------------------------------------------------------------------ mode split
+def test_split_mode_runs_the_learners_jobs_on_the_fallback_and_prewarm_content_on_the_cli(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    uid = make_user(seeded)
+    add_custom_words(seeded, uid, ["zorblax"])  # a lookup, then the content job it enqueues: the learner's work
+    ctx = make_ctx(connect, fb_cfg("ok", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    rows = calls(seeded)
+    assert [(r["kind"], r["status"], r["provider"]) for r in rows] == [("lookup", "success", "fallback"), ("content", "success", "fallback")]
+    wids = seed_words(seeded, 2)
+    enqueue_content(seeded, wids, priority=90)  # the operator's prewarm, claimed on its own: claude
+    worker.drain(ctx, CLAUDE_TYPES)
+    rows = calls(seeded)
+    assert [(r["kind"], r["status"], r["provider"]) for r in rows[2:]] == [("content", "success", "claude")]
+    assert all(j["status"] == "done" for j in seeded.execute("SELECT status FROM jobs WHERE type IN ('lookup_word', 'generate_content')").fetchall())
+    assert db.kv_get(seeded, "ai.active_provider") in (None, "claude") and db.kv_get(seeded, "ai.failover.since") is None
+    # the learner's custom word was written by the fallback model, the prewarm words by the CLI
+    assert seeded.execute("SELECT wc.model FROM word_contents wc JOIN user_words uw ON uw.word_id = wc.word_id WHERE uw.user_id = ?", (uid,)).fetchone()[0] == "glm-4.7-flash"
+    models = {str(r[0]) for r in seeded.execute(f"SELECT model FROM word_contents WHERE word_id IN ({','.join('?' * len(wids))})", wids)}
+    assert models and "glm-4.7-flash" not in models
+    assert len(fake_http["calls"]) == 2  # the lookup and the learner's content group; nothing of the prewarm
+
+
+def test_split_mode_fallback_failure_pauses_only_the_fallback_and_the_learners_wait_for_it(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    uid = make_user(seeded)
+    add_custom_words(seeded, uid, ["zorblax"])
+    fake_http["mode"] = "401"
+    ctx = make_ctx(connect, fb_cfg("ok", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    rows = calls(seeded)
+    assert [(r["status"], r["provider"]) for r in rows] == [("auth", "fallback")]  # no CLI rerun: the learner's input never goes to claude
+    assert db.kv_get(seeded, "ai.fallback.paused_until") == CLAUDE_PAUSE_END and db.kv_get(seeded, "claude.paused_until") is None
+    job = seeded.execute("SELECT status, run_after FROM jobs WHERE type = 'lookup_word'").fetchone()
+    assert job["status"] == "queued" and job["run_after"] == CLAUDE_PAUSE_END
+    assert "ai_fallback_paused" in events(seeded) and "ai_failover" not in events(seeded)
+    assert failover.availability(seeded, ctx.cfg, kind="lookup", now=NOW).reason == "fallback_paused"
+    assert failover.availability(seeded, ctx.cfg, kind="content", now=NOW, priority=90).ok is True  # the operator's work still runs on the CLI
+    enqueue_content(seeded, seed_words(seeded, 1), priority=90)
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert [(r["kind"], r["status"], r["provider"]) for r in calls(seeded)[1:]] == [("content", "success", "claude")]
+
+
+def test_split_mode_cli_failure_holds_only_the_operators_work(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    uid = make_user(seeded)
+    add_custom_words(seeded, uid, ["zorblax"])
+    ctx = make_ctx(connect, fb_cfg("managed_settings", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert [(r["kind"], r["status"], r["provider"]) for r in calls(seeded)] == [("lookup", "success", "fallback"), ("content", "success", "fallback")]
+    prewarm = enqueue_content(seeded, seed_words(seeded, 1), priority=90)
+    worker.drain(ctx, CLAUDE_TYPES)
+    rows = calls(seeded)
+    assert [(r["kind"], r["status"], r["provider"]) for r in rows[2:]] == [("content", "auth", "claude")]  # the CLI's outage, on the CLI's work only
+    assert db.kv_get(seeded, "claude.paused_until") == CLAUDE_PAUSE_END and db.kv_get(seeded, "ai.active_provider") in (None, "claude")
+    assert "ai_failover" not in events(seeded) and "claude_auth" in events(seeded)
+    job = seeded.execute("SELECT status, run_after FROM jobs WHERE id = ?", (prewarm[0],)).fetchone()
+    assert job["status"] == "queued" and job["run_after"] == CLAUDE_PAUSE_END  # the prewarm group waits for the CLI, not the fallback
+    assert len(fake_http["calls"]) == 2  # the fallback never saw the prewarm group
+
+
+def test_split_mode_queues_no_dance_or_svg_for_a_learners_action(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    """The policy leak the review found: a bank add used to queue a dance annotation (and, without a photo, an SVG card) that ran on
+    Claude with the word's text. In split neither is queued; a job queued before the switch is finished `skipped`; the operator's
+    `wd dance-annotate` (operator=True) still annotates on Claude."""
+    from wd import dance as rules
+    from wd.images import handler as image_handler
+
+    split = fb_cfg("ok", ai_provider="split", ai_dance_daily_budget_usd=1.0, svg_via_claude=True, ai_svg_daily_budget_usd=1.0)
+    auto = fb_cfg("ok", ai_dance_daily_budget_usd=1.0)
+    wid = int(seeded.execute("SELECT id FROM words WHERE phonetic IS NOT NULL AND phonetic != '' AND is_valid_english = 1 AND is_public = 1 AND merged_into_word_id IS NULL ORDER BY id LIMIT 1").fetchone()[0])
+    assert rules.enqueue_if_needed(seeded, wid, priority=11, now=NOW, cfg=split) is None  # the learner's path queues nothing
+    assert image_handler._svg_allowed(split, 20, True) is False and image_handler._svg_allowed(auto, 20, True) is True
+    job_id = rules.enqueue_if_needed(seeded, wid, priority=11, now=NOW, cfg=auto)  # queued before the switch (mode auto then)
+    assert job_id is not None
+    ctx = make_ctx(connect, split, frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    job = queue.get_job(seeded, job_id)
+    assert job.status == "done" and job.result == {"skipped": "split_mode"} and calls(seeded) == []
+    assert seeded.execute("SELECT dance_state FROM words WHERE id = ?", (wid,)).fetchone()[0] == "none"
+    op_job = rules.enqueue_if_needed(seeded, wid, priority=50, now=NOW, cfg=split, operator=True)  # wd dance-annotate
+    assert op_job is not None and queue.get_job(seeded, op_job).payload.get("operator") is True
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert [(r["kind"], r["status"], r["provider"]) for r in calls(seeded)] == [("dance", "success", "claude")]
+    assert len(fake_http["calls"]) == 0  # the fallback never saw a dance request
+    # a learner-queued job still live when the operator asks: the request adopts it (the flag is stamped) instead of being skipped
+    wid2 = int(seeded.execute("SELECT id FROM words WHERE phonetic IS NOT NULL AND phonetic != '' AND is_valid_english = 1 AND is_public = 1 AND merged_into_word_id IS NULL AND id != ? ORDER BY id LIMIT 1", (wid,)).fetchone()[0])
+    learner_job = rules.enqueue_if_needed(seeded, wid2, priority=11, now=NOW, cfg=auto)
+    assert learner_job is not None and queue.get_job(seeded, learner_job).payload.get("operator") is None
+    assert rules.enqueue_if_needed(seeded, wid2, priority=50, now=NOW, cfg=split, operator=True) == learner_job
+    assert queue.get_job(seeded, learner_job).payload.get("operator") is True
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert queue.get_job(seeded, learner_job).status == "done" and [(r["kind"], r["provider"]) for r in calls(seeded)] == [("dance", "claude"), ("dance", "claude")]
+    # the automatic SVG card queued before the switch is skipped too (template card); the admin's explicit request still draws on claude
+    svg_job = queue.enqueue(seeded, "generate_svg", {"word_id": wid}, dedupe_key=f"svg:{wid}", priority=20, now=NOW)
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert queue.get_job(seeded, svg_job).status == "done" and queue.get_job(seeded, svg_job).result == {"skipped": "split_mode"}
+    assert seeded.execute("SELECT image_state FROM words WHERE id = ?", (wid,)).fetchone()[0] == "failed"
+    assert len([r for r in calls(seeded) if r["kind"] == "svg"]) == 0
+    req_job = queue.enqueue(seeded, "generate_svg", {"word_id": wid, "requested": True}, dedupe_key=f"svg:{wid}:req", priority=20, now=NOW)
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert queue.get_job(seeded, req_job).status == "done" and [(r["kind"], r["provider"]) for r in calls(seeded) if r["kind"] == "svg"] == [("svg", "claude")]
+
+
+def test_split_mode_with_the_fallback_paused_lets_a_mixed_claim_run_its_prewarm_members_on_the_cli(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    wids = seed_words(seeded, 3)
+    learner = enqueue_content(seeded, wids[:1], priority=20)
+    prewarm = enqueue_content(seeded, wids[1:], priority=90)
+    failover.set_fallback_paused_until(seeded, CLAUDE_PAUSE_END, now=NOW)  # the learners' provider is down
+    ctx = make_ctx(connect, fb_cfg("ok", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    rows = calls(seeded)
+    assert [(r["kind"], r["status"], r["provider"]) for r in rows] == [("content", "success", "claude")]  # the two prewarm words, alone, on claude
+    assert int(rows[0]["word_count"]) == len(prewarm) == 2  # the claude call carried exactly the two prewarm words
+    for jid in prewarm:
+        assert queue.get_job(seeded, jid).status == "done"
+    job = queue.get_job(seeded, learner[0])
+    assert job.status == "queued" and job.run_after == CLAUDE_PAUSE_END  # the learner's card waits for the fallback, not for claude
+    assert len(fake_http["calls"]) == 0
+
+
+def test_split_mode_fallback_valid_false_on_a_custom_word_is_final(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    """No CLI ever sees the learner's word in split, so the fallback's verdict is the final one: the word is rejected like the CLI's
+    would be — no quality strike, no retry ladder, no dead job."""
+    uid = make_user(seeded)
+    add_custom_words(seeded, uid, ["zzzquill"])
+    ctx = make_ctx(connect, fb_cfg("ok", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, ("lookup_word",))
+    w = dict(seeded.execute("SELECT id, is_valid_english, is_public FROM words WHERE lemma = 'zzzquill'").fetchone())
+    assert (w["is_valid_english"], w["is_public"]) == (1, 1)
+    fake_http["mode"] = "invalid_word"
+    worker.drain(ctx, ("generate_content",))
+    after = dict(seeded.execute("SELECT is_valid_english FROM words WHERE id = ?", (w["id"],)).fetchone())
+    assert after["is_valid_english"] == 0
+    assert [(r["kind"], r["status"], r["provider"]) for r in calls(seeded)][-1] == ("content", "success", "fallback")
+    assert queue.live_job(seeded, f"content:{w['id']}") is None and db.kv_get(seeded, "ai.fallback.paused_until") is None
+    assert db.kv_get(seeded, "ai.fallback.streak.invalid") in (None, "0")
+
+
+def test_split_mode_consolidation_runs_on_the_fallback(seeded, connect, frozen_clock, fb_cfg, fake_http):
+    uid = make_user(seeded)
+    for wid in seed_words(seeded, 2):
+        bank.apply_action(seeded, uid, wid, "unfamiliar", origin="browse", context="browse", now=NOW, tz="Asia/Shanghai")
+    seeded.execute("UPDATE jobs SET status = 'done', finished_at = ? WHERE type IN ('generate_content', 'generate_dance')", (NOW,))
+    from wd.ai import consolidate
+
+    job_id = consolidate.enqueue_for_user(seeded, uid, trigger="manual", now=NOW)
+    ctx = make_ctx(connect, fb_cfg("ok", ai_provider="split"), frozen_clock)
+    worker.drain(ctx, CLAUDE_TYPES)
+    assert [(r["kind"], r["status"], r["provider"]) for r in calls(seeded)] == [("consolidate", "success", "fallback")]
+    assert queue.get_job(seeded, job_id).status == "done"

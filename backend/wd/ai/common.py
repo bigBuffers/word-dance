@@ -291,6 +291,27 @@ def claude_call(
     provider, resumes_at = failover.choose(conn, cfg, kind=kind, priority=priority, now=now)
     if provider is None:
         resumes = resumes_at or to_iso(parse_iso(now) + timedelta(minutes=30))
+        prewarm = [j.id for j in jobs if int(j.priority) >= budget.PREWARM_PRIORITY]
+        if failover.mode(cfg) == "split" and prewarm and len(prewarm) < len(jobs) and not bool(getattr(cfg, "ai_fallback_prewarm", False)):
+            # mode split with the learners' provider paused: the claim (ordered by priority alone) mixed the operator's prewarm
+            # members into a learner-headed group, whose wait is the fallback's — the prewarm members leave it: to run now, alone,
+            # when claude takes them, else to the instant a pure prewarm group would wait for; only the learners' members wait here
+            others = [j.id for j in jobs if int(j.priority) < budget.PREWARM_PRIORITY]
+            taker, at = failover.choose(conn, cfg, kind=kind, priority=budget.PREWARM_PRIORITY, now=now)
+            prewarm_at = now if taker == CLAUDE else (at or to_iso(parse_iso(now) + timedelta(minutes=30)))
+            with db.maybe_tx(conn):
+                queue.defer(conn, others, resumes, now=now)
+                queue.defer(conn, prewarm, prewarm_at, now=now)
+            ctx.log.info(
+                "%s: %d learner job(s) deferred until %s (no fallback); %d prewarm job(s) requeued alone, %s",
+                kind,
+                len(others),
+                resumes,
+                len(prewarm),
+                "to run now on claude" if taker == CLAUDE else f"until {prewarm_at}",
+                extra={"job_type": job_type, "event": "ai_deferred"},
+            )
+            return None
         queue.defer(conn, ids, resumes, now=now)
         ctx.log.info("%s: %d job(s) deferred until %s (no provider available)", kind, len(ids), resumes, extra={"job_type": job_type, "event": "ai_deferred"})
         return None
@@ -466,7 +487,7 @@ def handle_failure(
         # the jobs wait for whichever provider frees first (the other one may already be serving new groups)
         pause_until = budget.provider_paused_until(conn, provider, now) or to_iso(parse_iso(now) + AUTH_PAUSE)
         other = FALLBACK if provider == CLAUDE else CLAUDE
-        other_pause = budget.provider_paused_until(conn, other, now)
+        other_pause = budget.provider_paused_until(conn, other, now) if failover.mode(ctx.cfg) == "auto" else None  # only auto lets the other provider take the group
         if other_pause is not None:
             pause_until = min(pause_until, other_pause) if other_pause > now else pause_until
         with db.maybe_tx(conn):

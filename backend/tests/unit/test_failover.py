@@ -1351,3 +1351,96 @@ def test_failback_requeue_stops_at_its_limit_and_warns(conn, settings, monkeypat
         assert failover.record_success(conn, cfg, provider="claude", kind="probe", model_used="sonnet", now=plus(71)) is True
     assert events(conn, "ai_failback")[1]["requeued_dead"] == 1
     assert not [r for r in caplog.records if getattr(r, "event", None) == "ai_failback_requeue_limit"]
+
+
+# ------------------------------------------------------------------------------------------ mode split
+def test_choose_split_mode_sends_the_learners_work_to_the_fallback_and_the_operators_to_claude(conn, settings):
+    cfg = auto_cfg(settings, ai_provider="split")
+    assert failover.mode(cfg) == "split"
+    assert failover.realtime(cfg, kind="lookup", priority=20) and failover.realtime(cfg, kind="content", priority=20) and failover.realtime(cfg, kind="consolidate", priority=20)
+    assert not failover.realtime(cfg, kind="content", priority=90) and not failover.realtime(cfg, kind="svg", priority=20) and not failover.realtime(cfg, kind="dance", priority=20)
+    assert failover.realtime(auto_cfg(settings, ai_provider="split", ai_fallback_prewarm=True), kind="content", priority=90)
+    assert not failover.realtime(auto_cfg(settings, ai_provider="split", ai_fallback_kinds=("lookup", "consolidate")), kind="content", priority=20)
+    for kind in ("lookup", "content", "consolidate"):
+        assert failover.choose(conn, cfg, kind=kind, priority=20, now=NOW) == ("fallback", None)
+    for kind, priority in (("content", 90), ("lookup", 95), ("svg", 20), ("dance", 20)):
+        assert failover.choose(conn, cfg, kind=kind, priority=priority, now=NOW) == ("claude", None)  # the operator's work
+    assert failover.choose(conn, auto_cfg(settings, ai_provider="split", ai_fallback_prewarm=True), kind="content", priority=90, now=NOW) == ("fallback", None)
+    assert failover.choose(conn, auto_cfg(settings, ai_provider="split", ai_fallback_kinds=("lookup", "consolidate")), kind="content", priority=20, now=NOW) == ("claude", None)
+    budget.set_paused_until(conn, plus(30), now=NOW)  # claude paused: the learners are unaffected, the operator's work waits
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == ("fallback", None)
+    assert failover.choose(conn, cfg, kind="content", priority=90, now=NOW) == (None, plus(30))
+    assert failover.choose(conn, cfg, kind="svg", priority=20, now=NOW) == (None, plus(30))
+    budget.set_paused_until(conn, None)
+    failover.set_fallback_paused_until(conn, plus(10), now=NOW)  # fallback paused: the learners wait for IT, never claude
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == (None, plus(10))
+    assert failover.choose(conn, cfg, kind="content", priority=20, now=NOW) == (None, plus(10))
+    assert failover.choose(conn, cfg, kind="svg", priority=20, now=NOW) == ("claude", None)
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=plus(11)) == ("fallback", None)
+    failover.set_fallback_paused_until(conn, None, now=NOW)
+    db.kv_set(conn, "ai.fallback.available", "0")
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == (None, None)  # unavailable: nothing scheduled, re-deferred every 30 min
+    db.kv_delete(conn, "ai.fallback.available")
+    db.kv_set(conn, "ai.active_provider", "fallback")  # a stale sticky state from an `auto` tour changes nothing …
+    assert failover.choose(conn, cfg, kind="svg", priority=20, now=NOW) == ("claude", None)
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == ("fallback", None)
+    assert failover.reconcile_mode(conn, cfg, now=NOW) is True and failover.active_provider(conn) == "claude"  # … and the start-up hook clears it
+    assert failover.maybe_probe(conn, cfg, now=NOW, probe_claude=lambda: pytest.fail("no fail-back probes in mode split")) is None
+
+
+def test_availability_reasons_in_split_mode(conn, settings):
+    cfg = auto_cfg(settings, ai_provider="split")
+    a = failover.availability(conn, cfg, kind="lookup", now=NOW)
+    assert (a.ok, a.provider, a.reason) == (True, "fallback", "ok")
+    assert failover.availability(conn, cfg, kind="content", now=NOW, priority=90).provider == "claude"
+    failover.set_fallback_paused_until(conn, plus(10), now=NOW)
+    a = failover.availability(conn, cfg, kind="lookup", now=NOW)
+    assert (a.ok, a.reason, a.fallback_paused_until, a.resumes_at) == (False, "fallback_paused", plus(10), plus(10))
+    assert failover.availability(conn, cfg, kind="svg", now=NOW).ok is True  # claude is free: the operator's work runs
+    failover.set_fallback_paused_until(conn, None, now=NOW)
+    db.kv_set(conn, "ai.fallback.available", "0")
+    assert failover.availability(conn, cfg, kind="lookup", now=NOW).reason == "fallback_unavailable"
+    db.kv_delete(conn, "ai.fallback.available")
+    budget.set_paused_until(conn, plus(30), now=NOW)
+    assert failover.availability(conn, cfg, kind="lookup", now=NOW).ok is True  # the learners never notice a claude pause
+    assert failover.availability(conn, cfg, kind="svg", now=NOW).reason == "claude_paused"
+    assert failover.availability(conn, cfg, kind="content", now=NOW, priority=90).reason == "claude_paused"
+
+
+def test_split_mode_never_flips_or_reruns_but_alerts_when_both_are_down(conn, settings, monkeypatch):
+    cfg = auto_cfg(settings, ai_provider="split", smoke_mock_http=False)  # the test env mocks providers, which also silences notify()
+    make_admin(conn)
+    hook = Captured().install(monkeypatch)
+    d = rf(conn, cfg, provider="claude", result=res("auth", "managed settings", provider="claude"), kind="content", now=NOW, priority=90)
+    assert d == failover.Decision("pause", plus(30), None, None)  # paused, no switch, no rerun on the fallback
+    assert failover.active_provider(conn) == "claude" and kv(conn, "ai.failover.since") is None and events(conn, "ai_failover") == []
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == ("fallback", None)  # the learners are unaffected
+    assert hook.requests == []  # the fallback is up: not "both down"
+    d = rf(conn, cfg, provider="fallback", result=res("auth", "HTTP 401", provider="fallback"), kind="lookup", now=NOW)
+    assert d == failover.Decision("pause", plus(30), None, None)  # paused, never rerun on claude
+    assert failover.choose(conn, cfg, kind="lookup", priority=20, now=NOW) == (None, plus(30))
+    assert len(hook.requests) == 1 and failover.active_provider(conn) == "claude"  # the learners' provider paused: one alert, still no flip
+    body = hook.bodies()[0]
+    assert "学习者的备用模型已暂停" in json.dumps(body, ensure_ascii=False) and "Claude 也暂停至" in json.dumps(body, ensure_ascii=False)
+    for _ in range(3):
+        d = rf(conn, cfg, provider="fallback", result=res("overloaded", "HTTP 429", provider="fallback"), kind="lookup", now=plus(31))
+    assert d.retry_provider is None and kv(conn, "ai.fallback.streak.overloaded") == "3"  # a soft threshold names nobody either
+    budget.set_paused_until(conn, None)
+    failover.set_fallback_paused_until(conn, None, now=NOW)
+    hook.requests.clear()
+    db.kv_delete(conn, "ai.notify.fallback_paused.last_at")  # past the hourly dedup
+    d = rf(conn, cfg, provider="fallback", result=res("auth", "HTTP 401", provider="fallback"), kind="lookup", now=plus(61))
+    assert d.retry_provider is None and len(hook.requests) == 1  # claude is free, yet the learners' provider is down: the alert fires anyway, no rerun
+    assert "Claude 侧的预热 / 配图 / 舞步标注不受影响" in json.dumps(hook.bodies()[0], ensure_ascii=False)
+    title, text = failover.notification_text("fallback_quality", {"consecutive": 3, "kind": "content", "paused_until": plus(30), "error": "schema: x"}, cfg)
+    assert "分流模式" in text and "切回" not in text and "不受影响" in text
+    _, text = failover.notification_text("fallback_quality", {"consecutive": 3, "kind": "content", "paused_until": plus(30), "error": "schema: x", "claude_paused_until": plus(30)}, cfg)
+    assert "Claude 也暂停至" in text
+    _, text = failover.notification_text("fallback_paused", {"reason": "not_found", "status": "spawn_error", "error": "not_found: model", "fallback_paused_until": plus(30), "fallback_unavailable": True}, cfg)
+    assert "已标记为不可用" in text and "wd ai-check --provider fallback" in text and "暂停至" not in text
+    # a configuration failure (404 / unknown model) is a hard pause AND the '0' mark: the alert names the unavailable state
+    db.kv_delete(conn, "ai.notify.fallback_paused.last_at")
+    hook.requests.clear()
+    d = rf(conn, cfg, provider="fallback", result=res("spawn_error", "not_found: model glm-x", provider="fallback"), kind="lookup", now=plus(120))
+    assert d.action == "pause" and kv(conn, "ai.fallback.available") == "0" and len(hook.requests) == 1
+    assert "已标记为不可用" in json.dumps(hook.bodies()[0], ensure_ascii=False)

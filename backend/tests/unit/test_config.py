@@ -186,7 +186,7 @@ def test_fallback_model_rename_trap():
     assert Settings.from_env({**FALLBACK_ENV, "WD_AI_FALLBACK_MODEL": "qwen3.7-flash"}).ai_fallback_model == "qwen3.7-flash"
 
 
-@pytest.mark.parametrize("mode", ["auto", "openai_http"])
+@pytest.mark.parametrize("mode", ["auto", "openai_http", "split"])
 def test_auto_and_openai_http_need_a_fully_configured_fallback(mode):
     with pytest.raises(ConfigError, match="WD_AI_FALLBACK_KIND=openai_http"):
         Settings.from_env({"WD_AI_PROVIDER": mode})
@@ -392,3 +392,16 @@ def test_openai_http_without_content_in_kinds_warns_that_content_and_svg_wait(ca
     warnings = [r.getMessage() for r in caplog.records if r.name == "wd.config" and "indefinitely" in r.getMessage()]
     assert len(warnings) == 1 and "svg" in warnings[0] and "WD_AI_FALLBACK_KINDS" in warnings[0], caplog.text
     assert _idle_kinds(warnings[0]) == {"content", "consolidate"}
+
+
+def test_split_with_a_learner_kind_removed_warns_that_learner_input_reaches_claude(caplog: pytest.LogCaptureFixture):
+    """AI_FALLBACK_MODEL §4.3 / CLAUDE_INTEGRATION §10.1: in mode split a kind outside WD_AI_FALLBACK_KINDS is the operator's work and
+    runs on the CLI — for lookup / content / consolidate that is the learners' input, the very thing the mode keeps away."""
+    with caplog.at_level(logging.WARNING, logger="wd.config"):
+        Settings.from_env({**FALLBACK_ENV, "WD_AI_PROVIDER": "split", "WD_AI_FALLBACK_KINDS": "content,consolidate"})
+    warnings = [r.getMessage() for r in caplog.records if r.name == "wd.config" and "learners' input reaches Claude" in r.getMessage()]
+    assert len(warnings) == 1 and "lookup" in warnings[0] and "WD_AI_PROVIDER=split" in warnings[0], caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="wd.config"):
+        Settings.from_env({**FALLBACK_ENV, "WD_AI_PROVIDER": "split"})
+    assert not [r for r in caplog.records if "reaches Claude" in r.getMessage()]  # the default list exposes nothing

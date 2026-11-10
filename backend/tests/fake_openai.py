@@ -16,7 +16,7 @@ repair round) · ``repairable`` (the first answer drops a key, the repair answer
 (``finish_reason: length``) · ``empty_content`` · ``sensitive`` (Zhipu ``finish_reason: sensitive`` — blocked by the safety
 filter, empty content) · ``network_error`` (Zhipu ``finish_reason: network_error`` — 模型推理异常 behind an HTTP 200) · ``401`` ·
 ``zh_401`` (Zhipu ``令牌已过期或验证不正确``) · ``402`` · ``403`` ·
-``404`` · ``404_model`` (HTTP 400, Zhipu 1211) · ``429`` (``Retry-After: 2``, Zhipu 1302) · ``429_long`` (``Retry-After: 120``)
+``404`` · ``404_model`` (HTTP 400, Zhipu 1211) · ``429`` (``Retry-After: 2``, Zhipu 1302) · ``1305`` (no Retry-After) · ``429_long`` (``Retry-After: 120``)
 · ``1308`` (429 with code 1308, ``next_flush_time`` and a ``Retry-After: 1`` the adapter must ignore) · ``503`` ·
 ``content_filter`` (400 ``data_inspection_failed``) ·
 ``network`` (raises ``httpx.ConnectError``) · ``timeout`` (raises ``httpx.ReadTimeout``). Stdlib + httpx; no sockets.
@@ -60,6 +60,7 @@ MODES: tuple[str, ...] = (
     "404",
     "404_model",
     "429",
+    "1305",
     "429_long",
     "1308",
     "503",
@@ -216,6 +217,8 @@ def error_response(mode: str) -> httpx.Response | None:
         return _json(400, {"error": {"code": "1211", "message": "模型不存在，请检查模型代码。"}})
     if mode == "429":
         return _json(429, {"error": {"code": "1302", "message": "您的账户已达到速率限制，请您控制请求频率"}}, {"Retry-After": "2"})
+    if mode == "1305":  # Zhipu's peak-hour overload: no Retry-After at all (observed 2026-11-10: ~70 % of free-tier calls at 16:45)
+        return _json(429, {"error": {"code": "1305", "message": "该模型当前访问量过大，请您稍后再试"}})
     if mode == "429_long":
         return _json(429, {"error": {"code": "1305", "message": "该模型当前访问量过大，请稍后再试"}}, {"Retry-After": "120"})
     if mode == "1308":  # the short Retry-After must NOT be slept through: the window resets at next_flush_time, not in a second

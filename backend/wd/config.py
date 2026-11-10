@@ -57,7 +57,7 @@ IMAGE_PROVIDERS = ("wikimedia", "openverse", "pixabay", "pexels")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOG_FORMATS = ("json", "text")
 # fallback provider (docs/AI_FALLBACK_MODEL.md §4.3, CLAUDE_INTEGRATION §10)
-AI_PROVIDER_MODES = ("claude_cli", "openai_http", "auto")
+AI_PROVIDER_MODES = ("claude_cli", "openai_http", "auto", "split")  # split = learner-triggered kinds on the fallback, the operator's work on the CLI
 FALLBACK_KINDS = ("none", "openai_http")
 FALLBACK_DIALECTS = ("auto", "zhipu", "bailian", "deepseek", "generic")
 FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
@@ -155,7 +155,7 @@ class Settings:
     ai_dance_daily_budget_usd: float = 0.50
     ai_log_keep_days: int = 14
     # --- fallback provider + automatic failover (docs/AI_FALLBACK_MODEL.md §4.3) --------
-    ai_provider: str = "claude_cli"  # claude_cli = today · openai_http = fallback only · auto = claude + automatic failover
+    ai_provider: str = "claude_cli"  # claude_cli = today · openai_http = fallback only · auto = claude + automatic failover · split = learners' kinds on the fallback, prewarm / svg / dance on claude
     ai_fallback_kind: str = "none"  # none | openai_http
     ai_fallback_base_url: str = ""  # e.g. https://open.bigmodel.cn/api/paas/v4
     ai_fallback_api_key: str = ""  # secret; prefer the 0600 file below
@@ -506,6 +506,17 @@ class Settings:
             # "", " ", ",", " , " … all mean the default (DEPLOY §4 "empty or blank"): an empty list has no legitimate use —
             # auto would still switch to a fallback that serves nothing, openai_http would run nothing at all
             fallback_kinds = list(FALLBACK_TASK_KINDS)
+        if ai_provider == "split":
+            # the opposite failure of the openai_http case: a kind removed from the list is the operator's work to failover.realtime
+            # and runs on the CLI — with the learners' input (a lookup's typed text, a consolidation's notes) that the mode exists to keep away
+            exposed = [k for k in FALLBACK_TASK_KINDS if k not in fallback_kinds]
+            if exposed:
+                log.warning(
+                    "WD_AI_PROVIDER=split with WD_AI_FALLBACK_KINDS=%s: learner-triggered %s jobs run on the Claude CLI — the learners' input reaches Claude; add %s back to WD_AI_FALLBACK_KINDS",
+                    ",".join(fallback_kinds),
+                    "/".join(exposed),
+                    "/".join(exposed),
+                )
         if ai_provider == "openai_http":
             # the CLI is never spawned in this mode, so a kind the operator removed from the list is never routable:
             # failover.choose answers (None, None) and common.claude_call re-defers the group every 30 minutes

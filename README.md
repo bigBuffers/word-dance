@@ -99,7 +99,7 @@ sudo systemctl stop word-dance && .venv/bin/wd restore /home/sqin/word-dance-dat
 | [`docs/ops.md`](docs/ops.md) | 运维手册：日常检查、备份与恢复、升级与回滚、配置修改、故障处理表 |
 | [`docs/qa.md`](docs/qa.md) | 手工验收索引：部署验收、真实 Claude 验收、推送渠道检查；链接前端 / 学习流程清单 `qa-frontend.md`、`qa-study.md` |
 | [`docs/TASKS.md`](docs/TASKS.md) · [`docs/P0_STATUS.md`](docs/P0_STATUS.md) | 实现工作包（文件归属、依赖关系、验收标准）与 Phase 0 验证记录 |
-| [`docs/releases/`](docs/releases/) | 发布说明，每次发布一份（有无迁移都有）：[`2026-11-k12-stages.md`](docs/releases/2026-11-k12-stages.md)——小学阶段与官方词表、阶段重编号、配图一期的变更、上线步骤、回滚与假设清单；[`2026-11-server-audio.md`](docs/releases/2026-11-server-audio.md)——服务器发音兜底（`GET /media/audio`，没有英文语音的设备也能出声） |
+| [`docs/releases/`](docs/releases/) | 发布说明，每次发布一份（有无迁移都有）：[`2026-11-k12-stages.md`](docs/releases/2026-11-k12-stages.md)——小学阶段与官方词表、阶段重编号、配图一期的变更、上线步骤、回滚与假设清单；[`2026-11-ai-split.md`](docs/releases/2026-11-ai-split.md)——AI 分流模式：学习者触发的生成走国产模型，预热等运营工作留在 Claude；[`2026-11-server-audio.md`](docs/releases/2026-11-server-audio.md)——服务器发音兜底（`GET /media/audio`，没有英文语音的设备也能出声） |
 
 ## 数据来源与许可
 

@@ -824,15 +824,20 @@ def mark_unattempted(conn: sqlite3.Connection, word_id: int, *, now: str) -> Non
 
 
 def enqueue_if_needed(
-    conn: sqlite3.Connection, word_id: int, *, priority: int, now: str, force: bool = False, cfg: Settings | None = None
+    conn: sqlite3.Connection, word_id: int, *, priority: int, now: str, force: bool = False, cfg: Settings | None = None, operator: bool = False
 ) -> int | None:
     """``generate_dance`` for a validated, unmerged word that has a rule spec (plain letters + phonetic) and no usable Claude spec
     yet; ``force`` re-annotates a word that already has one. Sets ``dance_state = 'queued'``. Nothing is queued while the dance
     sub-cap is ``0`` (the annotations are switched off — queuing would only churn skipped jobs on every bank action). A word is
     re-queued when its active spec no longer spells the display form (a later rename) or when it is ``'queued'`` without a live
-    ``dance:<id>`` job (a group that died on the worker's crash path), restoring the "queued ⇔ live job" invariant."""
+    ``dance:<id>`` job (a group that died on the worker's crash path), restoring the "queued ⇔ live job" invariant.
+    ``operator`` marks the operator's own request (``wd dance-annotate``): in AI mode ``split`` (AI_FALLBACK_MODEL §4.3) a
+    learner's action queues no Claude work — the rule dance plays until the operator annotates — so without the flag nothing is
+    queued there; the flag travels in the payload for the handler's run-time check."""
     settings = cfg if cfg is not None else get_settings()
     if settings.ai_dance_daily_budget_usd <= 0:
+        return None
+    if not operator and str(getattr(settings, "ai_provider", "") or "") == "split":
         return None
     row = conn.execute(
         "SELECT id, lemma, display, phonetic, is_valid_english, merged_into_word_id, dance_state, active_dance_id FROM words WHERE id = ?",
@@ -843,13 +848,30 @@ def enqueue_if_needed(
     if not force:
         if row["active_dance_id"] and active_spec(conn, dict(row)) is not None:
             return None  # annotated (a stale spec whose chunks no longer spell the display falls through and is redone)
-        if (row["dance_state"] or "none") == "queued" and queue.live_job(conn, f"dance:{int(row['id'])}") is not None:
-            return None  # a live job already exists
+        if (row["dance_state"] or "none") == "queued":
+            live = queue.live_job(conn, f"dance:{int(row['id'])}")
+            if live is not None:
+                if operator:  # the operator's request adopts a learner-queued job (mode split would otherwise skip it)
+                    _stamp_operator(conn, int(live.id), now)
+                    return int(live.id)
+                return None  # a live job already exists
     if spec_for(row["display"] or row["lemma"], row["phonetic"]) is None:
         return None  # phrases, abbreviations with a dot, words without a phonetic: nothing to annotate
     payload: dict[str, Any] = {"word_id": int(row["id"])}
     if force:
         payload["force"] = True
+    if operator:
+        payload["operator"] = True
     job_id = queue.enqueue(conn, DANCE_JOB, payload, dedupe_key=f"dance:{int(row['id'])}", priority=int(priority), now=now)
+    if operator:
+        _stamp_operator(conn, int(job_id), now)  # the UPSERT keeps an existing job's payload: the flag must reach it too
     conn.execute("UPDATE words SET dance_state = 'queued', updated_at = ? WHERE id = ?", (now, int(row["id"])))
     return job_id
+
+
+def _stamp_operator(conn: sqlite3.Connection, job_id: int, now: str) -> None:
+    """Marks a queued / running ``generate_dance`` job as the operator's (``payload.operator``), which mode ``split`` runs on Claude."""
+    conn.execute(
+        "UPDATE jobs SET payload_json = json_set(payload_json, '$.operator', json('true')), updated_at = ? WHERE id = ? AND status IN ('queued', 'running')",
+        (now, int(job_id)),
+    )
