@@ -10,6 +10,13 @@
   margin-bottom: var(--space-3);
 }
 
+.settings__subtitle {
+  margin: var(--space-4) 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .settings__saved {
   color: var(--good-ink);
   font-size: var(--text-sm);

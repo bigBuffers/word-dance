@@ -151,6 +151,7 @@ def test_env(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> dict[str, str]:
         "WD_SMOKE_MOCK_HTTP": "1",
         "WD_PUBLIC_URL": "",
         "WD_CONTACT_EMAIL": "tests@example.com",
+        "WD_CAPTCHA": "off",  # the image captcha in front of the public code sends; the captcha tests opt in explicitly
     }
     for k in list(os.environ):
         if k.startswith("WD_") and k not in env:

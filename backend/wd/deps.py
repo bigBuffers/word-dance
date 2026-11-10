@@ -48,6 +48,11 @@ USER_COLUMNS = (
     "created_at",
     "updated_at",
     "last_login_at",
+    "password_set_at",  # 0018 (docs/AUTH_SIGNUP_DESIGN.md §5.1): User.has_password and the password-or-code dispatch of endpoints 7 / 8
+    "account_kind",
+    "guardian_user_id",
+    "age_band",
+    "age_declared_at",
 )
 
 

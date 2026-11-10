@@ -1,17 +1,17 @@
 // Shell: TopNav + TabBar with the counters badge and the today dot (FRONTEND 2/4), bare on /study.
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MeResponse } from '@/api/endpoints';
 import type { TodayResponse } from '@/api/types';
 import { AuthProvider } from '@/auth/AuthContext';
 import { zh } from '@/i18n/zh';
-import { AppLayout, hasUngradedItems, resetTodayBadge, setTodayUngraded, useTodayUngraded } from './AppLayout';
+import { AppLayout, PASSWORD_BANNER_PREF, hasUngradedItems, resetTodayBadge, setTodayUngraded, useTodayUngraded } from './AppLayout';
 
 const ISO = '2026-10-14T00:00:00Z';
 
 const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_open: 2, attention: 1 }): MeResponse => ({
-  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, ...over },
+  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: null, ...over },
   settings: {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -33,7 +33,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
     email_verified: false,
     updated_at: ISO,
   },
-  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '' },
+  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false },
   counters,
 });
 
@@ -133,6 +133,32 @@ describe('AppLayout', () => {
     expect(await screen.findByText('study-page')).toBeTruthy();
     expect(document.querySelector('nav')).toBeNull();
     expect(document.querySelector('.app-shell--bare')).not.toBeNull();
+  });
+
+  it('asks a learner without a password to set one (dismissible), never an admin or an account with a password', async () => {
+    mockFetch({ '/api/auth/me': () => json(200, me({ has_password: false })), '/api/today': () => json(200, today(10, 10)) });
+    const first = renderShell('/today');
+    const note = await screen.findByText(zh.auth.passwordBanner);
+    expect(note).toBeTruthy();
+    expect(screen.getByRole('link', { name: zh.auth.passwordBannerAction }).getAttribute('href')).toBe('/settings');
+    fireEvent.click(within(note.closest('.app-banner') as HTMLElement).getByRole('button', { name: zh.common.close }));
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
+    expect(JSON.parse(window.localStorage.getItem(PASSWORD_BANNER_PREF) ?? '0')).toBeGreaterThan(0);
+    first.unmount();
+    window.localStorage.removeItem(PASSWORD_BANNER_PREF);
+    vi.unstubAllGlobals();
+
+    mockFetch({ '/api/auth/me': () => json(200, me({ has_password: false, role: 'admin' })), '/api/today': () => json(200, today(10, 10)) });
+    const second = renderShell('/admin');
+    await screen.findByText('admin-page');
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
+    second.unmount();
+    vi.unstubAllGlobals();
+
+    mockFetch({ '/api/auth/me': () => json(200, me()), '/api/today': () => json(200, today(10, 10)) });
+    renderShell('/today');
+    await screen.findByText('today-page');
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
   });
 
   it('exposes the today badge store to pages', () => {

@@ -233,9 +233,15 @@ def check_claude(cfg: Settings, conn: sqlite3.Connection | None) -> CheckResult:
 
 
 def check_smtp(cfg: Settings, connect: Callable[[str, int, float], None] | None = None) -> CheckResult:
+    """The e-mail channel: ``WD_MAIL_PROVIDER=smtp`` gets a TCP probe of the SMTP host; ``aliyun_dm`` (DirectMail over HTTPS with the
+    ``WD_ALIYUN_*`` key) reports the provider and the sender instead — no socket probe, the key is only read when a mail is sent."""
+    if cfg.mail_provider == "aliyun_dm":
+        if not cfg.email_configured:
+            return CheckResult("smtp", True, ["not configured (WD_MAIL_PROVIDER=aliyun_dm needs WD_ALIYUN_ACCESS_KEY_ID / WD_ALIYUN_ACCESS_KEY_SECRET_FILE / WD_SMTP_FROM) — e-mail channel off"])
+        return CheckResult("smtp", True, ["provider: aliyun_dm (DirectMail SingleSendMail over https, no socket probe)", f"from: {cfg.smtp_from}", f"key id: {cfg.aliyun_access_key_id[:4]}… (secret file {cfg.aliyun_access_key_secret_file})"])
     if not cfg.email_configured:
         return CheckResult("smtp", True, ["not configured (WD_SMTP_HOST / WD_SMTP_FROM empty) — e-mail channel off"])
-    lines = [f"host: {cfg.smtp_host}:{cfg.smtp_port} ({cfg.smtp_tls})", f"from: {cfg.smtp_from}", f"auth: {'user set' if cfg.smtp_user else 'anonymous'}"]
+    lines = ["provider: smtp", f"host: {cfg.smtp_host}:{cfg.smtp_port} ({cfg.smtp_tls})", f"from: {cfg.smtp_from}", f"auth: {'user set' if cfg.smtp_user else 'anonymous'}"]
 
     def _connect(host: str, port: int, timeout: float) -> None:
         with socket.create_connection((host, port), timeout=timeout):

@@ -185,8 +185,10 @@ export function errorMessage(e: unknown): string {
     case 'word_not_found':
     case 'batch_not_found':
       return z.notFound;
-    case 'rate_limited':
-      return z.rateLimited;
+    case 'rate_limited': {
+      const retry = e.detailNumber('retry_after_s'); // the server's window when it names one (code sends, lookups)
+      return retry !== null && retry > 0 ? z.rateLimitedIn(Math.ceil(retry)) : z.rateLimited;
+    }
     case 'internal_error':
     case 'invalid_response':
     case 'http_error':
@@ -223,6 +225,43 @@ export function errorMessage(e: unknown): string {
       return z.undoExpired;
     case 'import_too_large':
       return z.importTooLarge;
+    // sign-in by verification code (API.md §1.1, slice 1-A)
+    case 'setup_required':
+      return z.setupRequired;
+    case 'password_required':
+      return z.passwordRequired;
+    case 'admin_needs_password':
+      return z.adminNeedsPassword;
+    case 'verification_required':
+      return z.verificationRequired;
+    case 'consent_required':
+      return z.consentRequired;
+    case 'captcha_required':
+      return z.captchaRequired;
+    case 'invalid_captcha':
+      return z.invalidCaptcha;
+    case 'invalid_phone':
+      return z.invalidPhone;
+    case 'challenge_expired':
+      return z.challengeExpired;
+    case 'second_factor_required':
+      return z.secondFactorRequired;
+    case 'identity_taken':
+      return z.identityTaken;
+    case 'last_login_method':
+      return z.lastLoginMethod;
+    case 'sms_unconfigured':
+      return z.smsUnconfigured;
+    case 'sms_budget_exhausted':
+      return z.smsBudgetExhausted;
+    case 'sms_send_failed':
+      return z.smsSendFailed;
+    case 'invalid_code': {
+      const left = e.detailNumber('attempts_left'); // 0 (or absent) = the code is gone: expired, consumed by an earlier check, or its tries used up
+      return left !== null && left > 0 ? z.invalidCode(left) : z.codeExpired;
+    }
+    case 'email_send_failed':
+      return z.emailSendFailed;
     default:
       return e.message || z.server;
   }

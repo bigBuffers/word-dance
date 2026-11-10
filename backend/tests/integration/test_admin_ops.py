@@ -152,6 +152,11 @@ def test_overview_numbers(client: TestClient, seeded, admin):
     assert ai["avg_cost_per_word_7d"] == pytest.approx(0.04)
     assert isinstance(o["images"]["providers"], list) and {p["provider"] for p in o["images"]["providers"]} >= {"wikimedia", "openverse"}
     assert o["scheduler"] == {"last_tick_at": "2026-10-13T23:59:30Z", "alive": True}
+    assert o["sms"] == {"provider": "off", "sent_today": 0, "daily_cap": 200, "sent_hour": 0, "hourly_cap": 40, "registration_open": True}  # API.md 54 `sms` (WD_SMS_* defaults)
+    db.kv_set(seeded, "sms.sent.2026-10-14", "150")  # the WD_TZ day (Asia/Shanghai: 2026-10-14 at 00:00Z) and the UTC hour
+    db.kv_set(seeded, "sms.sent.2026-10-14T00", "7")
+    sms = client.get("/api/admin/overview").json()["sms"]
+    assert (sms["sent_today"], sms["sent_hour"], sms["registration_open"]) == (150, 7, False)  # 150 ≥ 70 % of 200: new-account sends paused
     recent = [e for e in o["events_24h"] if e["kind"] not in ("seed_imported", "migration")]  # the seed import and 0011 log their own events
     assert [e["kind"] for e in recent] == ["budget_daily"] and recent[0]["detail"] == {"cap_usd": 3}
 

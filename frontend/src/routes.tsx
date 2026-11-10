@@ -10,6 +10,7 @@ import { zh } from '@/i18n/zh';
 
 const LoginPage = lazy(() => import('@/pages/LoginPage'));
 const RegisterPage = lazy(() => import('@/pages/RegisterPage'));
+const ForgotPasswordPage = lazy(() => import('@/pages/ForgotPasswordPage'));
 const WelcomePage = lazy(() => import('@/pages/WelcomePage'));
 const TodayPage = lazy(() => import('@/pages/TodayPage'));
 const StudyPage = lazy(() => import('@/pages/StudyPage'));
@@ -30,6 +31,7 @@ const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 export const routePaths = {
   login: '/login',
   register: '/register',
+  forgot: '/forgot',
   welcome: '/welcome',
   home: '/',
   today: '/today',
@@ -49,6 +51,16 @@ export const routePaths = {
   admin: '/admin',
 } as const;
 
+/**
+ * The static legal pages (frontend/public/legal/*.html, served by the backend's dist mount outside the SPA): plain
+ * `<a href>` links, never `<Link>` — docs/AUTH_SIGNUP_DESIGN.md §5.2, FRONTEND §2.
+ */
+export const legalUrls = {
+  terms: '/legal/terms.html',
+  privacy: '/legal/privacy.html',
+  children: '/legal/children.html',
+} as const;
+
 function PageFallback() {
   return (
     <div className="loading-screen" role="status" aria-busy="true">
@@ -64,6 +76,7 @@ export function AppRoutes() {
         <Route element={<RequireGuest />}>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/forgot" element={<ForgotPasswordPage />} />
         </Route>
 
         <Route element={<RequireAuth />}>

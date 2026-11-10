@@ -354,6 +354,63 @@ def test_content_request_quota(client: TestClient, settings, alice):
     assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
 
 
+def test_ai_user_quota_marks_then_explicit_request_is_429(client: TestClient, settings, alice, monkeypatch):
+    """WD_AI_USER_DAILY_WORDS (CLAUDE_INTEGRATION §7): a learner's marks and the explicit 「生成例句」 share one per-account counter —
+    past the cap a mark still succeeds but queues nothing (the word stays plain ``none``: no deferral, no polling), and endpoint 30
+    answers 429 ``rate_limited``; 503 ``ai_disabled`` still wins when the kill switch is off."""
+    from dataclasses import replace
+
+    from wd.services import bank
+
+    tight = replace(settings, ai_user_daily_words=2)
+    monkeypatch.setattr(bank, "get_settings", lambda refresh=False: tight)  # the mark path reads the process settings
+    monkeypatch.setattr(client.app.state, "settings", tight)  # the route reads app.state.settings (deps.get_settings)
+    ids = [word_id(settings, x) for x in ("apple", "bank", "cat")]
+    for w in ids:
+        r = client.post(f"/api/words/{w}/mark", json={"action": "unfamiliar", "context": "browse"})
+        assert r.status_code == 200 and r.json()["status"] == "added", r.text
+    assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'") == 2
+    assert q1(settings, "SELECT content_state FROM words WHERE id = ?", (ids[2],)) == "none"  # skipped silently: the card offers 「生成例句」
+    assert q1(settings, "SELECT count FROM auth_throttle WHERE key = ?", (f"ai:user:{alice}",)) == 2
+    assert q1(settings, "SELECT COUNT(*) FROM system_events WHERE kind = 'ai_quota_user'") == 1
+    r = client.get(f"/api/words/{ids[2]}/content")
+    assert r.status_code == 200 and (r.json()["state"], r.json()["deferred_until"], r.json()["eta_s"]) == ("none", None, None)
+    r = client.post(f"/api/words/{ids[2]}/content/request")
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited", r.text
+    assert r.json()["error"]["details"]["limit"] == 2 and r.headers.get("Retry-After")
+    assert q1(settings, "SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'") == 2
+    # the kill switch is checked before the quota
+    run(settings, "INSERT INTO kv(key, value) VALUES ('claude.enabled', '0')")
+    r = client.post(f"/api/words/{ids[2]}/content/request")
+    assert r.status_code == 503 and r.json()["error"]["code"] == "ai_disabled"
+
+
+def test_content_request_consumes_the_quotas_only_when_it_enqueues(client: TestClient, settings, alice, monkeypatch):
+    """API.md 30: the per-user AI quota and the 60/day cap are read before the provider gate (429 keeps its place before 409) and
+    consumed inside the transaction that enqueues — a 409 `budget_exhausted` costs the learner nothing on either counter."""
+    from dataclasses import replace
+
+    tight = replace(settings, ai_user_daily_words=2)
+    monkeypatch.setattr(client.app.state, "settings", tight)
+    keys = (f"ai:user:{alice}", f"content_req:user:{alice}")
+    w = word_id(settings, "apple")
+    monkeypatch.setattr(budget, "can_spend", lambda conn, kind, word_count, priority, now, cfg=None, provider="claude": (False, "2026-10-14T16:05:00Z"))
+    for _ in range(3):  # three refused clicks: nothing spent
+        r = client.post(f"/api/words/{w}/content/request")
+        assert r.status_code == 409 and r.json()["error"]["code"] == "budget_exhausted"
+    assert q1(settings, "SELECT COUNT(*) FROM auth_throttle WHERE key IN (?, ?)", keys) == 0
+    assert q1(settings, "SELECT content_state FROM words WHERE id = ?", (w,)) == "none"
+    monkeypatch.setattr(budget, "can_spend", lambda conn, kind, word_count, priority, now, cfg=None, provider="claude": (True, None))
+    assert client.post(f"/api/words/{w}/content/request").status_code == 202
+    assert [q1(settings, "SELECT count FROM auth_throttle WHERE key = ?", (k,)) for k in keys] == [1, 1]  # consumed with the enqueue
+    # the 60/day cap is read before the provider gate: 429 first, and the other counter stays where it was
+    run(settings, "UPDATE auth_throttle SET count = 60 WHERE key = ?", (keys[1],))
+    monkeypatch.setattr(budget, "can_spend", lambda *a, **k: pytest.fail("the provider gate must not run after a 429"))
+    r = client.post(f"/api/words/{word_id(settings, 'bank')}/content/request")
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited" and r.json()["error"]["details"]["limit"] == 60
+    assert q1(settings, "SELECT count FROM auth_throttle WHERE key = ?", (keys[0],)) == 1
+
+
 # ------------------------------------------------------------------------------------------ visibility
 def test_visibility_rule_for_a_shared_provisional_word(client: TestClient, settings, alice):
     bob_id, bob = make_user(settings, "bob")

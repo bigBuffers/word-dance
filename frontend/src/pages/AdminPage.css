@@ -310,6 +310,11 @@
   color: var(--again-ink);
 }
 
+.admin__tag {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+
 .tag--brand {
   background: var(--brand-soft);
   color: var(--brand-ink);

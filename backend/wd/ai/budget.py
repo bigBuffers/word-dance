@@ -232,6 +232,28 @@ def event_once(conn: sqlite3.Connection, kind: str, since: str, detail: dict, *,
         return True
 
 
+def user_event_once(conn: sqlite3.Connection, kind: str, since: str, user_id: int, detail: dict, *, now: str) -> bool:
+    """:func:`event_once` scoped to one user: insert a ``system_events`` row of ``kind`` unless one whose
+    ``detail_json.user_id`` is ``user_id`` was written since ``since``; True when inserted.
+
+    ``detail`` must carry ``user_id`` (it is what the predicate reads back). Used for the per-learner AI quota
+    (``ai_quota_user``, §7): one row per user and UTC day, however many marks the cap turns away that day.
+    """
+    detail = {**detail, "user_id": int(user_id)}
+    with db.maybe_tx(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM system_events WHERE kind = ? AND created_at >= ? AND json_extract(detail_json, '$.user_id') = ? LIMIT 1",
+            (kind, since, int(user_id)),
+        ).fetchone()
+        if exists:
+            return False
+        conn.execute(
+            "INSERT INTO system_events(kind, detail_json, created_at) VALUES (?, ?, ?)",
+            (kind, json.dumps(detail, ensure_ascii=False, sort_keys=True), now),
+        )
+        return True
+
+
 # -------------------------------------------------------------------------------------- the check
 def can_spend(
     conn: sqlite3.Connection,
@@ -430,4 +452,5 @@ __all__ = [
     "spent_today",
     "svg_spent_today",
     "timeout_for",
+    "user_event_once",
 ]

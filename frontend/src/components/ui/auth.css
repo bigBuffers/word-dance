@@ -1,0 +1,273 @@
+/* Shared auth styles (FRONTEND §2 guest pages, §5.8 settings sheets): the `.auth` block of /login, /register and /forgot,
+   the `.auth__form` / `.auth__error` / `.auth__meter` pieces reused by the settings, welcome and admin sheets, and the
+   verification widgets (CodeField, PhoneField, CaptchaField). Imported by every consumer, so a page chunk is never styled
+   only because the login chunk happened to load first. Tokens from styles/tokens.css. */
+.auth {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100dvh;
+  padding-block: var(--space-6);
+}
+
+.auth__brand {
+  text-align: center;
+  margin-bottom: var(--space-5);
+}
+
+.auth__name {
+  margin: 0;
+  font-size: var(--text-2xl);
+  color: var(--brand-ink);
+  letter-spacing: -0.02em;
+}
+
+.auth__tagline {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+}
+
+.auth__title {
+  font-size: var(--text-xl);
+  margin-bottom: var(--space-4);
+}
+
+.auth__notice {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  line-height: 1.5;
+}
+
+.auth__notice a {
+  font-weight: 600;
+  margin-left: var(--space-1);
+}
+
+.auth__form {
+  display: flex;
+  flex-direction: column;
+}
+
+.auth__error {
+  margin: 0 0 var(--space-3);
+  color: var(--again-ink);
+  font-size: var(--text-sm);
+}
+
+.auth__hint {
+  margin-top: var(--space-4);
+  text-align: center;
+}
+
+.auth__lead {
+  margin: 0 0 var(--space-4);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.auth__meter {
+  display: flex;
+  gap: 4px;
+  margin-top: var(--space-1);
+}
+
+.auth__meter span {
+  flex: 1 1 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.auth__meter[data-level="1"] span:nth-child(-n + 1) {
+  background: var(--again);
+}
+
+.auth__meter[data-level="2"] span:nth-child(-n + 2) {
+  background: var(--hard);
+}
+
+.auth__meter[data-level="3"] span:nth-child(-n + 3) {
+  background: var(--good);
+}
+
+/* the three sign-in entries (Segmented) sit above the form */
+.auth__entries {
+  margin-bottom: var(--space-4);
+}
+
+/* consent line: checkbox + 「我已阅读并同意《用户协议》《隐私政策》」 */
+.auth__consent {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.auth__consent input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--brand);
+}
+
+.auth__consent a {
+  font-weight: 600;
+}
+
+/* footer links: 忘记密码 · 用户协议 · 隐私政策 */
+.auth__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+/* radio list (age band on /welcome step 0) */
+.auth__radios {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+}
+
+.auth__radio {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.auth__radio:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.auth__radio input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+
+/* ---------- PhoneField: fixed +86 prefix + 11 digits ---------- */
+.phone-field {
+  display: flex;
+  align-items: stretch;
+}
+
+.phone-field__prefix {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-right: 0;
+  border-radius: var(--radius-s) 0 0 var(--radius-s);
+  background: var(--bg-2);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.phone-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- CodeField: one 6-digit input + the send / countdown button ---------- */
+.code-field {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.code-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  letter-spacing: 0.3em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.code-field .btn {
+  flex: none;
+  min-width: 7.5em;
+}
+
+/* ---------- CaptchaField: same-origin PNG + 4 digits ---------- */
+.captcha {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.captcha input {
+  flex: 1 1 auto;
+  min-width: 0;
+  letter-spacing: 0.3em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.captcha__image {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  height: var(--tap);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--bg);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.captcha__image img {
+  display: block;
+  height: 100%;
+  width: auto;
+}
+
+.captcha__refresh {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand-ink);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.captcha__loading {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+@media (min-width: 480px) {
+  .auth__radios {
+    flex-direction: row;
+  }
+
+  .auth__radio {
+    flex: 1 1 0;
+  }
+}

@@ -65,7 +65,7 @@ def test_0012_adds_word_images_meta_columns_and_keeps_rows(settings, tmp_path: P
             "VALUES (11, 2, 'claude_svg', 'ef/ef56.svg', 1, 'ef56', 'image/svg+xml', 'superseded', 'svg-v2', 'claude-sonnet-4-5', 1, '{\"r1\": 2}')"
         )
         assert tuple(c.execute("SELECT prompt_version, model, text_free, eval_json FROM word_images WHERE id = 11").fetchone()) == ("svg-v2", "claude-sonnet-4-5", 1, '{"r1": 2}')
-        assert len(db.table_names(c)) == 26 and "word_images" in db.table_names(c)  # no table gained or lost
+        assert len(db.table_names(c)) == 28 and "word_images" in db.table_names(c)  # no table gained or lost by 0012 (0016 / 0018 add theirs on the way)
         assert db.run_migrations(c).applied == []  # idempotent: a second run has nothing to do
     finally:
         c.close()

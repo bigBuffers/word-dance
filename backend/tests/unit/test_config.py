@@ -95,6 +95,19 @@ def test_batch_size_and_concurrency_are_clamped_not_rejected():
         {"WD_AI_FAILOVER_COOLDOWN_MIN": "0"},
         {"WD_AI_FALLBACK_DIALECT": "openai"},
         {"WD_AI_FALLBACK_PREWARM": "maybe"},
+        # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2)
+        {"WD_SMS_PROVIDER": "twilio"},
+        {"WD_SMS_PROVIDER": "aliyun_verify"},  # no key id / secret file / signature
+        {"WD_MAIL_PROVIDER": "tencent_ses"},
+        {"WD_MAIL_PROVIDER": "aliyun_dm"},  # no key id / secret file / from-address
+        {"WD_CAPTCHA": "1"},
+        {"WD_SMS_DAILY_CAP": "-1"},
+        {"WD_SMS_HOURLY_CAP": "100001"},
+        {"WD_CODE_IP_HOURLY": "0"},
+        {"WD_PHONE_STALE_DAYS": "0"},
+        {"WD_PHONE_STALE_DAYS": "3651"},
+        {"WD_AI_USER_DAILY_WORDS": "-1"},
+        {"WD_AI_USER_DAILY_WORDS": "many"},
     ],
 )
 def test_invalid_values_raise_config_error(env):
@@ -392,6 +405,121 @@ def test_openai_http_without_content_in_kinds_warns_that_content_and_svg_wait(ca
     warnings = [r.getMessage() for r in caplog.records if r.name == "wd.config" and "indefinitely" in r.getMessage()]
     assert len(warnings) == 1 and "svg" in warnings[0] and "WD_AI_FALLBACK_KINDS" in warnings[0], caplog.text
     assert _idle_kinds(warnings[0]) == {"content", "consolidate"}
+
+
+# ------------------------------------------------------------- sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2, DEPLOY §4)
+def _aliyun_env(tmp_path: Path) -> dict[str, str]:
+    """A 0600 secret file plus the key id and signature — what `aliyun_verify` needs."""
+    secret = tmp_path / "aliyun.secret"
+    secret.write_text("sk-aliyun-test\n", encoding="utf-8")
+    secret.chmod(0o600)
+    return {"WD_ALIYUN_ACCESS_KEY_ID": "LTAI5t-test", "WD_ALIYUN_ACCESS_KEY_SECRET_FILE": str(secret), "WD_ALIYUN_SMS_SIGN_NAME": "速通验证"}
+
+
+def test_sign_in_by_code_defaults_keep_todays_behaviour():
+    """An upgraded .env without the new keys (install.sh appends none) behaves exactly as before 0018: no SMS, SMTP mail, captcha
+    only in front of the (not yet offered) public code sends, the design's caps, and the per-user AI quota at 80 words/day.
+    (Kept apart from test_defaults_without_environment, whose `/home/...` path assertions are Linux-only.)"""
+    cfg = Settings.from_env({})
+    assert (cfg.sms_provider, cfg.mail_provider, cfg.captcha) == ("off", "smtp", "on")
+    assert (cfg.aliyun_access_key_id, cfg.aliyun_access_key_secret_file, cfg.aliyun_sms_sign_name) == ("", "", "")
+    assert (cfg.sms_daily_cap, cfg.sms_hourly_cap, cfg.code_ip_hourly, cfg.phone_stale_days) == (200, 40, 20, 90)
+    assert cfg.ai_user_daily_words == 80
+    assert cfg.sms_configured is False and cfg.email_configured is False and cfg.registration_mode == "invite"
+
+
+def test_registration_mode_verified_is_a_choice():
+    """DEPLOY §4: `verified` joins open / invite / closed (the code sign-in creates the accounts, docs/AUTH_SIGNUP_DESIGN.md D2)."""
+    assert Settings.from_env({"WD_REGISTRATION_MODE": "verified"}).registration_mode == "verified"
+    for mode in ("open", "invite", "closed"):
+        assert Settings.from_env({"WD_REGISTRATION_MODE": mode}).registration_mode == mode
+    with pytest.raises(ConfigError, match="WD_REGISTRATION_MODE"):
+        Settings.from_env({"WD_REGISTRATION_MODE": "phone"})
+
+
+def test_sms_provider_aliyun_verify_needs_the_key_id_secret_file_and_signature(tmp_path: Path):
+    """Checked at startup like the fallback provider (a missing key would otherwise be the first learner's 503 sms_send_failed);
+    the ConfigError names the three variables; the key id is a secret for GET /api/admin/config, the file path is not."""
+    full = _aliyun_env(tmp_path)
+    with pytest.raises(ConfigError) as e:
+        Settings.from_env({"WD_SMS_PROVIDER": "aliyun_verify"})
+    assert all(name in str(e.value) for name in ("WD_SMS_PROVIDER=aliyun_verify", "WD_ALIYUN_ACCESS_KEY_ID", "WD_ALIYUN_ACCESS_KEY_SECRET_FILE", "WD_ALIYUN_SMS_SIGN_NAME"))
+    for missing in full:
+        env = {k: v for k, v in full.items() if k != missing}
+        env["WD_SMS_PROVIDER"] = "aliyun_verify"
+        with pytest.raises(ConfigError, match="WD_SMS_PROVIDER=aliyun_verify"):
+            Settings.from_env(env)
+    cfg = Settings.from_env({**full, "WD_SMS_PROVIDER": "aliyun_verify"})
+    assert cfg.sms_configured is True and cfg.sms_provider == "aliyun_verify"
+    assert (cfg.aliyun_access_key_id, cfg.aliyun_access_key_secret_file, cfg.aliyun_sms_sign_name) == ("LTAI5t-test", full["WD_ALIYUN_ACCESS_KEY_SECRET_FILE"], "速通验证")
+    entries = {e["key"]: e["value"] for e in cfg.entries()}
+    assert entries["WD_ALIYUN_ACCESS_KEY_ID"] == "***" and entries["WD_ALIYUN_ACCESS_KEY_SECRET_FILE"] == full["WD_ALIYUN_ACCESS_KEY_SECRET_FILE"]
+    assert entries["WD_SMS_PROVIDER"] == "aliyun_verify" and entries["WD_ALIYUN_SMS_SIGN_NAME"] == "速通验证"
+    # the keys alone do not switch SMS on
+    assert Settings.from_env(full).sms_configured is False and Settings.from_env(full).sms_provider == "off"
+
+
+def test_aliyun_secret_file_follows_the_key_file_rule(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """`WD_ALIYUN_ACCESS_KEY_SECRET_FILE` is validated exactly like `WD_AI_FALLBACK_API_KEY_FILE`: an existing readable regular
+    file, else a ConfigError naming the path; a group/other-readable mode only warns (`chmod 600`)."""
+    missing = tmp_path / "missing.secret"
+    with pytest.raises(ConfigError, match=re.escape(str(missing))):
+        Settings.from_env({"WD_ALIYUN_ACCESS_KEY_SECRET_FILE": str(missing)})
+    with pytest.raises(ConfigError, match="WD_ALIYUN_ACCESS_KEY_SECRET_FILE"):
+        Settings.from_env({"WD_ALIYUN_ACCESS_KEY_SECRET_FILE": str(tmp_path)})  # a directory
+    locked = tmp_path / "locked.secret"
+    locked.write_text("k\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        if os.geteuid() != 0:
+            with pytest.raises(ConfigError, match="not readable"):
+                Settings.from_env({"WD_ALIYUN_ACCESS_KEY_SECRET_FILE": str(locked)})
+    finally:
+        locked.chmod(0o600)
+    loose = tmp_path / "loose.secret"
+    loose.write_text("k\n", encoding="utf-8")
+    loose.chmod(0o644)
+    with caplog.at_level(logging.WARNING, logger="wd.config"):
+        assert Settings.from_env({"WD_ALIYUN_ACCESS_KEY_SECRET_FILE": str(loose)}).aliyun_access_key_secret_file == str(loose)
+    assert any("chmod 600" in r.getMessage() and str(loose) in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_mail_provider_aliyun_dm_needs_the_key_and_the_from_address(tmp_path: Path):
+    """`aliyun_dm` reuses the Aliyun key and `WD_SMTP_FROM` (the DirectMail sender); `email_configured` follows the provider —
+    the SMTP host is irrelevant for DirectMail and the key is irrelevant for SMTP."""
+    keys = {k: v for k, v in _aliyun_env(tmp_path).items() if k != "WD_ALIYUN_SMS_SIGN_NAME"}
+    with pytest.raises(ConfigError) as e:
+        Settings.from_env({"WD_MAIL_PROVIDER": "aliyun_dm"})
+    assert all(name in str(e.value) for name in ("WD_MAIL_PROVIDER=aliyun_dm", "WD_ALIYUN_ACCESS_KEY_ID", "WD_ALIYUN_ACCESS_KEY_SECRET_FILE", "WD_SMTP_FROM"))
+    with pytest.raises(ConfigError, match="WD_MAIL_PROVIDER=aliyun_dm"):
+        Settings.from_env({**keys, "WD_MAIL_PROVIDER": "aliyun_dm"})  # no from-address
+    with pytest.raises(ConfigError, match="WD_MAIL_PROVIDER=aliyun_dm"):
+        Settings.from_env({"WD_MAIL_PROVIDER": "aliyun_dm", "WD_SMTP_FROM": "wd@example.com", "WD_SMTP_HOST": "smtp.example.com"})  # SMTP does not stand in
+    with pytest.raises(ConfigError, match="sender address"):
+        Settings.from_env({**keys, "WD_MAIL_PROVIDER": "aliyun_dm", "WD_SMTP_FROM": "word-dance"})  # a display name without an address: the DirectMail AccountName would be empty (create_app used to crash)
+    cfg = Settings.from_env({**keys, "WD_MAIL_PROVIDER": "aliyun_dm", "WD_SMTP_FROM": "word-Dance <wd@example.com>"})
+    assert cfg.mail_provider == "aliyun_dm" and cfg.email_configured is True and cfg.smtp_host == ""
+    assert Settings.from_env({**keys, "WD_MAIL_PROVIDER": "aliyun_dm", "WD_SMTP_FROM": "wd@example.com"}).email_configured is True  # a bare address is fine
+    # smtp stays host + from, the Aliyun key does not stand in
+    assert Settings.from_env({**keys, "WD_SMTP_FROM": "wd@example.com"}).email_configured is False
+    assert Settings.from_env({"WD_SMTP_HOST": "smtp.example.com", "WD_SMTP_FROM": "wd@example.com"}).email_configured is True
+    assert Settings.from_env({**keys, "WD_SMTP_HOST": "smtp.example.com", "WD_SMTP_FROM": "wd@example.com"}).mail_provider == "smtp"
+
+
+def test_sms_caps_and_code_limits_parse_their_ranges():
+    cfg = Settings.from_env({"WD_SMS_DAILY_CAP": "0", "WD_SMS_HOURLY_CAP": "0", "WD_CODE_IP_HOURLY": "1", "WD_PHONE_STALE_DAYS": "3650", "WD_AI_USER_DAILY_WORDS": "0"})
+    assert (cfg.sms_daily_cap, cfg.sms_hourly_cap, cfg.code_ip_hourly, cfg.phone_stale_days, cfg.ai_user_daily_words) == (0, 0, 1, 3650, 0)
+    cfg = Settings.from_env({"WD_SMS_DAILY_CAP": "100000", "WD_SMS_HOURLY_CAP": "100000", "WD_CODE_IP_HOURLY": "100000", "WD_PHONE_STALE_DAYS": "1", "WD_AI_USER_DAILY_WORDS": "100000"})
+    assert (cfg.sms_daily_cap, cfg.sms_hourly_cap, cfg.code_ip_hourly, cfg.phone_stale_days, cfg.ai_user_daily_words) == (100000, 100000, 100000, 1, 100000)
+    for env in ({"WD_SMS_DAILY_CAP": "100001"}, {"WD_SMS_HOURLY_CAP": "-1"}, {"WD_CODE_IP_HOURLY": "100001"}, {"WD_PHONE_STALE_DAYS": "ninety"}, {"WD_AI_USER_DAILY_WORDS": "100001"}):
+        with pytest.raises(ConfigError, match=next(iter(env))):
+            Settings.from_env(env)
+    assert Settings.from_env({"WD_CAPTCHA": "off"}).captcha == "off" and Settings.from_env({"WD_CAPTCHA": "on"}).captcha == "on"
+    with pytest.raises(ConfigError, match="WD_CAPTCHA"):
+        Settings.from_env({"WD_CAPTCHA": "true"})
+    entries = {e["key"]: e for e in Settings.from_env({}).entries()}
+    for key, value in (("WD_SMS_PROVIDER", "off"), ("WD_MAIL_PROVIDER", "smtp"), ("WD_SMS_DAILY_CAP", "200"), ("WD_SMS_HOURLY_CAP", "40"), ("WD_CODE_IP_HOURLY", "20"), ("WD_PHONE_STALE_DAYS", "90"), ("WD_CAPTCHA", "on"), ("WD_AI_USER_DAILY_WORDS", "80")):
+        assert entries[key] == {"key": key, "value": value, "source": "default"}, key
 
 
 def test_split_with_a_learner_kind_removed_warns_that_learner_input_reaches_claude(caplog: pytest.LogCaptureFixture):

@@ -325,7 +325,14 @@ def content_request(
         return JSONResponse(status_code=200, content=body.model_dump())
     if not bank.ai_enabled(conn, cfg) or bank.ai_paused_until(conn, now, cfg=cfg, kind="content") is not None:
         raise ApiError("ai_disabled")
-    bank.check_daily_quota(conn, f"content_req:user:{uid}", bank.CONTENT_REQUESTS_DAILY_CAP, now=now)
+    # The explicit 「生成例句」 shares the learner's per-account AI quota (WD_AI_USER_DAILY_WORDS, CLAUDE_INTEGRATION §7): the
+    # button cannot bypass what the marks were refused the same UTC day. Checked before the route's own 60/day cap; 0 = unlimited.
+    # Both quotas are only READ here (429 before the provider gate, the documented 503 → 429 → 409 order) and CONSUMED inside the
+    # transaction that enqueues the job: a request the provider / budget gate turns away with 409 costs the learner nothing.
+    user_quota = int(getattr(cfg, "ai_user_daily_words", 0) or 0)
+    quotas = ([(bank.ai_user_quota_key(uid), user_quota)] if user_quota > 0 else []) + [(f"content_req:user:{uid}", bank.CONTENT_REQUESTS_DAILY_CAP)]
+    for key, limit in quotas:
+        bank.check_daily_quota(conn, key, limit, now=now, consume=False)
     provider, resumes_at = failover.choose(conn, cfg, kind="content", priority=CONTENT_REQUEST_PRIORITY, now=now)
     ok = provider is not None
     if ok:
@@ -333,6 +340,8 @@ def content_request(
     if not ok:
         raise ApiError("budget_exhausted", details={"resumes_at": resumes_at})
     with db.tx(conn):
+        for key, limit in quotas:  # re-checked and consumed under the write lock; an ApiError here rolls the whole request back
+            bank.check_daily_quota(conn, key, limit, now=now)
         job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=CONTENT_REQUEST_PRIORITY, now=now)
         conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
     body = schemas.ContentRequestResponse(job_id=job_id, state="queued")

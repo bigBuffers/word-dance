@@ -1,6 +1,8 @@
-// AdminPage — `/admin` (FRONTEND 5.8, API.md endpoints 54-74): tabs overview / users & invites / jobs /
-// AI / reports / events / config. Overview tiles show users, spend today/month vs caps, the SVG budget,
-// the word image mix (photo / claude svg / card only), queue, provider quotas, scheduler and health.
+// AdminPage — `/admin` (FRONTEND 5.8, API.md endpoints 54-74, 92-93): tabs overview / users & invites / jobs /
+// AI / reports / events / config. Overview tiles show users, spend today/month vs caps, the SVG budget, the SMS
+// counters against the WD_SMS_* caps (`AdminOverview.sms`), the word image mix (photo / claude svg / card only),
+// queue, provider quotas, scheduler and health. The users tab marks accounts without a password (`zh.admin.noPassword`)
+// and lists the disputed phone bindings (`zh.admin.disputed`, endpoint 92) with a restore action (endpoint 93).
 // Admin copy may show error codes (FRONTEND §5.8) — job types, status tags, config keys; every heading, table
 // header, form label and tile caption comes from zh.admin / zh.admin.labels.
 import { useState, type FormEvent, type ReactNode } from 'react';
@@ -8,7 +10,7 @@ import { Link } from 'react-router';
 import { errorMessage, type ApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { AdminInviteCreated, AdminUserUpdateBody, AiCallsResponse, PrewarmStage, ReportStatusFilter } from '@/api/endpoints';
-import type { AdminHealth, AdminOverview, AdminUser, AiCall, AiProvider, Job, Page, Report, SystemEvent } from '@/api/types';
+import type { AdminHealth, AdminOverview, AdminUser, AiCall, AiProvider, DisputedIdentity, Job, Page, Report, SystemEvent } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Pager, usePagedList } from '@/components/list/Pager';
 import { SearchBox } from '@/components/list/SearchBox';
@@ -26,6 +28,7 @@ import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
 import { formatDateTime } from '@/utils/date';
 import { formatBytes, formatInt, formatPercent, formatUsd, truncate } from '@/utils/format';
+import '@/components/ui/auth.css';
 import './AdminPage.css';
 
 type AdminTab = keyof typeof zh.admin.tabs;
@@ -274,6 +277,13 @@ function OverviewTab() {
         <Tile label={zh.admin.images.svgBudget} value={formatUsd(ai.svg_today_usd)} sub={`${zh.admin.cap} ${formatUsd(ai.svg_daily_budget_usd)}`} meter={{ part: ai.svg_today_usd, total: ai.svg_daily_budget_usd }} />
         <Tile label={zh.admin.queue} value={formatInt(d.jobs.queued)} sub={`${L.running} ${formatInt(d.jobs.running)} · ${L.dead} ${formatInt(d.jobs.dead)}`} tone={d.jobs.dead > 0 ? 'bad' : undefined} />
         <Tile
+          label={zh.admin.sms}
+          value={`${formatInt(d.sms.sent_today)} / ${formatInt(d.sms.daily_cap)}`}
+          sub={`${zh.admin.smsHour} ${formatInt(d.sms.sent_hour)} / ${formatInt(d.sms.hourly_cap)} · ${d.sms.registration_open ? zh.admin.smsRegistrationOpen : zh.admin.smsRegistrationClosed} · ${d.sms.provider}`}
+          meter={{ part: d.sms.sent_today, total: d.sms.daily_cap }}
+          tone={d.sms.registration_open ? undefined : 'bad'}
+        />
+        <Tile
           label={zh.admin.lastTick}
           value={d.scheduler.last_tick_at ? formatDateTime(d.scheduler.last_tick_at, tz) : '—'}
           sub={`${L.scheduler} ${d.scheduler.alive ? L.alive : L.stopped}`}
@@ -464,6 +474,7 @@ function UsersTab() {
                 <th>{L.id}</th>
                 <th>{zh.auth.username}</th>
                 <th>{zh.settings.displayName}</th>
+                <th>{L.phone}</th>
                 <th>{L.role}</th>
                 <th>{L.active}</th>
                 <th>{L.lastLogin}</th>
@@ -476,8 +487,12 @@ function UsersTab() {
               {users.items.map((u) => (
                 <tr key={u.id}>
                   <td className="num">{u.id}</td>
-                  <td>{u.username}</td>
+                  <td>
+                    {u.username}
+                    {!u.has_password && <span className="tag tag--warn admin__tag">{zh.admin.noPassword}</span>}
+                  </td>
                   <td>{u.display_name}</td>
+                  <td>{u.phone_masked ?? ''}</td>
                   <td>
                     <StatusTag status={u.role} />
                   </td>
@@ -568,6 +583,8 @@ function UsersTab() {
         )}
       </section>
 
+      <DisputedIdentities />
+
       <Sheet open={resetFor !== null} onClose={() => setResetFor(null)} title={`${zh.admin.resetPassword} · ${resetFor?.username ?? ''}`}>
         <form className="auth__form" onSubmit={submitReset}>
           <Field label={zh.settings.newPassword} hint={zh.auth.passwordHint} required>
@@ -579,6 +596,79 @@ function UsersTab() {
         </form>
       </Sheet>
     </div>
+  );
+}
+
+/** Disputed bindings (API.md 92 / 93): phone bindings a new owner disputed; restore clears `disputed_at` unless the number is live elsewhere (409 identity_taken). */
+function DisputedIdentities() {
+  const tz = useTz();
+  const toast = useToast();
+  const rows = usePagedList<DisputedIdentity, Page<DisputedIdentity>>((page, signal) => endpoints.adminDisputedIdentities(page, signal), []);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const restore = async (row: DisputedIdentity) => {
+    setBusyId(row.id);
+    try {
+      await endpoints.adminRestoreIdentity(row.id);
+      rows.setItems((prev) => prev.filter((x) => x.id !== row.id)); // no longer disputed → out of the list
+      toast.success(zh.admin.restored);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  return (
+    <section className="card admin__card" aria-labelledby="admin-disputed">
+      <h2 id="admin-disputed">{zh.admin.disputed}</h2>
+      {rows.error && <ErrorBox error={rows.error} onRetry={() => void rows.reload()} />}
+      {!rows.loading && rows.items.length === 0 ? (
+        <p className="admin__empty">{zh.common.none}</p>
+      ) : (
+        <div className="table-scroll">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>{L.id}</th>
+                <th>{L.user}</th>
+                <th>{L.phone}</th>
+                <th>{L.verifiedAt}</th>
+                <th>{L.lastLogin}</th>
+                <th>{L.disputedAt}</th>
+                <th>{L.currentHolder}</th>
+                <th>{zh.word.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.items.map((r) => (
+                <tr key={r.id}>
+                  <td className="num">{r.id}</td>
+                  <td>
+                    {r.user.display_name || r.user.username} <span className="muted">#{r.user.id}</span>
+                  </td>
+                  <td>{r.subject_masked}</td>
+                  <td>
+                    <When iso={r.verified_at} tz={tz} />
+                  </td>
+                  <td>
+                    <When iso={r.last_login_at} tz={tz} />
+                  </td>
+                  <td>
+                    <When iso={r.disputed_at} tz={tz} />
+                  </td>
+                  <td className="num">{r.current_user_id === null ? '—' : `#${r.current_user_id}`}</td>
+                  <td>
+                    <Button size="sm" disabled={busyId === r.id} onClick={() => void restore(r)}>
+                      {zh.admin.restore}
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <Pager page={rows.page} pageSize={PAGE_SIZE} total={rows.total} loading={rows.loading} onChange={rows.goTo} />
+    </section>
   );
 }
 

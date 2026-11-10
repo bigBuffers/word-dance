@@ -14,6 +14,7 @@ Rules
 from __future__ import annotations
 
 import re
+import unicodedata
 import uuid
 from typing import Any, Generic, Literal, TypeVar
 
@@ -38,7 +39,7 @@ WebhookFormat = Literal["generic", "wecom", "feishu", "serverchan", "bark"]
 WebhookTestReason = Literal["dns_failed", "host_not_public", "connect_failed", "timeout", "tls_failed", "http_error", "invalid_url"]  # API.md 17; delivery.webhook.REASONS
 Role = Literal["user", "admin"]
 OnboardingState = Literal["pending", "screen", "done"]
-RegistrationMode = Literal["open", "invite", "closed"]
+RegistrationMode = Literal["open", "invite", "closed", "verified"]  # verified = a phone / e-mail code creates the account (docs/AUTH_SIGNUP_DESIGN.md)
 WordSource = Literal["seed", "ecdict", "claude", "user"]
 BatchStatus = Literal["building", "ready", "published"]
 SuggestionType = Literal["fix_spelling", "lemmatize", "merge_duplicate", "invalid_word", "split_phrase", "confusable_group", "fill_data", "difficulty"]
@@ -50,6 +51,11 @@ AiProvider = Literal["claude", "fallback"]  # ai_calls.provider: the Claude CLI 
 DanceMode = Literal["full", "form_only", "off"]  # user_settings.dance_mode — 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = + semantic dance, form_only = spelling + stress only
 DancePrimitive = Literal["rise", "fall", "hop", "grow", "shrink", "dash", "creep", "enter", "exit", "arc", "onto", "under", "behind", "between", "split", "join", "shiver", "shimmer", "wave", "droop", "stretch", "squash", "thud", "float", "spin", "repeat", "multiply", "dim", "glow", "color"]  # the semantic dance library (WORD_DANCE_DESIGN §4.3), mirrored by dance_v1.json
 DanceColor = Literal["red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]  # the only colours the `color` primitive may name
+# sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.1; the same order as API.md §9 — check_contract diffs the unions in order)
+AgeBand = Literal["u14", "14plus", "adult"]  # users.age_band — the learner's own declaration, never verified
+AGE_BAND_U14_ZH = "未满 14 周岁的同学请由家长注册"  # endpoint 89 refuses u14 until slice 1-B brings guardian accounts
+CodeChannel = Literal["phone", "email"]  # login_codes.channel (endpoints 80, 81, 85)
+IdentityProvider = Literal["phone", "wechat_mini", "qq", "apple"]  # identities.provider — only `phone` is issued in slice 1-A
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
 # frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
@@ -60,6 +66,12 @@ STAGE_ORDER: tuple[str, ...] = ("xs", "zk", "gk", "cet4", "cet6")
 STAGE_INDEX: dict[str, int] = {"xs": 1, "zk": 2, "gk": 3, "cet4": 4, "cet6": 5}  # == STAGE_ORDER.index(s) + 1 (test_api_schemas pins it)
 STAGE_NAMES_ZH: dict[str, str] = {"xs": "小学", "zk": "初中", "gk": "高中", "cet4": "四级", "cet6": "六级"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_一-龥]{2,32}$")
+# a username that `security.normalize_phone` would read as a mainland mobile number — within USERNAME_RE (no `+`, spaces or dashes)
+# that is exactly `1…` (11 digits) with an optional `86` / `0086` prefix (test_api_schemas pins the two in step); refused
+# (API.md 2 / 89), or the login identifier of endpoint 3 would resolve a number's digits to the squatter's account first
+PHONE_LIKE_USERNAME_RE = re.compile(r"^(?:0086|86)?1\d{10}$")
+USERNAME_RULE_ZH = "用户名为 2–32 个字母、数字、下划线或汉字"
+USERNAME_PHONE_ZH = "用户名不能是手机号"
 
 
 def stage_to_index(stage: str) -> int:
@@ -131,6 +143,9 @@ class HealthResponse(Model):
     version: str
     registration_mode: RegistrationMode
     needs_setup: bool
+    sms_enabled: bool  # Settings.sms_configured — the login page shows the 手机号 entry (endpoints 80, 81)
+    email_enabled: bool  # Settings.email_configured — the 邮箱 entry
+    captcha: bool  # WD_CAPTCHA=on — the public code sends need a captcha token (endpoint 79)
     time: str
 
 
@@ -150,6 +165,10 @@ class User(Model):
     role: Role
     onboarding_state: OnboardingState
     created_at: str
+    has_password: bool  # users.password_set_at IS NOT NULL — false for a code-created account until it sets one (endpoint 89 / 7)
+    phone_masked: str | None  # the live phone identity with its middle digits hidden (`138****8000`); null without one
+    needs_profile: bool  # a code-created account that has not saved its nickname + age band yet (endpoint 89)
+    age_band: AgeBand | None  # null = not declared
 
 
 class ServerFlags(Model):
@@ -162,6 +181,7 @@ class ServerFlags(Model):
     needs_setup: bool
     audio: bool
     audio_key: str  # fingerprint of the provider + voice behind GET /media/audio (empty without a provider): the client appends it to clip URLs
+    sms_enabled: bool  # WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
 
 
 class Counters(Model):
@@ -194,6 +214,17 @@ class Settings(Model):
     updated_at: str
 
 
+def validate_username(v: str) -> str:
+    """The endpoint 2 / 89 username rule: ``USERNAME_RE`` after stripping, and never a value that reads as a mainland mobile number
+    (:data:`PHONE_LIKE_USERNAME_RE`, the digits-only subset of ``security.normalize_phone``)."""
+    v = v.strip()
+    if not USERNAME_RE.match(v):
+        raise ValueError(USERNAME_RULE_ZH)
+    if PHONE_LIKE_USERNAME_RE.match(v):
+        raise ValueError(USERNAME_PHONE_ZH)
+    return v
+
+
 class RegisterRequest(Model):
     username: str
     password: str
@@ -204,10 +235,7 @@ class RegisterRequest(Model):
     @field_validator("username")
     @classmethod
     def _username(cls, v: str) -> str:
-        v = v.strip()
-        if not USERNAME_RE.match(v):
-            raise ValueError("用户名为 2–32 个字母、数字、下划线或汉字")
-        return v
+        return validate_username(v)
 
     @field_validator("password")
     @classmethod
@@ -239,9 +267,12 @@ class RegisterRequest(Model):
 
 
 def _clean_email(v: str | None) -> str | None:
+    """The one e-mail normalisation every writer applies (NFKC, stripped, lower-cased — endpoints 2, 6, 80, 81 compare
+    ``users.email`` with a code's target, docs/AUTH_SIGNUP_DESIGN.md §5.2): ``None`` for an empty value, zh ``ValueError`` for a
+    malformed one."""
     if v is None:
         return None
-    v = v.strip()
+    v = unicodedata.normalize("NFKC", v).strip().lower()
     if not v:
         return None
     if len(v) > 254 or "@" not in v or v.startswith("@") or v.endswith("@") or " " in v:
@@ -250,7 +281,9 @@ def _clean_email(v: str | None) -> str | None:
 
 
 class LoginRequest(Model):
-    username: str = Field(min_length=1, max_length=64)
+    """Endpoint 3: ``username`` is an identifier — a username, a mainland phone number or a verified e-mail (API.md 3)."""
+
+    username: str = Field(min_length=1, max_length=254)
     password: str = Field(min_length=1, max_length=64)
 
 
@@ -290,22 +323,279 @@ class AccountUpdateRequest(Model):
         return _clean_email(v)
 
 
+def _exactly_one(first: Any, second: Any, names_zh: str) -> None:
+    """The re-authentication rule of endpoints 7 / 8 / 87: a password OR a ``reauth`` code, never both, never neither."""
+    if (first is None) == (second is None):
+        raise ValueError(f"{names_zh}必须且只能提供一个")
+
+
 class PasswordChangeRequest(Model):
-    current_password: str = Field(min_length=1, max_length=64)
+    """Endpoint 7: ``current_password`` for an account with a password, a ``reauth`` code (endpoint 85) for one without."""
+
+    current_password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
     new_password: str = Field(min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _one_factor(self) -> "PasswordChangeRequest":
+        _exactly_one(self.current_password, self.code, "当前密码和验证码")
+        return self
 
 
 class AccountDeleteRequest(Model):
-    password: str = Field(min_length=1, max_length=64)
+    """Endpoint 8: the same password-or-code dispatch as endpoint 7."""
+
+    password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _one_factor(self) -> "AccountDeleteRequest":
+        _exactly_one(self.password, self.code, "密码和验证码")
+        return self
 
 
-class RequestCodeResponse(Model):
+class CodeSendResponse(Model):
+    """Endpoints 9, 80, 82, 85, 90 — always ``sent: true``; identical for known and unknown targets (API.md §9)."""
+
     sent: bool
     expires_in_s: int
 
 
 class EmailVerifyRequest(Model):
     code: str = Field(pattern=r"^\d{6}$")
+
+
+# ---------------------------------------------- sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2; endpoints 79–91)
+def _clean_target(channel: str, target: str) -> str:
+    """A code's target as the client typed it: e-mails through :func:`_clean_email` (the same rule as endpoints 2 / 6), phone
+    numbers only stripped — ``security.normalize_phone`` turns them into E.164 and answers 400 ``invalid_phone`` otherwise."""
+    if channel == "email":
+        cleaned = _clean_email(target)
+        if cleaned is None:
+            raise ValueError("请输入邮箱")
+        return cleaned
+    target = target.strip()
+    if not target:
+        raise ValueError("请输入手机号")
+    return target
+
+
+class CaptchaChallenge(Model):
+    """Endpoint 79: ``image`` is a PNG ``data:`` URI; the client returns ``id`` / ``exp`` / ``sig`` with the digits it read."""
+
+    id: str
+    image: str
+    exp: int
+    sig: str
+    expires_in_s: int
+
+
+class CaptchaToken(Model):
+    """The captcha answer a public code send carries (endpoints 80, 90): the challenge's own ``id`` / ``exp`` / ``sig`` plus the digits."""
+
+    id: str = Field(min_length=1, max_length=64)
+    exp: int
+    sig: str = Field(min_length=1, max_length=128)
+    answer: str = Field(min_length=1, max_length=16)
+
+
+class CodeSendRequest(Model):
+    """Endpoint 80: send a ``login`` or ``reset_password`` code to a phone or an e-mail (consent required for ``login``)."""
+
+    channel: CodeChannel
+    target: str = Field(min_length=1, max_length=254)
+    purpose: Literal["login", "reset_password"]
+    consent: bool | None = None
+    captcha: CaptchaToken | None = None
+
+    @model_validator(mode="after")
+    def _target(self) -> "CodeSendRequest":
+        self.target = _clean_target(self.channel, self.target)
+        return self
+
+
+class CodeLoginRequest(Model):
+    """Endpoint 81: verify a ``login`` code — log in, create the account, or receive the stale-phone challenge."""
+
+    channel: CodeChannel
+    target: str = Field(min_length=1, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
+    invite_code: str | None = None
+
+    @field_validator("invite_code")
+    @classmethod
+    def _invite(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        return v or None
+
+    @model_validator(mode="after")
+    def _target(self) -> "CodeLoginRequest":
+        self.target = _clean_target(self.channel, self.target)
+        return self
+
+
+class StaleChallenge(Model):
+    """Endpoints 81–84: a phone identity unused for ``WD_PHONE_STALE_DAYS`` — the login answers this instead of a session."""
+
+    token: str
+    display_name_masked: str
+    since: str
+    can_password: bool
+    can_email: bool
+    email_masked: str | None
+
+
+class CodeLoginResponse(Model):
+    """Endpoint 81: ``user`` + ``settings`` when a session was issued (cookie in the same response), else the ``challenge``."""
+
+    user: User | None
+    settings: Settings | None
+    created: bool
+    challenge: StaleChallenge | None
+
+
+class ChallengeEmailRequest(Model):
+    """Endpoint 82: send the stale-phone second-factor code to the account's verified e-mail."""
+
+    token: str = Field(min_length=1, max_length=128)
+
+
+class ChallengeConfirmRequest(Model):
+    """Endpoint 83: 「这是我的账号」 — the account's password or the e-mail code of endpoint 82 (neither → 403 ``second_factor_required``)."""
+
+    token: str = Field(min_length=1, max_length=128)
+    password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+
+class ChallengeDisputeRequest(Model):
+    """Endpoint 84: 「不是我的」 — the old binding is disputed and a new account is created for the phone (mode rules apply)."""
+
+    token: str = Field(min_length=1, max_length=128)
+    invite_code: str | None = None
+
+    @field_validator("invite_code")
+    @classmethod
+    def _invite(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        return v or None
+
+
+class AccountCodeRequest(Model):
+    """Endpoint 85: a code for ``bind_phone`` (``target`` = the new number), ``rebind_phone`` (the bound number) or ``reauth``
+    (the bound phone or the verified e-mail, by ``channel``)."""
+
+    channel: CodeChannel
+    purpose: Literal["bind_phone", "rebind_phone", "reauth"]
+    target: str | None = Field(default=None, max_length=254)
+
+    @model_validator(mode="after")
+    def _target(self) -> "AccountCodeRequest":
+        if self.target is not None:
+            self.target = _clean_target(self.channel, self.target)
+        return self
+
+
+class PhoneBindRequest(Model):
+    """Endpoint 86: bind the phone a ``bind_phone`` code was sent to."""
+
+    target: str = Field(min_length=1, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class PhoneUnbindRequest(Model):
+    """Endpoint 87: unbind the phone after re-authenticating like endpoint 7 (password or ``reauth`` code)."""
+
+    password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _one_factor(self) -> "PhoneUnbindRequest":
+        _exactly_one(self.password, self.code, "密码和验证码")
+        return self
+
+
+class PhoneRebindRequest(Model):
+    """Endpoint 88: replace the bound phone — a ``rebind_phone`` code on the old number and a ``bind_phone`` code on the new one."""
+
+    code_old: str = Field(pattern=r"^\d{6}$")
+    target_new: str = Field(min_length=1, max_length=254)
+    code_new: str = Field(pattern=r"^\d{6}$")
+
+    @field_validator("target_new")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class ProfileRequest(Model):
+    """Endpoint 89: the first-time setup of a code-created account — nickname, age band (``u14`` is refused with its own message:
+    child accounts arrive in slice 1-B), an optional one-time username and an optional password."""
+
+    display_name: str
+    age_band: AgeBand
+    username: str | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def _display_name(cls, v: str) -> str:
+        v = v.strip()
+        if not 1 <= len(v) <= 32:
+            raise ValueError("昵称为 1–32 个字符")
+        return v
+
+    @field_validator("age_band")
+    @classmethod
+    def _age_band(cls, v: str) -> str:
+        if v == "u14":
+            raise ValueError(AGE_BAND_U14_ZH)  # API.md 89: 400 validation_error, details.fields.age_band carries this text
+        return v
+
+    @field_validator("username")
+    @classmethod
+    def _username(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not v.strip():
+            return None
+        return validate_username(v)
+
+
+class ForgotPasswordRequest(Model):
+    """Endpoint 90: send a ``reset_password`` code to the identifier's verified channel (always 202)."""
+
+    identifier: str = Field(min_length=1, max_length=254)
+    captcha: CaptchaToken | None = None
+
+    @field_validator("identifier")
+    @classmethod
+    def _identifier(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("请输入用户名、手机号或邮箱")
+        return v
+
+
+class ResetPasswordRequest(Model):
+    """Endpoint 91: set a new password with the reset code (every session is revoked)."""
+
+    identifier: str = Field(min_length=1, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=8, max_length=64)
+
+    @field_validator("identifier")
+    @classmethod
+    def _identifier(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("请输入用户名、手机号或邮箱")
+        return v
 
 
 ExportFormat = Literal["csv", "json"]
@@ -641,6 +931,19 @@ class DanceSpec(Model):
     marks: DanceMarks
     semantic: DanceSemantic | None
     source: Literal["rule", "claude"]
+
+
+class DemoWord(Model):
+    """One item of ``GET /api/demo`` (endpoint 77): a public word with its content, card image and dance for the login page."""
+
+    word: WordBrief
+    content: Content | None
+    image: ImageMeta
+    dance: DanceSpec | None
+
+
+class DemoResponse(Model):
+    items: list[DemoWord]
 
 
 class WordDetailWord(WordBrief):
@@ -1211,6 +1514,18 @@ class SystemEvent(Model):
     created_at: str
 
 
+class SmsUsage(Model):
+    """``AdminOverview.sms`` (API.md 54): the site-wide SMS counters against the ``WD_SMS_*`` caps (WD_TZ day / current hour);
+    ``registration_open`` = code sends for new accounts are still allowed (below 70 % of the day cap)."""
+
+    provider: str
+    sent_today: int
+    daily_cap: int
+    sent_hour: int
+    hourly_cap: int
+    registration_open: bool
+
+
 class AdminOverview(Model):
     users: AdminOverviewUsers
     words: AdminOverviewWords
@@ -1220,6 +1535,7 @@ class AdminOverview(Model):
     ai: AdminOverviewAi
     images: AdminOverviewImages
     scheduler: AdminOverviewScheduler
+    sms: SmsUsage
     events_24h: list[SystemEvent]
 
 
@@ -1263,6 +1579,26 @@ class AdminUser(User):
     last_login_at: str | None
     bank_size: int
     streak_days: int
+
+
+class DisputedIdentityUser(Model):
+    id: int
+    username: str
+    display_name: str
+
+
+class DisputedIdentity(Model):
+    """Endpoints 92 / 93: a phone binding the number's new owner disputed (``identities.disputed_at``); ``current_user_id`` is the
+    account now holding the live binding, ``subject_masked`` the number as ``138****8000``."""
+
+    id: int
+    user: DisputedIdentityUser
+    provider: IdentityProvider
+    subject_masked: str
+    verified_at: str
+    last_login_at: str | None
+    disputed_at: str
+    current_user_id: int | None
 
 
 class AdminUsersQuery(Model):
@@ -1467,7 +1803,7 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     6: (AccountUpdateRequest, UserResponse),
     7: (PasswordChangeRequest, EmptyResponse),
     8: (AccountDeleteRequest, EmptyResponse),
-    9: (None, RequestCodeResponse),
+    9: (None, CodeSendResponse),
     10: (EmailVerifyRequest, UserResponse),
     11: (None, ExportJson),
     12: (OnboardingRequest, OnboardingResponse),
@@ -1532,4 +1868,21 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     73: (None, ConfigResponse),
     74: (PushRunRequest, PushRunResponse),
     75: (ImportRequest, ImportResponse),
+    # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md; 76 /media/audio and 78 /media/demo/{id}.svg are files, not JSON)
+    77: (None, DemoResponse),
+    79: (None, CaptchaChallenge),
+    80: (CodeSendRequest, CodeSendResponse),
+    81: (CodeLoginRequest, CodeLoginResponse),
+    82: (ChallengeEmailRequest, CodeSendResponse),
+    83: (ChallengeConfirmRequest, AuthResponse),
+    84: (ChallengeDisputeRequest, AuthResponse),
+    85: (AccountCodeRequest, CodeSendResponse),
+    86: (PhoneBindRequest, UserResponse),
+    87: (PhoneUnbindRequest, UserResponse),
+    88: (PhoneRebindRequest, UserResponse),
+    89: (ProfileRequest, UserResponse),
+    90: (ForgotPasswordRequest, CodeSendResponse),
+    91: (ResetPasswordRequest, EmptyResponse),
+    92: (PageQuery, Page[DisputedIdentity]),
+    93: (None, DisputedIdentity),
 }

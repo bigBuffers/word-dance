@@ -21,8 +21,8 @@ def test_every_model_forbids_extra_fields():
 
 
 def test_endpoint_catalogue_covers_api_md_section_2():
-    # endpoint 4 (logout → 204), 52/53 (media files) have no JSON body; every other number 1..75 is present
-    expected = set(range(1, 76)) - {4, 52, 53}
+    # endpoint 4 (logout → 204), 52/53/76/78 (media files) have no JSON body; every other number 1..93 is present
+    expected = set(range(1, 94)) - {4, 52, 53, 76, 78}
     assert set(ENDPOINT_MODELS) == expected
     for num, (req, resp) in ENDPOINT_MODELS.items():
         assert resp is not None and issubclass(resp, BaseModel), num
@@ -79,9 +79,72 @@ def test_stage_literals_accept_xs_and_reject_unknown_codes():
 def test_register_request_validation():
     ok = schemas.RegisterRequest(username="张三_01", password="12345678", display_name=" 小张 ", email=" a@b.cn ", invite_code="")
     assert ok.display_name == "小张" and ok.email == "a@b.cn" and ok.invite_code is None
+    assert schemas.RegisterRequest(username="alice", password="12345678", email=" Alice@QQ.com ").email == "alice@qq.com"  # NFKC + lower (API.md 2 / 6 / 80)
     for bad in ({"username": "a", "password": "12345678"}, {"username": "alice", "password": "short"}, {"username": "al ice", "password": "12345678"}, {"username": "alice", "password": "12345678", "email": "nope"}, {"username": "alice", "password": "12345678", "role": "admin"}):
         with pytest.raises(ValidationError):
             schemas.RegisterRequest(**bad)
+
+
+def test_reauthentication_bodies_take_exactly_one_factor():
+    """API.md 7 / 8 / 87: a password OR a `reauth` code (endpoint 85), never both, never neither — the code is the only factor an
+    account created by a verification code (`has_password` false) can offer."""
+    assert schemas.PasswordChangeRequest(current_password="old", new_password="12345678").code is None
+    assert schemas.PasswordChangeRequest(code="123456", new_password="12345678").current_password is None
+    assert schemas.AccountDeleteRequest(password="p").code is None and schemas.AccountDeleteRequest(code="123456").password is None
+    assert schemas.PhoneUnbindRequest(code="123456").password is None
+    for model, bad in (
+        (schemas.PasswordChangeRequest, {"new_password": "12345678"}),
+        (schemas.PasswordChangeRequest, {"current_password": "old", "code": "123456", "new_password": "12345678"}),
+        (schemas.PasswordChangeRequest, {"code": "12345", "new_password": "12345678"}),
+        (schemas.AccountDeleteRequest, {}),
+        (schemas.AccountDeleteRequest, {"password": "p", "code": "123456"}),
+        (schemas.PhoneUnbindRequest, {}),
+        (schemas.PhoneUnbindRequest, {"password": "p", "code": "123456"}),
+    ):
+        with pytest.raises(ValidationError):
+            model(**bad)
+
+
+def test_verification_code_bodies_normalise_their_targets():
+    """API.md §3.1: an e-mail target follows the endpoint 2 rule (NFKC, trimmed, lower-cased; malformed → 400), a phone target is only
+    stripped here (`security.normalize_phone` makes it E.164 and answers `invalid_phone`); codes are exactly 6 digits."""
+    assert schemas.CodeSendRequest(channel="email", target=" Alice@QQ.com ", purpose="login", consent=True).target == "alice@qq.com"
+    assert schemas.CodeSendRequest(channel="phone", target=" 138 0013 8000 ", purpose="reset_password").target == "138 0013 8000"
+    assert schemas.CodeLoginRequest(channel="phone", target="13800138000", code="123456", invite_code=" ").invite_code is None
+    assert schemas.AccountCodeRequest(channel="phone", purpose="rebind_phone").target is None
+    assert schemas.PhoneRebindRequest(code_old="111111", target_new=" 13800138000 ", code_new="222222").target_new == "13800138000"
+    assert schemas.ForgotPasswordRequest(identifier=" alice ").identifier == "alice"
+    assert schemas.ResetPasswordRequest(identifier="alice", code="123456", new_password="12345678").code == "123456"
+    assert schemas.LoginRequest(username="a" * 254, password="p").username == "a" * 254  # an identifier: username, phone or e-mail
+    for model, bad in (
+        (schemas.CodeSendRequest, {"channel": "email", "target": "nope", "purpose": "login"}),
+        (schemas.CodeSendRequest, {"channel": "phone", "target": "   ", "purpose": "login"}),
+        (schemas.CodeSendRequest, {"channel": "phone", "target": "13800138000", "purpose": "bind_phone"}),
+        (schemas.CodeLoginRequest, {"channel": "phone", "target": "13800138000", "code": "12345"}),
+        (schemas.AccountCodeRequest, {"channel": "phone", "purpose": "login"}),
+        (schemas.PhoneBindRequest, {"target": "13800138000", "code": "abcdef"}),
+        (schemas.ForgotPasswordRequest, {"identifier": "  "}),
+        (schemas.LoginRequest, {"username": "a" * 255, "password": "p"}),
+    ):
+        with pytest.raises(ValidationError):
+            model(**bad)
+
+
+def test_profile_request_refuses_children_and_keeps_the_username_rule():
+    """API.md 89: age band `14plus` / `adult` only (child accounts arrive in slice 1-B); nickname 1–32 after trimming; the optional
+    username follows the endpoint 2 rule."""
+    ok = schemas.ProfileRequest(display_name=" 小明 ", age_band="adult", username=" ming_01 ")
+    assert (ok.display_name, ok.username, ok.password) == ("小明", "ming_01", None)
+    assert schemas.ProfileRequest(display_name="x", age_band="14plus", username="").username is None
+    for bad in (
+        {"display_name": "x", "age_band": "u14"},
+        {"display_name": "   ", "age_band": "adult"},
+        {"display_name": "x" * 33, "age_band": "adult"},
+        {"display_name": "x", "age_band": "adult", "username": "a"},
+        {"display_name": "x", "age_band": "adult", "password": "short"},
+    ):
+        with pytest.raises(ValidationError):
+            schemas.ProfileRequest(**bad)
 
 
 def test_onboarding_and_settings_cross_field_rules():
@@ -165,3 +228,48 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.DanceSpec.model_fields) == {"version", "letters", "stress", "marks", "semantic", "source"} and set(schemas.DanceMarks.model_fields) == {"double", "silent"}
     assert set(schemas.DanceSemantic.model_fields) == {"primitive", "params"} and set(schemas.DanceParams.model_fields) == {"n", "color"}
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}
+    # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md; API.md §9)
+    assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band"}
+    assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "sms_enabled"}
+    assert set(schemas.HealthResponse.model_fields) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "time"}
+    assert set(schemas.StaleChallenge.model_fields) == {"token", "display_name_masked", "since", "can_password", "can_email", "email_masked"}
+    assert set(schemas.CodeLoginResponse.model_fields) == {"user", "settings", "created", "challenge"}
+    assert set(schemas.SmsUsage.model_fields) == {"provider", "sent_today", "daily_cap", "sent_hour", "hourly_cap", "registration_open"} and "sms" in schemas.AdminOverview.model_fields
+    assert list(typing.get_args(schemas.RegistrationMode)) == ["open", "invite", "closed", "verified"]
+    assert list(typing.get_args(schemas.AgeBand)) == ["u14", "14plus", "adult"] and list(typing.get_args(schemas.CodeChannel)) == ["phone", "email"]
+    assert list(typing.get_args(schemas.IdentityProvider)) == ["phone", "wechat_mini", "qq", "apple"]
+    assert ENDPOINT_MODELS[9] == (None, schemas.CodeSendResponse) and not hasattr(schemas, "RequestCodeResponse")  # endpoint 9 renamed everywhere (PLAN §6); the alias is gone
+
+
+def test_username_validators_refuse_phone_numbers_in_step_with_normalize_phone():
+    """API.md 2 / 89: a username that `security.normalize_phone` reads as a mainland mobile number is refused — such a name would
+    shadow the number's own identity in the endpoint 3 lookup. The schema regex is the digits-only subset of normalize_phone (a
+    username has no `+`, spaces or dashes), pinned here against the function itself."""
+    from wd import security
+
+    for raw in ("13800138000", "8613800138000", "008613800138000"):
+        assert security.normalize_phone(raw) == "+8613800138000"
+        with pytest.raises(ValidationError, match="用户名不能是手机号"):
+            schemas.RegisterRequest(username=raw, password="Correct-Horse-7")
+        with pytest.raises(ValidationError, match="用户名不能是手机号"):
+            schemas.ProfileRequest(display_name="小明", age_band="adult", username=raw)
+    for raw in ("0013800138000", "1380013800", "138001380001", "23800138000", "86138001380", "u_13800138000"):  # not numbers to normalize_phone either
+        assert security.normalize_phone(raw) is None
+        assert schemas.RegisterRequest(username=raw, password="Correct-Horse-7").username == raw
+        assert schemas.ProfileRequest(display_name="小明", age_band="adult", username=raw).username == raw
+    for digits in ("13800138000", "8613800138000", "008613800138000", "0013800138000", "1380013800", "138001380001", "23800138000", "861380013800012", "12345678901"):
+        assert bool(schemas.PHONE_LIKE_USERNAME_RE.match(digits)) == (security.normalize_phone(digits) is not None), digits
+    with pytest.raises(ValidationError, match="用户名为 2–32"):
+        schemas.RegisterRequest(username="a b", password="Correct-Horse-7")
+
+
+def test_profile_request_age_band_refuses_u14_with_its_own_message():
+    """API.md 89: `u14` → 400 validation_error whose `details.fields.age_band` is 「未满 14 周岁的同学请由家长注册」 (slice 1-B brings
+    guardian accounts); the other two bands pass, an unknown value is a plain literal error."""
+    with pytest.raises(ValidationError, match="未满 14 周岁的同学请由家长注册"):
+        schemas.ProfileRequest(display_name="小明", age_band="u14")
+    assert schemas.ProfileRequest(display_name="小明", age_band="14plus").age_band == "14plus" and schemas.ProfileRequest(display_name="小明", age_band="adult").age_band == "adult"
+    with pytest.raises(ValidationError) as e:
+        schemas.ProfileRequest(display_name="小明", age_band="grown")
+    assert e.value.errors()[0]["type"] == "literal_error"
+    assert schemas.AGE_BAND_U14_ZH == "未满 14 周岁的同学请由家长注册"

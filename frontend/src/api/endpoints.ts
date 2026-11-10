@@ -1,8 +1,8 @@
-// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–75).
-// FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded by `// #N METHOD /path` so coverage is
-// checked mechanically by endpoints.test.ts. DTOs come from ./types (API.md §9); request bodies and
-// query shapes that API.md defines only in prose are declared here. GET wrappers accept an optional
-// `AbortSignal` as their last argument so `useApi` can cancel stale requests.
+// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–93; 76 `GET /media/audio`
+// builds its URLs in audio/serverAudio.ts and has no wrapper). FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded
+// by `// #N METHOD /path` so coverage is checked mechanically by endpoints.test.ts (52 / 53 / 78 are URL builders for
+// `<img>`). DTOs come from ./types (API.md §9); request bodies and query shapes that API.md defines only in prose are
+// declared here. GET wrappers accept an optional `AbortSignal` as their last argument so `useApi` can cancel stale requests.
 import { api, requestText } from './client';
 import type {
   AddResponse,
@@ -10,13 +10,20 @@ import type {
   AdminHealth,
   AdminOverview,
   AdminUser,
+  AgeBand,
   AiCall,
   AiProvider,
   BankResponse,
+  CaptchaChallenge,
+  CodeChannel,
+  CodeLoginResponse,
+  CodeSendResponse,
   Content,
   ContentState,
   Counters,
   DayStats,
+  DemoResponse,
+  DisputedIdentity,
   Grade,
   GradeResponse,
   ImageMeta,
@@ -54,12 +61,19 @@ import type {
 // Shapes defined in API.md prose (§3–§8), not in the §9 DTO block
 // ---------------------------------------------------------------------------------------------------
 
-/** Endpoint 1. `status:'degraded'` comes with HTTP 503 (thrown as ApiError), so a resolved value is always `ok`. */
+/**
+ * Endpoint 1. `status:'degraded'` comes with HTTP 503 (thrown as ApiError), so a resolved value is always `ok`.
+ * `sms_enabled` / `email_enabled` decide which code sign-in entries the login page offers (API.md §3.1), `captcha` whether
+ * a public code send (80, 90) must carry a `CaptchaToken` from endpoint 79.
+ */
 export interface HealthResponse {
   status: 'ok' | 'degraded';
   version: string;
   registration_mode: ServerFlags['registration_mode'];
   needs_setup: boolean;
+  sms_enabled: boolean;
+  email_enabled: boolean;
+  captcha: boolean;
   time: string;
 }
 export interface RegisterBody {
@@ -87,13 +101,87 @@ export interface AccountUpdateBody {
   display_name?: string | null;
   email?: string | null;
 }
+/** Endpoint 7: exactly one of `current_password` (an account with `has_password`) / `code` (a `reauth` code of endpoint 85). */
 export interface PasswordChangeBody {
-  current_password: string;
+  current_password?: string;
+  code?: string;
   new_password: string;
 }
-export interface EmailCodeResponse {
-  sent: true;
-  expires_in_s: number;
+/** Endpoint 8 — the same one-of dispatch as endpoint 7. */
+export interface AccountDeleteBody {
+  password?: string;
+  code?: string;
+}
+/** Endpoint 79's challenge handed back with the digits the learner read (endpoints 80, 90). */
+export interface CaptchaToken {
+  id: string;
+  exp: number;
+  sig: string;
+  answer: string;
+}
+/** Endpoint 80. `consent` must be true for `purpose:'login'` (400 `consent_required`). */
+export interface CodeSendBody {
+  channel: CodeChannel;
+  target: string;
+  purpose: 'login' | 'reset_password';
+  consent?: boolean;
+  captcha?: CaptchaToken;
+}
+/** Endpoint 81 — `invite_code` is required in `invite` mode for a new account, optional in `open` / `verified`. */
+export interface CodeLoginBody {
+  channel: CodeChannel;
+  target: string;
+  code: string;
+  invite_code?: string;
+}
+export interface ChallengeEmailBody {
+  token: string;
+}
+/** Endpoint 83: exactly one of `password` / `code` (the e-mail code of endpoint 82). */
+export interface ChallengeConfirmBody {
+  token: string;
+  password?: string;
+  code?: string;
+}
+export interface ChallengeDisputeBody {
+  token: string;
+  invite_code?: string;
+}
+/** Endpoint 85. `target` only for `bind_phone` (the new number); `rebind_phone` / `reauth` go to the bound channel. */
+export interface AccountCodeBody {
+  channel: CodeChannel;
+  purpose: 'bind_phone' | 'rebind_phone' | 'reauth';
+  target?: string;
+}
+export interface PhoneBindBody {
+  target: string;
+  code: string;
+}
+/** Endpoint 87: exactly one of `password` / `code` (a `reauth` code of endpoint 85). */
+export interface PhoneUnbindBody {
+  password?: string;
+  code?: string;
+}
+export interface PhoneRebindBody {
+  code_old: string;
+  target_new: string;
+  code_new: string;
+}
+/** Endpoint 89 — the first-time setup of a code-created account (`User.needs_profile`); `u14` is refused by the server. */
+export interface ProfileBody {
+  display_name: string;
+  age_band: Exclude<AgeBand, 'u14'>;
+  username?: string;
+  password?: string;
+}
+export interface ForgotPasswordBody {
+  identifier: string;
+  captcha?: CaptchaToken;
+}
+export interface ResetPasswordBody {
+  identifier: string;
+  code: string;
+  new_password: string;
 }
 export type ExportFormat = 'csv' | 'json';
 export interface OnboardingBody {
@@ -383,9 +471,9 @@ export const updateAccount = (body: AccountUpdateBody) => api.put<{ user: User }
 // #7 POST /api/account/password
 export const changePassword = (body: PasswordChangeBody) => api.post<void>('/api/account/password', body);
 // #8 DELETE /api/account
-export const deleteAccount = (password: string) => api.delete<void>('/api/account', { password });
+export const deleteAccount = (body: AccountDeleteBody) => api.delete<void>('/api/account', body);
 // #9 POST /api/account/email/request-code
-export const requestEmailCode = () => api.post<EmailCodeResponse>('/api/account/email/request-code');
+export const requestEmailCode = () => api.post<CodeSendResponse>('/api/account/email/request-code');
 // #10 POST /api/account/email/verify
 export const verifyEmail = (code: string) => api.post<{ user: User }>('/api/account/email/verify', { code });
 // #11 GET /api/account/export — returns the file body as text (`word-dance-export-YYYYMMDD.csv|json`)
@@ -397,6 +485,41 @@ export const exportAccountUrl = (format: ExportFormat) => `/api/account/export?f
 export const saveOnboarding = (body: OnboardingBody) => api.post<OnboardingResponse>('/api/onboarding', body);
 // #13 POST /api/onboarding/complete
 export const completeOnboarding = () => api.post<OnboardingCompleteResponse>('/api/onboarding/complete');
+
+// ---------------------------------------------------------------------------------------------------
+// §3.1 Sign-in by verification code (slice 1-A, docs/AUTH_SIGNUP_DESIGN.md §5.2) — public unless noted
+// ---------------------------------------------------------------------------------------------------
+
+// #77 GET /api/demo
+export const getDemo = (signal?: AbortSignal) => api.get<DemoResponse>('/api/demo', undefined, signal);
+// #78 GET /media/demo/{word_id}.svg — the demo word's card (public, allow-listed ids only; loaded by <img>)
+export const demoCardUrl = (wordId: number) => `/media/demo/${seg(wordId)}.svg`;
+// #79 GET /api/auth/captcha
+export const getCaptcha = (signal?: AbortSignal) => api.get<CaptchaChallenge>('/api/auth/captcha', undefined, signal);
+// #80 POST /api/auth/code
+export const sendCode = (body: CodeSendBody) => api.post<CodeSendResponse>('/api/auth/code', body);
+// #81 POST /api/auth/code/login
+export const loginWithCode = (body: CodeLoginBody) => api.post<CodeLoginResponse>('/api/auth/code/login', body);
+// #82 POST /api/auth/challenge/email
+export const challengeEmail = (body: ChallengeEmailBody) => api.post<CodeSendResponse>('/api/auth/challenge/email', body);
+// #83 POST /api/auth/challenge/confirm
+export const challengeConfirm = (body: ChallengeConfirmBody) => api.post<AuthResponse>('/api/auth/challenge/confirm', body);
+// #84 POST /api/auth/challenge/dispute
+export const challengeDispute = (body: ChallengeDisputeBody) => api.post<AuthResponse>('/api/auth/challenge/dispute', body);
+// #85 POST /api/account/code
+export const requestAccountCode = (body: AccountCodeBody) => api.post<CodeSendResponse>('/api/account/code', body);
+// #86 POST /api/account/identities/phone
+export const bindPhone = (body: PhoneBindBody) => api.post<{ user: User }>('/api/account/identities/phone', body);
+// #87 DELETE /api/account/identities/phone
+export const unbindPhone = (body: PhoneUnbindBody) => api.delete<{ user: User }>('/api/account/identities/phone', body);
+// #88 POST /api/account/identities/phone/rebind
+export const rebindPhone = (body: PhoneRebindBody) => api.post<{ user: User }>('/api/account/identities/phone/rebind', body);
+// #89 POST /api/account/profile
+export const saveProfile = (body: ProfileBody) => api.post<{ user: User }>('/api/account/profile', body);
+// #90 POST /api/auth/password/forgot
+export const forgotPassword = (body: ForgotPasswordBody) => api.post<CodeSendResponse>('/api/auth/password/forgot', body);
+// #91 POST /api/auth/password/reset
+export const resetPassword = (body: ResetPasswordBody) => api.post<void>('/api/auth/password/reset', body);
 
 // ---------------------------------------------------------------------------------------------------
 // §4 Settings
@@ -548,6 +671,10 @@ export const adminEvents = (page = 1, signal?: AbortSignal) => api.get<Page<Syst
 export const adminConfig = (signal?: AbortSignal) => api.get<AdminConfigResponse>('/api/admin/config', undefined, signal);
 // #74 POST /api/admin/push/run
 export const adminPushRun = (userId: number) => api.post<AdminPushRunResponse>('/api/admin/push/run', { user_id: userId });
+// #92 GET /api/admin/identities/disputed
+export const adminDisputedIdentities = (page = 1, signal?: AbortSignal) => api.get<Page<DisputedIdentity>>('/api/admin/identities/disputed', { page }, signal);
+// #93 POST /api/admin/identities/{id}/restore
+export const adminRestoreIdentity = (identityId: number) => api.post<DisputedIdentity>(`/api/admin/identities/${seg(identityId)}/restore`);
 
 // ---------------------------------------------------------------------------------------------------
 // §6 (cont.) Import — catalogue entry 75

@@ -14,8 +14,10 @@ import SettingsPage, { buildImportBody, toggleStageSetting, webhookFailureReason
 
 const HOOK = 'https://hooks.example.com/x';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const user: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z' };
-const server = { version: '0.1.0', registration_mode: 'open', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false };
+const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null };
+let user: User = baseUser;
+const baseServer = { version: '0.1.0', registration_mode: 'open', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false };
+let server = baseServer;
 
 let settings: Settings;
 let calls: { method: string; path: string; body: unknown; status: number }[];
@@ -48,6 +50,24 @@ function installFetch() {
         return respond(200, webhookTestResponse);
       }
       if (method === 'POST' && path === '/api/settings/email/test') return respond(202, { queued: true });
+      // login methods (API.md 85-88): the code sends answer 202, bind / rebind / unbind answer the updated user
+      if (method === 'POST' && path === '/api/account/code') return respond(202, { sent: true, expires_in_s: 600 });
+      if (method === 'POST' && path === '/api/account/identities/phone') {
+        user = { ...user, phone_masked: '138****8000' };
+        return respond(200, { user });
+      }
+      if (method === 'DELETE' && path === '/api/account/identities/phone') {
+        if (!user.has_password && !(user.email && user.email_verified)) return respond(409, { error: { code: 'last_login_method', message: '' } });
+        user = { ...user, phone_masked: null };
+        return respond(200, { user });
+      }
+      if (method === 'POST' && path === '/api/account/identities/phone/rebind') {
+        user = { ...user, phone_masked: '139****9000' };
+        return respond(200, { user });
+      }
+      if (method === 'DELETE' && path === '/api/account') return respond(204, undefined);
+      if (method === 'POST' && path === '/api/auth/logout') return respond(204, undefined);
+      if (method === 'GET' && path === '/api/health') return respond(200, { status: 'ok', version: '0.1.0', registration_mode: 'open', needs_setup: false, sms_enabled: true, email_enabled: true, captcha: false, time: '2026-10-14T00:00:00Z' });
       return respond(404, { error: { code: 'not_found', message: '' } });
     }),
   );
@@ -60,6 +80,7 @@ function renderSettings() {
         <AuthProvider>
           <Routes>
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/login" element={<div>login-page</div>} />
           </Routes>
         </AuthProvider>
       </ToastProvider>
@@ -72,6 +93,8 @@ const testButton = () => screen.getByRole('button', { name: zh.settings.webhookT
 describe('in a browser (no native shell)', () => {
   beforeEach(() => {
     calls = [];
+    user = baseUser;
+    server = baseServer;
     settings = {
       stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
       webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
@@ -106,6 +129,8 @@ const enableWebhook = async () => {
 describe('push settings test buttons', () => {
   beforeEach(() => {
     calls = [];
+    user = baseUser;
+    server = baseServer;
     webhookTestResponse = { ok: true, http_status: 200, error: null, reason: null };
     settings = {
       timezone: 'Asia/Shanghai',
@@ -250,6 +275,8 @@ describe('toggleStageSetting', () => {
 describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
   beforeEach(() => {
     calls = [];
+    user = baseUser;
+    server = baseServer;
     settings = {
       timezone: 'Asia/Shanghai',
       push_time: '08:00',
@@ -293,5 +320,183 @@ describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
     await waitFor(() => expect(radio(zh.settings.danceModes.off).getAttribute('aria-checked')).toBe('true'));
     fireEvent.click(radio(zh.settings.danceModes.full));
     await waitFor(() => expect(settings.dance_mode).toBe('full'));
+  });
+});
+
+describe('account - login methods (FRONTEND 5.8, API.md 85-88, 7 / 8 with a code)', () => {
+  const minimalSettings = () =>
+    ({
+      stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
+      webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+    }) as unknown as Settings;
+  beforeEach(() => {
+    calls = [];
+    settings = minimalSettings();
+    user = baseUser;
+    server = { ...baseServer, sms_enabled: true };
+    installFetch();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const dialogOf = (title: string) => screen.getByRole('heading', { name: title }).closest('dialog') as HTMLDialogElement;
+  /** The send button of the `CodeField` labelled `label` inside `scope` (two code fields share one sheet in the rebind flow). */
+  const codeSendButton = (scope: HTMLElement, label: string) =>
+    within(within(scope).getByLabelText(new RegExp(`^${label}`), { selector: 'input' }).closest('.code-field') as HTMLElement).getByRole('button') as HTMLButtonElement;
+
+  it('without SMS on the server the phone row is absent; with it, bind sends a bind_phone code to the new number and binds it', async () => {
+    server = baseServer;
+    const first = renderSettings();
+    await screen.findByText(zh.settings.loginMethods);
+    expect(screen.queryByText(zh.settings.unbound)).toBeNull(); // no phone row (the closed sheets are inaccessible)
+    expect(screen.queryByRole('button', { name: zh.settings.bind })).toBeNull();
+    expect(screen.getByRole('button', { name: zh.settings.changePassword })).toBeTruthy(); // has_password → change, not set
+    expect(screen.getByText('alice', { selector: '.muted' })).toBeTruthy(); // the read-only username
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    server = { ...baseServer, sms_enabled: true };
+    installFetch();
+    renderSettings();
+    expect(await screen.findByText(zh.settings.unbound)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: zh.settings.bind }));
+    const sheet = dialogOf(zh.settings.bindPhone);
+    const send = within(sheet).getByRole('button', { name: zh.auth.sendCode }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.phone}`)), { target: { value: '13800138000' } });
+    expect(send.disabled).toBe(false);
+    fireEvent.click(send);
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'phone', purpose: 'bind_phone', target: '+8613800138000' }]));
+    expect(await within(sheet).findByRole('button', { name: zh.auth.resendIn(60) })).toBeTruthy();
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.code}`)), { target: { value: '123456' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.settings.bind }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/identities/phone').map((c) => c.body)).toEqual([{ target: '+8613800138000', code: '123456' }]));
+    expect(await screen.findByText('138****8000')).toBeTruthy();
+    expect(screen.getByRole('button', { name: zh.settings.rebind })).toBeTruthy();
+    expect(screen.getByRole('button', { name: zh.settings.unbind })).toBeTruthy();
+  });
+
+  it('unbind re-authenticates with the password (DELETE /api/account/identities/phone {password}) and the row returns to unbound', async () => {
+    user = { ...baseUser, phone_masked: '138****8000' };
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.unbind }));
+    const sheet = dialogOf(zh.settings.unbindPhone);
+    expect(within(sheet).getByText(zh.settings.unbindHint)).toBeTruthy();
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.password}`)), { target: { value: 'secret123' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.settings.unbind }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE').map((c) => [c.path, c.body])).toEqual([['/api/account/identities/phone', { password: 'secret123' }]]));
+    expect(await screen.findByText(zh.settings.unbound)).toBeTruthy();
+  });
+
+  it('an account without a password gets set-password through a reauth code (endpoint 85 -> 7 {code, new_password}) and a code-confirmed delete', async () => {
+    user = { ...baseUser, has_password: false, phone_masked: '138****8000' };
+    renderSettings();
+    const setPw = await screen.findByRole('button', { name: zh.settings.setPassword });
+    expect(screen.queryByRole('button', { name: zh.settings.changePassword })).toBeNull();
+    expect(screen.getByText(zh.settings.noPasswordYet)).toBeTruthy();
+    fireEvent.click(setPw);
+    const sheet = dialogOf(zh.settings.setPassword);
+    expect(within(sheet).queryByLabelText(new RegExp(`^${zh.settings.currentPassword}`))).toBeNull();
+    // both channels (bound phone with SMS on, verified e-mail) → a choice, the phone first
+    const via = within(sheet).getByRole('radiogroup', { name: zh.settings.reauthVia });
+    expect(within(via).getAllByRole('radio').map((r) => r.textContent)).toEqual(['138****8000', 'a@example.com']);
+    fireEvent.click(within(via).getByRole('radio', { name: 'a@example.com' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.auth.sendCode }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'email', purpose: 'reauth' }]));
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' }), { target: { value: '654321' } });
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.settings.newPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.common.save }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/password').map((c) => c.body)).toEqual([{ code: '654321', new_password: 'Str0ng-Passphrase!' }]));
+
+    fireEvent.click(screen.getByRole('button', { name: zh.settings.deleteAccount }));
+    const del = dialogOf(zh.settings.deleteAccount);
+    expect(within(del).getByText(zh.settings.deleteConfirmCode)).toBeTruthy();
+    expect(within(del).queryByLabelText(new RegExp(`^${zh.auth.password}`))).toBeNull();
+    expect(within(del).getByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' })).toBeTruthy();
+  });
+
+  it('rebind: a code to the old number, a code to the new number, then both codes with the new number (endpoint 88) and the row shows it', async () => {
+    user = { ...baseUser, phone_masked: '138****8000' };
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.rebind }));
+    const sheet = dialogOf(zh.settings.rebindPhone);
+    expect(within(sheet).getByText(zh.settings.rebindHint)).toBeTruthy();
+    fireEvent.click(codeSendButton(sheet, zh.settings.oldPhoneCode));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'phone', purpose: 'rebind_phone' }]));
+    const newSend = codeSendButton(sheet, zh.settings.newPhoneCode);
+    expect(newSend.disabled).toBe(true); // no new number yet
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.settings.newPhone}\\*?$`)), { target: { value: '13900139000' } });
+    expect(newSend.disabled).toBe(false);
+    fireEvent.click(newSend);
+    await waitFor(() =>
+      expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([
+        { channel: 'phone', purpose: 'rebind_phone' },
+        { channel: 'phone', purpose: 'bind_phone', target: '+8613900139000' },
+      ]),
+    );
+    const submit = within(sheet).getByRole('button', { name: zh.settings.rebind }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.settings.oldPhoneCode}`), { selector: 'input' }), { target: { value: '111111' } });
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.settings.newPhoneCode}`), { selector: 'input' }), { target: { value: '222222' } });
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(calls.filter((c) => c.path === '/api/account/identities/phone/rebind').map((c) => [c.method, c.body])).toEqual([['POST', { code_old: '111111', target_new: '+8613900139000', code_new: '222222' }]]),
+    );
+    expect(await screen.findByText('139****9000', { selector: '.muted' })).toBeTruthy();
+    expect(await screen.findByText(zh.settings.phoneRebound)).toBeTruthy(); // toast
+    expect(screen.queryByText('138****8000', { selector: '.muted' })).toBeNull();
+  });
+
+  it('an account without a password deletes itself with a reauth code (DELETE /api/account {code}) and lands on /login', async () => {
+    user = { ...baseUser, has_password: false, phone_masked: '138****8000' };
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.deleteAccount }));
+    const del = dialogOf(zh.settings.deleteAccount);
+    fireEvent.click(within(del).getByRole('button', { name: zh.auth.sendCode }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'phone', purpose: 'reauth' }])); // the bound phone is the first channel
+    fireEvent.change(within(del).getByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' }), { target: { value: '654321' } });
+    fireEvent.click(within(del).getByRole('button', { name: zh.settings.deleteAccount }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account').map((c) => [c.method, c.body])).toEqual([['DELETE', { code: '654321' }]]));
+    expect(await screen.findByText('login-page')).toBeTruthy();
+    expect(calls.some((c) => c.method === 'POST' && c.path === '/api/auth/logout')).toBe(true);
+  });
+
+  it('unbinding the only login method (no password, no verified e-mail) is refused: 409 last_login_method → toast, the number stays', async () => {
+    user = { ...baseUser, has_password: false, email: null, email_verified: false, phone_masked: '138****8000' };
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.unbind }));
+    const sheet = dialogOf(zh.settings.unbindPhone);
+    expect(within(sheet).queryByRole('radiogroup', { name: zh.settings.reauthVia })).toBeNull(); // the phone is the only channel
+    expect(within(sheet).getByText(`${zh.settings.reauthVia} 138****8000`)).toBeTruthy();
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.auth.sendCode }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'phone', purpose: 'reauth' }]));
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' }), { target: { value: '654321' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.settings.unbind }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE').map((c) => [c.path, c.body, c.status])).toEqual([['/api/account/identities/phone', { code: '654321' }, 409]]));
+    expect(await screen.findByText(zh.errors.lastLoginMethod)).toBeTruthy(); // toast
+    expect(screen.getByText('138****8000', { selector: '.muted' })).toBeTruthy();
+  });
+
+  it('without a mail server the verified e-mail is not offered for the reauth code; with no channel at all the sheet says so instead of a code input', async () => {
+    server = { ...baseServer, sms_enabled: true, email_configured: false };
+    user = { ...baseUser, has_password: false, phone_masked: '138****8000' };
+    const first = renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.setPassword }));
+    let sheet = dialogOf(zh.settings.setPassword);
+    expect(within(sheet).queryByRole('radiogroup', { name: zh.settings.reauthVia })).toBeNull(); // the e-mail dropped out → no choice
+    expect(within(sheet).getByText(`${zh.settings.reauthVia} 138****8000`)).toBeTruthy();
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    user = { ...baseUser, has_password: false, phone_masked: null }; // a verified e-mail but no SMTP, no phone
+    installFetch();
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.setPassword }));
+    sheet = dialogOf(zh.settings.setPassword);
+    expect(within(sheet).getByText(zh.settings.reauthUnavailable)).toBeTruthy();
+    expect(within(sheet).queryByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' })).toBeNull();
+    expect(within(sheet).queryByRole('button', { name: zh.auth.sendCode })).toBeNull();
+    expect((within(sheet).getByRole('button', { name: zh.common.save }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

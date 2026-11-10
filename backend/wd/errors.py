@@ -32,6 +32,12 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "weak_password": (400, "密码至少 8 位，不能与用户名相同，也不能是常见密码"),
     "invalid_code": (400, "验证码错误或已过期"),
     "import_too_large": (400, "导入文件过大或无法解析（最多 2000 行）"),
+    # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2; endpoints 79–91)
+    "consent_required": (400, "请先阅读并同意用户协议与隐私政策"),
+    "captcha_required": (400, "请先完成图形验证"),
+    "invalid_captcha": (400, "图形验证码不正确或已过期"),
+    "invalid_phone": (400, "请输入正确的中国大陆手机号"),
+    "challenge_expired": (400, "确认已过期，请重新登录"),
     "unauthorized": (401, "请先登录"),
     "invalid_credentials": (401, "用户名或密码错误"),
     "forbidden": (403, "没有权限执行此操作"),
@@ -39,6 +45,10 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "registration_closed": (403, "当前不开放注册"),
     "invalid_invite": (403, "邀请码无效或已用完"),
     "csrf_rejected": (403, "请求来源校验失败，请刷新页面后重试"),
+    "setup_required": (403, "站点尚未初始化，请先用用户名密码创建管理员"),
+    "password_required": (403, "管理员请使用密码登录"),
+    "verification_required": (403, "请先验证手机号或邮箱再注册"),
+    "second_factor_required": (403, "请用密码或邮箱验证码确认"),
     "not_found": (404, "资源不存在"),
     "word_not_found": (404, "找不到该单词"),
     "batch_not_found": (404, "找不到该学习批次"),
@@ -57,6 +67,10 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "already_resolved": (409, "该建议已处理"),
     "undo_expired": (409, "撤销时限已过"),
     "last_admin": (409, "不能停用、降级或删除最后一位管理员"),
+    "admin_needs_password": (409, "该账号还没有密码，不能设为管理员"),
+    "identity_taken": (409, "该手机号已绑定其他账号"),
+    "last_login_method": (409, "至少保留一种登录方式"),
+    "sms_unconfigured": (409, "服务器未配置短信发送"),
     "payload_too_large": (413, "请求体过大"),
     "account_locked": (423, "登录失败次数过多，账号已暂时锁定"),
     "rate_limited": (429, "操作过于频繁，请稍后再试"),
@@ -64,6 +78,8 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "ai_disabled": (503, "AI 功能当前不可用"),
     "audio_unavailable": (503, "服务器暂时无法提供发音"),
     "email_send_failed": (503, "邮件发送失败，请稍后重试"),
+    "sms_budget_exhausted": (503, "今日短信额度已用完，请改用邮箱或密码登录"),
+    "sms_send_failed": (503, "短信发送失败，请稍后再试"),
 }
 
 _STATUS_TO_CODE = {

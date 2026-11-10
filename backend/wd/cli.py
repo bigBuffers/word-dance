@@ -47,7 +47,7 @@ CLI_MODULES: tuple[str, ...] = (
 # module → the commands it owns (DEPLOY §9); build_parser() verifies every one of them was registered
 COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.seed": ("import-seed",),
-    "wd.security": ("create-admin", "set-password", "promote", "demote", "invite"),
+    "wd.security": ("create-admin", "set-password", "promote", "demote", "invite", "unlock", "sms-probe"),
     "wd.backup": ("backup", "restore"),
     "wd.ai.probe": ("claude-check", "ai-check"),
     "wd.jobs.worker": ("worker-once",),

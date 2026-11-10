@@ -1,7 +1,8 @@
 // AuthContext — session state (FRONTEND.md §3) and the route guards of FRONTEND §2.
 //
 // Loads `GET /api/auth/me` once; exposes `user`, `settings`, `server`, `counters`, `loading`,
-// `login()`, `register()`, `logout()`, `refresh()`, `refreshCounters()`, `updateSettings()`.
+// `login()`, `register()`, `applyAuth()` (any other call that answered an `AuthResponse` + cookie — code login,
+// stale-phone confirm / dispute), `logout()`, `refresh()`, `refreshCounters()`, `updateSettings()`.
 // A 401 `unauthorized` anywhere (the client's `auth:expired` event) clears the context, which makes
 // `<RequireAuth/>` redirect to `/login?next=…`. For guests the public `GET /api/health` flags
 // (`needs_setup`, `registration_mode`) are exposed as `health` for the login/register pages.
@@ -9,7 +10,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { Navigate, Outlet, useLocation, useSearchParams } from 'react-router';
 import { AUTH_EXPIRED_EVENT, AUTH_SIGNED_OUT_EVENT, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
-import type { HealthResponse, RegisterBody, SettingsUpdate } from '@/api/endpoints';
+import type { AuthResponse, HealthResponse, RegisterBody, SettingsUpdate } from '@/api/endpoints';
 import { setServerAudio } from '@/audio/serverAudio';
 import type { Counters, ServerFlags, Settings, User } from '@/api/types';
 import { useToast } from '@/hooks/useToast';
@@ -29,6 +30,13 @@ export interface AuthState {
 export interface AuthContextValue extends AuthState {
   login(username: string, password: string): Promise<void>;
   register(body: RegisterBody): Promise<void>;
+  /**
+   * Installs the session an `AuthResponse` carries (its cookie is already set): `user` / `settings` first, then one
+   * `/api/auth/me` for the server flags and counters — the path every sign-in must take (endpoints 3, 2, 81, 83, 84).
+   * `<RequireGuest/>` redirects the moment `user` is set, so call it only once a session really exists (never for a
+   * `CodeLoginResponse` that carries a `challenge` instead of a user).
+   */
+  applyAuth(res: AuthResponse): Promise<void>;
   logout(): Promise<void>;
   /** Re-fetches `/api/auth/me` (user, settings, server flags, counters). */
   refresh(): Promise<void>;
@@ -110,23 +118,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
   }, [refreshHealth]);
 
-  const login = useCallback(
-    async (username: string, password: string) => {
-      const res = await endpoints.login({ username, password });
+  const applyAuth = useCallback(
+    async (res: AuthResponse) => {
       setState((s) => ({ ...s, user: res.user, settings: res.settings }));
       await loadMe().catch(() => undefined); // server flags + counters; the session itself is already established
     },
     [loadMe],
   );
 
-  const register = useCallback(
-    async (body: RegisterBody) => {
-      const res = await endpoints.register(body);
-      setState((s) => ({ ...s, user: res.user, settings: res.settings }));
-      await loadMe().catch(() => undefined);
-    },
-    [loadMe],
-  );
+  const login = useCallback(async (username: string, password: string) => applyAuth(await endpoints.login({ username, password })), [applyAuth]);
+
+  const register = useCallback(async (body: RegisterBody) => applyAuth(await endpoints.register(body)), [applyAuth]);
 
   const logout = useCallback(async () => {
     try {
@@ -153,8 +155,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ ...state, login, register, logout, refresh, refreshCounters: refresh, updateSettings, applySession, refreshHealth }),
-    [state, login, register, logout, refresh, updateSettings, applySession, refreshHealth],
+    () => ({ ...state, login, register, applyAuth, logout, refresh, refreshCounters: refresh, updateSettings, applySession, refreshHealth }),
+    [state, login, register, applyAuth, logout, refresh, updateSettings, applySession, refreshHealth],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

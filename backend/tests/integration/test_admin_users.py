@@ -14,7 +14,7 @@ PW = "Correct-Horse-7"
 NOW = datetime(2026, 10, 14, 0, 0, 0, tzinfo=timezone.utc)
 NOW_ISO = "2026-10-14T00:00:00Z"
 INVITE_RE = re.compile(r"^[A-Z0-9-]{10,}$")
-ADMIN_USER_KEYS = {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "is_active", "last_login_at", "bank_size", "streak_days"}
+ADMIN_USER_KEYS = {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "is_active", "last_login_at", "bank_size", "streak_days", "has_password", "phone_masked", "needs_profile", "age_band"}  # AdminUser extends User: the 0018 fields (docs/AUTH_SIGNUP_DESIGN.md §5.1)
 
 
 @pytest.fixture(autouse=True)

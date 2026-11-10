@@ -1,7 +1,8 @@
 """``GET /api/health`` — API.md endpoint 1 (Phase 0, fully implemented; needs only db + config).
 
-``200 {status:"ok", version, registration_mode, needs_setup, time}``; ``503 {status:"degraded"}`` when the
-database is unreachable. ``needs_setup`` is true while the ``users`` table is empty (no admin exists yet).
+``200 {status:"ok", version, registration_mode, needs_setup, sms_enabled, email_enabled, captcha, time}``; ``503 {status:"degraded"}``
+when the database is unreachable. ``needs_setup`` is true while the ``users`` table is empty (no admin exists yet); the three
+channel flags tell the login page which sign-in entries to offer (docs/AUTH_SIGNUP_DESIGN.md §5.2).
 """
 
 from __future__ import annotations
@@ -40,5 +41,8 @@ def health(request: Request):
         version=__version__,
         registration_mode=cfg.registration_mode,
         needs_setup=users == 0,
+        sms_enabled=bool(cfg.sms_configured or getattr(request.app.state, "sms", None) is not None),  # a sender installed next to an `off` provider (tests) counts
+        email_enabled=cfg.email_configured,
+        captcha=cfg.captcha == "on",
         time=now_iso(clock),
     )

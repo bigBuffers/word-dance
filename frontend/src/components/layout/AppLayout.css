@@ -13,6 +13,45 @@
   min-width: 0;
 }
 
+/* ---------- password note (code-created accounts) ---------- */
+.app-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: calc(var(--content-max) + 2 * var(--gutter));
+  margin: var(--space-3) auto 0;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  box-sizing: border-box;
+  border-radius: var(--radius);
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+/* the shell's banner sits inside the page gutter on phones */
+@media (max-width: 767.98px) {
+  .app-banner {
+    width: calc(100% - 2 * var(--gutter));
+  }
+}
+
+.app-banner__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.app-banner__action {
+  flex: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.app-banner__close {
+  flex: none;
+}
+
 /* ---------- TopNav ---------- */
 .topnav {
   display: none;

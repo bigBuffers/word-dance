@@ -1,85 +1,68 @@
-/* Login / Register (guest pages, FRONTEND §2). RegisterPage imports this file too. */
-.auth {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: 100dvh;
-  padding-block: var(--space-6);
+/* LoginPage — the 「先看看」 demo section (D9) under the sign-in form. The shared `.auth__*` rules live in
+   components/ui/auth.css (imported by every consumer); this file holds only what the login page alone renders. */
+.login-demo {
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px dashed var(--line);
 }
 
-.auth__brand {
-  text-align: center;
-  margin-bottom: var(--space-5);
+.login-demo__title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-lg);
 }
 
-.auth__name {
-  margin: 0;
-  font-size: var(--text-2xl);
-  color: var(--brand-ink);
-  letter-spacing: -0.02em;
-}
-
-.auth__tagline {
-  margin: var(--space-1) 0 0;
-  color: var(--muted);
-}
-
-.auth__title {
-  font-size: var(--text-xl);
-  margin-bottom: var(--space-4);
-}
-
-.auth__notice {
-  margin-bottom: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius);
-  background: var(--brand-soft);
-  color: var(--brand-ink);
+.login-demo__hint {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
-.auth__notice a {
-  font-weight: 600;
-  margin-left: var(--space-1);
-}
-
-.auth__form {
+.login-demo__card {
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
 }
 
-.auth__error {
-  margin: 0 0 var(--space-3);
-  color: var(--again-ink);
-  font-size: var(--text-sm);
-}
-
-.auth__hint {
-  margin-top: var(--space-4);
+.login-demo__card .word-head {
   text-align: center;
 }
 
-.auth__meter {
+.login-demo__meaning {
+  margin: 0;
+  font-size: var(--text-lg);
+  line-height: 1.5;
+}
+
+.login-demo__dots {
   display: flex;
-  gap: 4px;
-  margin-top: var(--space-1);
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
-.auth__meter span {
-  flex: 1 1 0;
-  height: 4px;
-  border-radius: 2px;
+.login-demo__dot {
+  width: var(--tap);
+  height: var(--tap);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+}
+
+/* the visible dot stays small; the 44 px button around it is the tap target */
+.login-demo__dot::before {
+  content: "";
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
   background: var(--line);
+  transition: background var(--dur) var(--ease);
 }
 
-.auth__meter[data-level="1"] span:nth-child(-n + 1) {
-  background: var(--again);
-}
-
-.auth__meter[data-level="2"] span:nth-child(-n + 2) {
-  background: var(--hard);
-}
-
-.auth__meter[data-level="3"] span:nth-child(-n + 3) {
-  background: var(--good);
+.login-demo__dot[aria-pressed="true"]::before {
+  background: var(--brand);
 }

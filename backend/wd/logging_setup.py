@@ -79,6 +79,9 @@ def configure_logging(cfg: Settings, *, stream=None) -> None:
     global _CONFIGURED
     root = logging.getLogger()
     root.setLevel(getattr(logging, cfg.log_level, logging.INFO))
+    # httpx logs `HTTP Request: METHOD <full URL> …` at INFO for every call: a webhook URL carries its token, a provider URL could
+    # carry a query string — nothing of that belongs in journald. Failures still surface as WARNING from our own adapters.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     if _CONFIGURED:
         return
     formatter: logging.Formatter = JsonFormatter() if cfg.log_format == "json" else TextFormatter()

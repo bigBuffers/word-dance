@@ -161,9 +161,43 @@ describe('errorMessage()', () => {
     expect(errorMessage(new ApiError('import_too_large', 400, ''))).toBe(zh.errors.importTooLarge);
   });
 
+  it('formats rate_limited with the seconds of details.retry_after_s and without them generically', () => {
+    expect(errorMessage(new ApiError('rate_limited', 429, '', { retry_after_s: 60 }))).toBe(zh.errors.rateLimitedIn(60));
+    expect(errorMessage(new ApiError('rate_limited', 429, '', { retry_after_s: 1800 }))).toBe(zh.errors.rateLimitedIn(1800)); // minutes past two of them
+    expect(zh.errors.rateLimitedIn(1800)).not.toBe(zh.errors.rateLimitedIn(60));
+    expect(errorMessage(new ApiError('rate_limited', 429, ''))).toBe(zh.errors.rateLimited);
+    expect(errorMessage(new ApiError('rate_limited', 429, '', { retry_after_s: 0 }))).toBe(zh.errors.rateLimited);
+  });
+
   it('formats account_locked from details.retry_after_s', () => {
     expect(errorMessage(new ApiError('account_locked', 423, '', { retry_after_s: 601 }))).toBe(zh.errors.accountLocked(601));
     expect(errorMessage(new ApiError('account_locked', 423, '', {}))).toBe(zh.errors.accountLocked(900));
+  });
+
+  it('maps the sign-in-by-code codes (API.md §1.1, slice 1-A): invalid_code with tries left, codeExpired at 0 or without the detail', () => {
+    expect(errorMessage(new ApiError('invalid_code', 400, '', { attempts_left: 3 }))).toBe(zh.errors.invalidCode(3));
+    expect(errorMessage(new ApiError('invalid_code', 400, '', { attempts_left: 0 }))).toBe(zh.errors.codeExpired); // expired / consumed / burnt: never 「还可以再试 0 次」
+    expect(errorMessage(new ApiError('invalid_code', 400, ''))).toBe(zh.errors.codeExpired);
+    expect(zh.errors.invalidCode(3)).not.toBe(zh.errors.codeExpired);
+    const table: [string, string][] = [
+      ['setup_required', zh.errors.setupRequired],
+      ['password_required', zh.errors.passwordRequired],
+      ['admin_needs_password', zh.errors.adminNeedsPassword],
+      ['verification_required', zh.errors.verificationRequired],
+      ['consent_required', zh.errors.consentRequired],
+      ['captcha_required', zh.errors.captchaRequired],
+      ['invalid_captcha', zh.errors.invalidCaptcha],
+      ['invalid_phone', zh.errors.invalidPhone],
+      ['challenge_expired', zh.errors.challengeExpired],
+      ['second_factor_required', zh.errors.secondFactorRequired],
+      ['identity_taken', zh.errors.identityTaken],
+      ['last_login_method', zh.errors.lastLoginMethod],
+      ['sms_unconfigured', zh.errors.smsUnconfigured],
+      ['sms_budget_exhausted', zh.errors.smsBudgetExhausted],
+      ['sms_send_failed', zh.errors.smsSendFailed],
+      ['email_send_failed', zh.errors.emailSendFailed],
+    ];
+    for (const [code, copy] of table) expect(errorMessage(new ApiError(code, 400, 'raw server text'))).toBe(copy);
   });
 
   it('falls back to the server message for other codes, then to the generic copy', () => {

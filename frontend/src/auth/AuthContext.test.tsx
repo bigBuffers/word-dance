@@ -42,10 +42,14 @@ function me(user: Partial<User> = {}): MeResponse {
       role: 'user',
       onboarding_state: 'done',
       created_at: '2026-10-14T00:00:00Z',
+      has_password: true,
+      phone_masked: null,
+      needs_profile: false,
+      age_band: null,
       ...user,
     },
     settings,
-    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false, audio: true, audio_key: 'k1a2b3c4' },
+    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false, audio: true, audio_key: 'k1a2b3c4', sms_enabled: false },
     counters: { suggestions_open: 2, attention: 1 },
   };
 }

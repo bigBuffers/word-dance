@@ -19,7 +19,8 @@ def test_health_ok_needs_setup_true_on_empty_users(client: TestClient):
     assert body["status"] == "ok" and body["needs_setup"] is True
     assert body["version"] == __version__ and body["registration_mode"] == "open"
     assert body["time"] == "2026-10-14T00:00:00Z"  # frozen clock
-    assert set(body) == {"status", "version", "registration_mode", "needs_setup", "time"}
+    assert set(body) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "time"}
+    assert body["sms_enabled"] is False and body["email_enabled"] is False and body["captcha"] is False  # the test env: no providers, WD_CAPTCHA=off
 
 
 def test_health_needs_setup_false_once_a_user_exists(client: TestClient, settings):
@@ -220,7 +221,7 @@ def test_lifespan_migrated_db_and_public_url_guess(client: TestClient, settings)
     c = db.connect(settings.db_path)
     try:
         assert db.current_version(c) == db.list_migration_files()[-1].version  # every shipped file applied by the lifespan
-        assert len(db.table_names(c)) == 26
+        assert len(db.table_names(c)) == 28
         guess = db.kv_get(c, "public_url_guess")
         assert guess is None or guess.startswith("http://") and guess.endswith(f":{settings.port}")
         assert db.kv_get(c, "seed_version") == hashlib.sha256(settings.seed_path.read_bytes()).hexdigest()  # lifespan imported WD_SEED_PATH via wd.seed (WP1)

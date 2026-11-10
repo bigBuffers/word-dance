@@ -7,16 +7,29 @@
   Max-Age=WD_SESSION_DAYS``, ``Secure`` per ``WD_COOKIE_SECURE`` / https), DB stores ``sha256(token)``
   (``deps.hash_token``), at most :data:`MAX_SESSIONS_PER_USER` per user, expired rows GC'd on login
   (:func:`gc_sessions` is also callable from the hourly scheduler GC).
-* **Throttle / lockout** (persistent ``auth_throttle`` rows): fixed windows (:func:`rate_limit`) and the login
-  lockout schedule — 10 failures per username → 15 min, doubling every further 5 failures, max 24 h, reset on success.
+* **Throttle / lockout** (persistent ``auth_throttle`` rows): fixed windows (:func:`rate_limit`; :func:`throttle_check` reads a
+  window without counting — the failures-only ``login:ip`` rule) and the login lockout schedule — 10 failures per identifier
+  **and client IP** (``login:user:<identifier>:<ip>`` with the identifier in its canonical form, :func:`canonical_identifier`:
+  E.164 for a phone, NFKC lower-case for an e-mail, lower-case for a username — docs/AUTH_SIGNUP_DESIGN.md §5.3: a stranger cannot
+  lock a name from elsewhere, another spelling of the same number is the same key; ``wd unlock`` clears every IP) → 15 min,
+  doubling every further 5 failures, max 24 h, reset on success.
   :func:`verify_account_password` gives the password re-checks of API.md 7–8 their own budget (10 per 15 min per
   user) and :func:`throttle_mutation` is DESIGN §10's 300 mutations/min per user (called from ``deps.current_user``).
 * **Invite codes**: shown once, stored as ``sha256``; consumed atomically with the SCHEMA.sql UPDATE.
-* **E-mail codes**: 6 digits, 15 min, 5 attempts, ``code_hash = HMAC-SHA256(WD_SECRET_KEY, code:user_id)``.
+* **Verification codes** (``login_codes``, AUTH_SIGNUP_DESIGN §5.1 / API.md §3.1): 6 digits, :data:`LOGIN_CODE_TTL_S` (10 min),
+  :data:`LOGIN_CODE_MAX_ATTEMPTS` (5), ``code_hash = HMAC-SHA256(WD_SECRET_KEY, code:channel:target:purpose)``; a new code voids
+  the older unused codes of its (channel, target, purpose); :func:`verify_login_code` only checks — the lookup, the compare and the
+  attempt count share one ``BEGIN IMMEDIATE`` of their own, so concurrent wrong guesses cannot exceed the 5 — and the caller consumes
+  the row with :func:`mark_login_code_used` inside its own ``BEGIN IMMEDIATE``.
+  The stale-phone challenge token (§5.3) lives in the same table as ``purpose = 'challenge'``. The pre-0018 ``email_codes`` table
+  stays in the schema but is no longer written or read: the e-mail binding code of API.md 9 / 10 is a ``purpose = 'bind_email'`` row.
+* **Identities** (``identities``): :func:`phone_identity` / :func:`identity_by_subject` read the live (undisputed) rows; phone numbers
+  are E.164 through :func:`normalize_phone` and shown masked (:func:`mask_phone`, :func:`mask_email`) — never logged.
 * :func:`is_safe_https_url`: the webhook host check (https, no raw IPs, no local names).
-* Row → DTO helpers and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults,
-  inside the caller's ``BEGIN IMMEDIATE``) shared by the auth/account/onboarding/settings/admin routers.
-* CLI ``create-admin | set-password | promote | demote | invite`` (:func:`register_cli`, DEPLOY §9).
+* Row → DTO helpers (:func:`user_dto` / :func:`user_dto_for` with ``has_password`` / ``phone_masked`` / ``needs_profile`` / ``age_band``)
+  and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults, inside the caller's ``BEGIN IMMEDIATE``;
+  :func:`placeholder_username` + :func:`unusable_password_hash` for a code-created account) shared by the routers.
+* CLI ``create-admin | set-password | promote | demote | invite | unlock | sms-probe`` (:func:`register_cli`, DEPLOY §9).
 """
 
 from __future__ import annotations
@@ -35,6 +48,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -66,8 +80,21 @@ INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # unambiguous upper-case l
 INVITE_GROUPS = 4
 INVITE_GROUP_LEN = 4
 
-EMAIL_CODE_TTL_S = 900
-EMAIL_CODE_MAX_ATTEMPTS = 5
+# verification codes — docs/AUTH_SIGNUP_DESIGN.md §5.1 / §5.3, API.md §3.1 (endpoints 9, 80–91)
+LOGIN_CODE_TTL_S = 600  # every channel and purpose: 10 minutes (the SMS template's `min` and the mail text name the same number)
+LOGIN_CODE_MAX_ATTEMPTS = 5  # wrong guesses that burn a code
+LOGIN_CODE_CHANNELS = ("phone", "email")  # login_codes.channel CHECK (0018)
+LOGIN_CODE_PURPOSES = ("login", "reset_password", "bind_phone", "bind_email", "rebind_phone", "reauth", "challenge")  # login_codes.purpose CHECK
+CHALLENGE_TTL_S = LOGIN_CODE_TTL_S  # the stale-phone challenge token (purpose 'challenge')
+CODE_SEND_TARGET_LIMITS = ((1, 60), (5, 3600), (10, 86400))  # per target: keys code_send:target:<t>:m / :h / :d
+CODE_SEND_TARGET_SUFFIXES = ("m", "h", "d")
+CODE_SEND_PREFIX_LIMIT, CODE_SEND_PREFIX_WINDOW_S = 5, 3600  # per 7-digit mainland prefix (号段): code_send:prefix:<1380013>
+CODE_CHECK_TARGET_LIMIT, CODE_CHECK_TARGET_WINDOW_S = 20, 3600  # code verifications per target: code_check:target:<t>
+CODE_CHECK_IP_LIMIT, CODE_CHECK_IP_WINDOW_S = 60, 3600  # code verifications per client IP: code_check:ip:<ip>
+CAPTCHA_IP_LIMIT, CAPTCHA_IP_WINDOW_S = 60, 3600  # GET /api/auth/captcha per client IP: captcha:ip:<ip>
+PLACEHOLDER_USERNAME_RE = re.compile(r"^u_[a-z2-7]{8}$")  # the username a code-created account gets until endpoint 89 (User.needs_profile)
+PLACEHOLDER_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"  # lower-case base32: satisfies schemas.USERNAME_RE, distinct from the invite alphabet
+PHONE_RE = re.compile(r"^(?:\+?86)?(1\d{10})$")  # a mainland mobile number after the separators are dropped (+86 / 86 optional)
 
 # DESIGN §10 "Throttling"
 LOGIN_IP_LIMIT, LOGIN_IP_WINDOW_S = 20, 600
@@ -180,15 +207,19 @@ def create_session(
     session_days: int,
     user_agent: str | None = None,
     ip: str | None = None,
+    actor_user_id: int | None = None,
 ) -> str:
-    """Insert a fresh session row (a new token every time — no fixation) and return the raw cookie value."""
+    """Insert a fresh session row (a new token every time — no fixation) and return the raw cookie value.
+
+    ``actor_user_id`` (0018, slice 1-B) names the guardian who issued a child's session; None = the user logged in themselves.
+    """
     token = new_session_token()
     now_iso = to_iso(now)
     with db.maybe_tx(conn):
         _trim_sessions(conn, user_id)
         conn.execute(
-            "INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen_at, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (hash_token(token), user_id, now_iso, to_iso(now + timedelta(days=session_days)), now_iso, (user_agent or "")[:200] or None, ip),
+            "INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen_at, user_agent, ip, actor_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (hash_token(token), user_id, now_iso, to_iso(now + timedelta(days=session_days)), now_iso, (user_agent or "")[:200] or None, ip, actor_user_id),
         )
     return token
 
@@ -280,13 +311,47 @@ def rate_limit(conn: sqlite3.Connection, key: str, *, limit: int, window_s: int,
         raise ApiError("rate_limited", details={"retry_after_s": retry})
 
 
-def lockout_key(username: str) -> str:
-    return f"login:user:{username.strip().lower()}"
+def throttle_check(conn: sqlite3.Connection, key: str, *, limit: int, window_s: int, now: datetime) -> int | None:
+    """Like :func:`throttle_hit` but WITHOUT counting: the seconds until ``key``'s window resets while it sits at its limit, else None.
+
+    The failures-only ``login:ip`` rule (API.md 3, AUTH_SIGNUP_DESIGN §5.3): check before verifying, count with :func:`throttle_hit`
+    on the failure path only — a legitimate user's successful logins never spend the window.
+    """
+    row = _throttle_row(conn, key)
+    if row is None:
+        return None
+    window_end = parse_iso(str(row["window_start"])) + timedelta(seconds=window_s)
+    if window_end > now and int(row["count"]) >= limit:
+        return max(1, math.ceil((window_end - now).total_seconds()))
+    return None
 
 
-def lockout_remaining(conn: sqlite3.Connection, username: str, now: datetime) -> int | None:
-    """Seconds until the username's lockout ends, or None when it is not locked."""
-    row = _throttle_row(conn, lockout_key(username))
+def canonical_identifier(identifier: str) -> str:
+    """The one spelling of a login identifier (API.md 3): a mainland mobile number in any accepted form → E.164 (:func:`normalize_phone`),
+    an e-mail (contains ``@``) → NFKC, lower-cased, anything else (a username) → lower-cased — the three branches of
+    ``routers/auth.resolve_identifier``, so the lockout bucket and ``wd unlock`` agree with the account lookup: 「138 0013 8000」,
+    ``+8613800138000`` and ``8613800138000`` share one key, ``ｂob@Example.com`` and ``bob@example.com`` too. A digits-only
+    username that reads as a phone number shares the bucket of that number (acceptable: the schema refuses new ones)."""
+    ident = (identifier or "").strip()
+    e164 = normalize_phone(ident)
+    if e164 is not None:
+        return e164
+    if "@" in ident:
+        return unicodedata.normalize("NFKC", ident).lower()
+    return ident.lower()
+
+
+def lockout_key(identifier: str, ip: str) -> str:
+    """``login:user:<identifier>:<ip>`` — the lockout is per identifier (its canonical form, :func:`canonical_identifier`: E.164 phone /
+    NFKC lower-case e-mail / lower-case username) *and* client IP (AUTH_SIGNUP_DESIGN §5.3, PUBLIC_LAUNCH A4): a stranger's guesses
+    never lock the account's owner out, and respelling a phone number does not open a fresh bucket; ``wd unlock`` deletes every IP's
+    row of an identifier."""
+    return f"login:user:{canonical_identifier(identifier)}:{ip}"
+
+
+def lockout_remaining(conn: sqlite3.Connection, identifier: str, now: datetime, *, ip: str) -> int | None:
+    """Seconds until the (identifier, ip) lockout ends, or None when it is not locked."""
+    row = _throttle_row(conn, lockout_key(identifier, ip))
     if row is None or not row["blocked_until"]:
         return None
     until = parse_iso(str(row["blocked_until"]))
@@ -295,9 +360,9 @@ def lockout_remaining(conn: sqlite3.Connection, username: str, now: datetime) ->
     return max(1, math.ceil((until - now).total_seconds()))
 
 
-def check_lockout(conn: sqlite3.Connection, username: str, now: datetime) -> None:
-    """Raise 423 ``account_locked`` (``details.retry_after_s``) while the username is locked."""
-    remaining = lockout_remaining(conn, username, now)
+def check_lockout(conn: sqlite3.Connection, identifier: str, now: datetime, *, ip: str) -> None:
+    """Raise 423 ``account_locked`` (``details.retry_after_s``) while (identifier, ip) is locked."""
+    remaining = lockout_remaining(conn, identifier, now, ip=ip)
     if remaining is not None:
         raise ApiError("account_locked", details={"retry_after_s": remaining})
 
@@ -309,9 +374,9 @@ def lock_seconds_for(failures: int) -> int | None:
     return min(LOCKOUT_BASE_S * 2 ** ((failures - LOCKOUT_AFTER) // LOCKOUT_STEP), LOCKOUT_MAX_S)
 
 
-def record_login_failure(conn: sqlite3.Connection, username: str, now: datetime) -> int | None:
-    """Count a failed login for ``username``; returns the lockout seconds when this failure starts a lock."""
-    key = lockout_key(username)
+def record_login_failure(conn: sqlite3.Connection, identifier: str, now: datetime, *, ip: str) -> int | None:
+    """Count a failed login for (identifier, ip); returns the lockout seconds when this failure starts a lock."""
+    key = lockout_key(identifier, ip)
     now_iso = to_iso(now)
     with db.maybe_tx(conn):
         row = _throttle_row(conn, key)
@@ -332,12 +397,24 @@ def record_login_failure(conn: sqlite3.Connection, username: str, now: datetime)
             (key, window_start, count, blocked_until),
         )
     if lock_s:
-        log.warning("login lockout for %r: %d failures, %d s", username, count, lock_s, extra={"event": "login_lockout"})
+        log.warning("login lockout after %d failures: %d s", count, lock_s, extra={"event": "login_lockout"})  # the identifier may be a phone / e-mail: not logged
     return lock_s
 
 
-def clear_login_failures(conn: sqlite3.Connection, username: str) -> None:
-    conn.execute("DELETE FROM auth_throttle WHERE key = ?", (lockout_key(username),))
+def clear_login_failures(conn: sqlite3.Connection, identifier: str, *, ip: str) -> None:
+    conn.execute("DELETE FROM auth_throttle WHERE key = ?", (lockout_key(identifier, ip),))
+
+
+def unlock_identifier(conn: sqlite3.Connection, identifier: str) -> int:
+    """Delete every lockout row of ``identifier`` (``login:user:<identifier>:<ip>`` for every IP, plus a pre-0018 row without the
+    IP) — ``wd unlock``; the identifier is canonicalised like :func:`lockout_key`, so any spelling of the number / address the learner
+    typed finds the rows; returns the rows removed."""
+    ident = canonical_identifier(identifier)
+    prefix = f"login:user:{ident}:"
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with db.maybe_tx(conn):
+        cur = conn.execute("DELETE FROM auth_throttle WHERE key = ? OR key LIKE ? ESCAPE '\\'", (f"login:user:{ident}", escaped + "%"))
+    return int(cur.rowcount)
 
 
 def password_check_key(user_id: int) -> str:
@@ -352,7 +429,7 @@ def verify_account_password(conn: sqlite3.Connection, user: Mapping[str, Any], p
     (``details.retry_after_s``), which bounds online guessing with a stolen session cookie to a few attempts and
     keeps the single process from burning a bcrypt check per guess. A wrong password raises 401
     ``invalid_credentials`` and stays counted — call this **outside** any open transaction (like
-    :func:`verify_email_code`) so the caller's rollback cannot undo the count; a correct password clears the counter,
+    :func:`verify_login_code`) so the caller's rollback cannot undo the count; a correct password clears the counter,
     so a few typos never lock a legitimate user out of their own account page.
     """
     key = password_check_key(int(user["id"]))
@@ -436,54 +513,240 @@ def list_invites(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
-# ---------------------------------------------------------------------------------- e-mail codes
-def email_code_hash(secret_key: str, code: str, user_id: int) -> str:
-    """hex HMAC-SHA256(key = WD_SECRET_KEY, msg = ``code:user_id``) — SCHEMA ``email_codes.code_hash``."""
-    return hmac.new(secret_key.encode("utf-8"), f"{code}:{int(user_id)}".encode("utf-8"), hashlib.sha256).hexdigest()
+# ------------------------------------------------------------------- verification codes (login_codes, 0018)
+def normalize_phone(raw: str) -> str | None:
+    """A mainland mobile number as E.164 (``+86`` + 11 digits) from what the learner typed, or None.
+
+    Spaces, dashes and parentheses are dropped; ``1xxxxxxxxxx``, ``+861…``, ``861…`` and ``00861…`` are accepted; anything else
+    (a foreign number, 10 digits, a landline) is None → 400 ``invalid_phone`` at the endpoints (API.md 80).
+    """
+    s = re.sub(r"[\s\-()（）]", "", raw or "")
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    m = PHONE_RE.match(s)
+    return f"+86{m.group(1)}" if m else None
 
 
-def issue_email_code(conn: sqlite3.Connection, user_id: int, email: str, *, secret_key: str, now: datetime) -> str:
-    """Create a fresh 6-digit code (older unused codes of the user are discarded) and return it for mailing."""
-    code = f"{secrets.randbelow(1_000_000):06d}"
+def phone_prefix(e164: str) -> str:
+    """The first 7 digits after ``+86`` (the 号段 of the per-prefix send throttle): ``+8613800138000`` → ``1380013``."""
+    return e164[3:10] if e164.startswith("+86") else re.sub(r"\D", "", e164)[:7]
+
+
+def mask_phone(e164: str) -> str:
+    """``+8613800138000`` → ``138****8000`` (API.md §9 ``User.phone_masked``); shorter shapes keep their last four digits only."""
+    digits = re.sub(r"\D", "", e164 or "")
+    if digits.startswith("86") and len(digits) == 13:
+        digits = digits[2:]
+    if len(digits) >= 7:
+        return f"{digits[:3]}****{digits[-4:]}"
+    return "****" + digits[-4:] if digits else "****"
+
+
+def mask_email(email: str) -> str:
+    """``alice@qq.com`` → ``a***@qq.com`` (API.md §9 ``StaleChallenge.email_masked``)."""
+    local, _, domain = (email or "").partition("@")
+    return f"{local[:1]}***@{domain}" if domain else f"{local[:1]}***"
+
+
+def placeholder_username(conn: sqlite3.Connection) -> str:
+    """``u_`` + 8 characters of ``a-z2-7`` for a code-created account (matches ``schemas.USERNAME_RE`` and
+    :data:`PLACEHOLDER_USERNAME_RE`), regenerated while the name is taken; endpoint 89 lets the learner replace it once."""
+    while True:
+        name = "u_" + "".join(secrets.choice(PLACEHOLDER_ALPHABET) for _ in range(8))
+        if not username_taken(conn, name):
+            return name
+
+
+def unusable_password_hash() -> str:
+    """A bcrypt hash of a fresh random secret for an account without a password (``users.password_hash`` is NOT NULL):
+    :func:`verify_password` never matches it and still pays one bcrypt check, so a password login against such an account
+    is indistinguishable in timing from a wrong password. ``users.password_set_at`` stays NULL (``User.has_password`` false)."""
+    return hash_password(secrets.token_urlsafe(32))
+
+
+def login_code_hash(secret_key: str, code: str, channel: str, target: str, purpose: str) -> str:
+    """hex HMAC-SHA256(key = WD_SECRET_KEY, msg = ``code:channel:target:purpose``) — ``login_codes.code_hash`` (0018)."""
+    return hmac.new(secret_key.encode("utf-8"), f"{code}:{channel}:{target}:{purpose}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _new_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _store_login_code(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    target: str,
+    purpose: str,
+    user_id: int | None,
+    secret: str,
+    ip: str | None,
+    secret_key: str,
+    now: datetime,
+    ttl_s: int,
+) -> int:
+    """Drop the older unused rows of the (channel, target, purpose) triple and insert the new one; returns its id."""
+    if channel not in LOGIN_CODE_CHANNELS:
+        raise ValueError(f"invalid channel {channel!r}")
+    if purpose not in LOGIN_CODE_PURPOSES:
+        raise ValueError(f"invalid purpose {purpose!r}")
     now_iso = to_iso(now)
     with db.maybe_tx(conn):
-        conn.execute("DELETE FROM email_codes WHERE user_id = ? AND used_at IS NULL", (user_id,))
-        conn.execute(
-            "INSERT INTO email_codes(user_id, email, code_hash, expires_at, attempts, used_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?)",
-            (user_id, email, email_code_hash(secret_key, code, user_id), to_iso(now + timedelta(seconds=EMAIL_CODE_TTL_S)), now_iso),
+        conn.execute("DELETE FROM login_codes WHERE channel = ? AND target = ? AND purpose = ? AND used_at IS NULL", (channel, target, purpose))
+        cur = conn.execute(
+            "INSERT INTO login_codes(channel, target, purpose, user_id, code_hash, expires_at, attempts, used_at, ip, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)",
+            (channel, target, purpose, user_id, login_code_hash(secret_key, secret, channel, target, purpose), to_iso(now + timedelta(seconds=ttl_s)), ip, now_iso),
         )
+    return int(cur.lastrowid)
+
+
+def issue_login_code(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    target: str,
+    purpose: str,
+    user_id: int | None,
+    ip: str | None,
+    secret_key: str,
+    now: datetime,
+) -> str:
+    """Create a fresh 6-digit code for ``(channel, target, purpose)`` and return it for sending.
+
+    Older unused codes of the same triple are voided (the newest one is the only live one); the row carries ``user_id`` (required
+    for bind_* / rebind_phone / reauth, the account for a reset or a challenge e-mail, None for a plain login send) and the
+    requester's ``ip``. Runs in its own transaction unless the caller holds one (``db.maybe_tx``); expires after
+    :data:`LOGIN_CODE_TTL_S`. The code itself is never stored or logged.
+    """
+    code = _new_code()
+    _store_login_code(conn, channel=channel, target=target, purpose=purpose, user_id=user_id, secret=code, ip=ip, secret_key=secret_key, now=now, ttl_s=LOGIN_CODE_TTL_S)
     return code
 
 
-def verify_email_code(conn: sqlite3.Connection, user_id: int, code: str, *, secret_key: str, now: datetime) -> str:
-    """Check ``code`` against the user's live code; returns the e-mail it was issued for.
+def void_login_codes(conn: sqlite3.Connection, *, channel: str, target: str, purpose: str, now: datetime) -> int:
+    """Mark the live codes of a triple used (a send that failed after the row was written — API.md 80); returns rows voided."""
+    with db.maybe_tx(conn):
+        cur = conn.execute(
+            "UPDATE login_codes SET used_at = ? WHERE channel = ? AND target = ? AND purpose = ? AND used_at IS NULL",
+            (to_iso(now), channel, target, purpose),
+        )
+    return int(cur.rowcount)
 
-    Raises 400 ``invalid_code`` with ``details.attempts_left`` (wrong code), or ``attempts_left: 0`` when no live
-    code exists / it expired / the attempt budget is spent (the code is burnt after :data:`EMAIL_CODE_MAX_ATTEMPTS`).
 
-    Call it **outside** any open transaction: the failed-attempt bookkeeping is committed *before* the error is
-    raised, so a wrong guess always counts (a caller's rollback must not undo it).
+def _live_login_code(conn: sqlite3.Connection, *, channel: str | None, target: str | None, purpose: str, user_id: int | None) -> sqlite3.Row | None:
+    if target is None:
+        if user_id is None:
+            raise ValueError("verify_login_code needs a target or a user_id")
+        return conn.execute(
+            "SELECT * FROM login_codes WHERE purpose = ? AND user_id = ? AND used_at IS NULL ORDER BY id DESC LIMIT 1",
+            (purpose, user_id),
+        ).fetchone()
+    sql = "SELECT * FROM login_codes WHERE channel = ? AND target = ? AND purpose = ? AND used_at IS NULL"
+    params: list[Any] = [channel, target, purpose]
+    if user_id is not None:
+        sql += " AND user_id = ?"
+        params.append(user_id)
+    return conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+
+
+def verify_login_code(
+    conn: sqlite3.Connection,
+    *,
+    channel: str | None,
+    target: str | None,
+    purpose: str,
+    code: str,
+    secret_key: str,
+    now: datetime,
+    user_id: int | None = None,
+) -> int:
+    """Check ``code`` against the newest live row of ``(channel, target, purpose)`` and return that row's id.
+
+    ``user_id`` narrows the lookup when given (bind_* / rebind_phone / reauth rows belong to the session's user; a reset or
+    challenge code to its account); with ``target=None`` the newest live row for ``(purpose, user_id)`` is used whatever its
+    channel (endpoint 87: a ``reauth`` code went to the bound phone or the verified e-mail). Raises 400 ``invalid_code`` with
+    ``details.attempts_left`` on a wrong code, or ``attempts_left: 0`` when no live code exists / it expired / its attempt budget
+    is spent (the code is burnt after :data:`LOGIN_CODE_MAX_ATTEMPTS`).
+
+    The code is **not** consumed here: the caller marks it used with :func:`mark_login_code_used` inside the transaction that
+    applies the verified action (a login, a binding, a password), so "verified" and the write commit together (AUTH_SIGNUP_DESIGN
+    §5.6 invariant 1). The lookup, the compare and the attempt count run inside ONE ``BEGIN IMMEDIATE`` of their own (``db.maybe_tx``),
+    so concurrent wrong guesses are serialised and the 5-attempt budget holds under a flood; a burnt row (``attempts + 1 >=``
+    :data:`LOGIN_CODE_MAX_ATTEMPTS`) gets its ``used_at`` in the same statement. Call this **outside** any open transaction: the
+    bookkeeping is committed before the error is raised, so a wrong guess always counts whatever the caller does next.
     """
     now_iso = to_iso(now)
-    row = conn.execute(
-        "SELECT id, email, code_hash, expires_at, attempts FROM email_codes WHERE user_id = ? AND used_at IS NULL ORDER BY id DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
-    if row is None or str(row["expires_at"]) <= now_iso or int(row["attempts"]) >= EMAIL_CODE_MAX_ATTEMPTS:
-        raise ApiError("invalid_code", details={"attempts_left": 0})
-    expected = email_code_hash(secret_key, code.strip(), user_id)
-    if not hmac.compare_digest(str(row["code_hash"]), expected):
-        attempts = int(row["attempts"]) + 1
-        left = max(0, EMAIL_CODE_MAX_ATTEMPTS - attempts)
-        with db.maybe_tx(conn):
-            if left == 0:
-                conn.execute("UPDATE email_codes SET attempts = ?, used_at = ? WHERE id = ?", (attempts, now_iso, row["id"]))
-            else:
-                conn.execute("UPDATE email_codes SET attempts = ? WHERE id = ?", (attempts, row["id"]))
-        raise ApiError("invalid_code", details={"attempts_left": left})
+    cleaned = (code or "").strip()
+    verified: int | None = None
+    left = 0
     with db.maybe_tx(conn):
-        conn.execute("UPDATE email_codes SET used_at = ? WHERE id = ?", (now_iso, row["id"]))
-    return str(row["email"])
+        row = _live_login_code(conn, channel=channel, target=target, purpose=purpose, user_id=user_id)
+        if row is not None and str(row["expires_at"]) > now_iso and int(row["attempts"]) < LOGIN_CODE_MAX_ATTEMPTS:
+            expected = login_code_hash(secret_key, cleaned, str(row["channel"]), str(row["target"]), purpose)
+            if hmac.compare_digest(str(row["code_hash"]), expected):
+                verified = int(row["id"])
+            else:
+                # one statement counts the guess and burns the row at the limit; RETURNING reads the count this guess produced
+                counted = conn.execute(
+                    "UPDATE login_codes SET attempts = attempts + 1, used_at = CASE WHEN attempts + 1 >= ? THEN ? ELSE used_at END "
+                    "WHERE id = ? AND used_at IS NULL RETURNING attempts",
+                    (LOGIN_CODE_MAX_ATTEMPTS, now_iso, row["id"]),
+                ).fetchone()
+                left = max(0, LOGIN_CODE_MAX_ATTEMPTS - int(counted[0])) if counted is not None else 0
+    # raised AFTER the block committed: raising inside it would roll the count back
+    if verified is None:
+        raise ApiError("invalid_code", details={"attempts_left": left})
+    return verified
+
+
+def mark_login_code_used(conn: sqlite3.Connection, row_id: int, now: datetime) -> bool:
+    """Consume a verified code inside the caller's transaction; False when it was used meanwhile (a concurrent request won)."""
+    cur = conn.execute("UPDATE login_codes SET used_at = ? WHERE id = ? AND used_at IS NULL", (to_iso(now), row_id))
+    return cur.rowcount == 1
+
+
+def load_login_code(conn: sqlite3.Connection, row_id: int) -> dict[str, Any] | None:
+    return row_dict(conn.execute("SELECT * FROM login_codes WHERE id = ?", (row_id,)).fetchone())
+
+
+def issue_challenge_token(conn: sqlite3.Connection, *, target: str, user_id: int, ip: str | None, secret_key: str, now: datetime) -> str:
+    """The stale-phone challenge (AUTH_SIGNUP_DESIGN §5.3, API.md 81–84): a ``secrets.token_urlsafe(32)`` token stored as
+    ``login_codes(channel='phone', target=<E.164>, purpose='challenge', user_id=<the account the number is bound to>)`` with
+    ``code_hash = login_code_hash(token, 'phone', target, 'challenge')``, valid :data:`CHALLENGE_TTL_S`; an earlier live challenge
+    for the same number is voided. Returns the token (never stored in clear)."""
+    token = secrets.token_urlsafe(32)
+    _store_login_code(conn, channel="phone", target=target, purpose="challenge", user_id=user_id, secret=token, ip=ip, secret_key=secret_key, now=now, ttl_s=CHALLENGE_TTL_S)
+    return token
+
+
+def verify_challenge_token(conn: sqlite3.Connection, *, token: str, secret_key: str, now: datetime) -> dict[str, Any]:
+    """Resolve a challenge token to its live ``login_codes`` row (``id``, ``user_id``, ``target``, ``created_at`` …) or raise 400
+    ``challenge_expired`` (unknown, expired or already used). The token is 256 bits, so the live challenge rows are simply scanned
+    with a constant-time compare; the caller consumes the row with :func:`mark_login_code_used` inside its transaction."""
+    now_iso = to_iso(now)
+    rows = conn.execute(
+        "SELECT * FROM login_codes WHERE purpose = 'challenge' AND used_at IS NULL AND expires_at > ? ORDER BY id DESC",
+        (now_iso,),
+    ).fetchall()
+    cleaned = (token or "").strip()
+    for row in rows:
+        expected = login_code_hash(secret_key, cleaned, str(row["channel"]), str(row["target"]), "challenge")
+        if hmac.compare_digest(str(row["code_hash"]), expected):
+            return row_dict(row) or {}
+    raise ApiError("challenge_expired")
+
+
+# ------------------------------------------------------------------------------------ identities
+def phone_identity(conn: sqlite3.Connection, user_id: int) -> dict[str, Any] | None:
+    """The user's live (undisputed) phone identity row, or None."""
+    return row_dict(conn.execute("SELECT * FROM identities WHERE user_id = ? AND provider = 'phone' AND disputed_at IS NULL", (user_id,)).fetchone())
+
+
+def identity_by_subject(conn: sqlite3.Connection, provider: str, subject: str) -> dict[str, Any] | None:
+    """The live (undisputed) identity row holding ``(provider, subject)`` — ``ux_identities_live`` makes it unique — or None."""
+    return row_dict(conn.execute("SELECT * FROM identities WHERE provider = ? AND subject = ? AND disputed_at IS NULL", (provider, subject)).fetchone())
 
 
 # ------------------------------------------------------------------------------- webhook host check
@@ -542,23 +805,47 @@ def load_user_by_name(conn: sqlite3.Connection, username: str) -> dict[str, Any]
     return row_dict(conn.execute("SELECT * FROM users WHERE username = ?", (username.strip(),)).fetchone())
 
 
-def user_dto(row: Mapping[str, Any]) -> dict[str, Any]:
-    """API.md §9 ``User`` from a ``users`` row (``display_name`` defaults to the username)."""
+def _column(row: Mapping[str, Any], key: str) -> Any:
+    """``row[key]`` or None — a ``sqlite3.Row`` raises IndexError and a dict KeyError for a column the row does not carry."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def user_dto(row: Mapping[str, Any], *, phone: str | None = None) -> dict[str, Any]:
+    """API.md §9 ``User`` from a ``users`` row (``display_name`` defaults to the username).
+
+    ``has_password`` = ``password_set_at IS NOT NULL`` (0018; false for a code-created account until endpoint 89 / 7 sets one),
+    ``phone_masked`` = the live phone identity passed as ``phone`` (E.164; :func:`user_dto_for` looks it up), ``needs_profile`` =
+    a code-created account (placeholder username) that has not declared its age band yet (endpoint 89), ``age_band`` as declared.
+    """
+    username = row["username"]
     return {
         "id": int(row["id"]),
-        "username": row["username"],
-        "display_name": row["display_name"] or row["username"],
+        "username": username,
+        "display_name": row["display_name"] or username,
         "email": row["email"],
         "email_verified": row["email_verified_at"] is not None,
         "role": row["role"],
         "onboarding_state": row["onboarding_state"],
         "created_at": row["created_at"],
+        "has_password": _column(row, "password_set_at") is not None,
+        "phone_masked": mask_phone(phone) if phone else None,
+        "needs_profile": _column(row, "age_band") is None and bool(PLACEHOLDER_USERNAME_RE.match(str(username))),
+        "age_band": _column(row, "age_band"),
     }
 
 
-def admin_user_dto(row: Mapping[str, Any], *, bank_size: int, streak_days: int) -> dict[str, Any]:
+def user_dto_for(conn: sqlite3.Connection, row: Mapping[str, Any]) -> dict[str, Any]:
+    """:func:`user_dto` with the live phone identity looked up (``phone_masked`` filled) — the form every ``{user}`` response uses."""
+    identity = phone_identity(conn, int(row["id"]))
+    return user_dto(row, phone=str(identity["subject"]) if identity else None)
+
+
+def admin_user_dto(row: Mapping[str, Any], *, bank_size: int, streak_days: int, phone: str | None = None) -> dict[str, Any]:
     """API.md §9 ``AdminUser``."""
-    dto = user_dto(row)
+    dto = user_dto(row, phone=phone)
     dto.update(
         {
             "is_active": bool(int(row["is_active"])),
@@ -659,11 +946,15 @@ def create_user(
     role: str = "user",
     display_name: str | None = None,
     email: str | None = None,
+    password_set_at: str | None,
+    email_verified_at: str | None = None,
 ) -> int:
     """Insert ``users`` + ``user_settings`` (``next_push_at`` from the defaults ``Asia/Shanghai`` / ``08:00``).
 
     ``password_hash`` is pre-computed by the caller (:func:`hash_password`) so the bcrypt work never runs inside
-    the write transaction. Runs inside the caller's transaction when one is open (registration does the
+    the write transaction; ``password_set_at`` is ``to_iso(now)`` for a password registration and None for a code-created
+    account (``password_hash`` then holds :func:`unusable_password_hash`); ``email_verified_at`` is set when the e-mail itself
+    was the verified channel (endpoint 81). Runs inside the caller's transaction when one is open (registration does the
     bootstrap count check in the same ``BEGIN IMMEDIATE``), otherwise in its own. Uniqueness is pre-checked by
     callers; a racing duplicate surfaces as ``sqlite3.IntegrityError``.
     """
@@ -672,9 +963,9 @@ def create_user(
     now_iso = to_iso(now)
     with db.maybe_tx(conn):
         cur = conn.execute(
-            "INSERT INTO users(username, email, display_name, password_hash, role, is_active, onboarding_state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?)",
-            (username.strip(), email, display_name, password_hash, role, now_iso, now_iso),
+            "INSERT INTO users(username, email, email_verified_at, display_name, password_hash, password_set_at, role, is_active, onboarding_state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)",
+            (username.strip(), email, email_verified_at, display_name, password_hash, password_set_at, role, now_iso, now_iso),
         )
         user_id = int(cur.lastrowid)
         conn.execute(
@@ -694,9 +985,12 @@ def is_last_active_admin(conn: sqlite3.Connection, user: Mapping[str, Any]) -> b
 
 
 def set_password(conn: sqlite3.Connection, user_id: int, password_hash: str, now: datetime, *, keep_token_hash: str | None = None) -> None:
-    """Store a new (pre-computed) hash and revoke the user's sessions (all, or all but ``keep_token_hash``)."""
+    """Store a new (pre-computed) hash, stamp ``password_set_at`` (the account now has a usable password — ``User.has_password``)
+    and revoke the user's sessions (all, or all but ``keep_token_hash``). The single password writer: endpoints 7 / 57 / 89 / 91,
+    ``wd set-password``."""
+    now_iso = to_iso(now)
     with db.maybe_tx(conn):
-        conn.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (password_hash, to_iso(now), user_id))
+        conn.execute("UPDATE users SET password_hash = ?, password_set_at = ?, updated_at = ? WHERE id = ?", (password_hash, now_iso, now_iso, user_id))
         delete_sessions(conn, user_id, keep_token_hash=keep_token_hash)
 
 
@@ -778,7 +1072,7 @@ def cmd_create_admin(args: argparse.Namespace) -> int:
         now = SYSTEM_CLOCK.now_utc()
         password_hash = hash_password(password)
         with db.tx(conn):
-            user_id = create_user(conn, username=username, password_hash=password_hash, now=now, role="admin")
+            user_id = create_user(conn, username=username, password_hash=password_hash, now=now, role="admin", password_set_at=to_iso(now))
         print(f"created admin {username} (id {user_id})")
         return 0
     finally:
@@ -814,6 +1108,11 @@ def _cmd_role(args: argparse.Namespace, role: str) -> int:
         if user["role"] == role:
             print(f"{user['username']} is already {role}")
             return 0
+        if role == "admin" and _column(user, "password_set_at") is None:
+            # the API 57 rule (API.md §1.1 admin_needs_password): admins sign in with a password only (endpoint 3; a code login
+            # answers them 403 password_required), so an account without one would be an admin nobody can log in as
+            print(f"wd promote: {user['username']} has no password (admin_needs_password): run `wd set-password {user['username']}` first", file=sys.stderr)
+            return 1
         with db.tx(conn):
             if role == "user" and is_last_active_admin(conn, user):
                 print(f"wd demote: {user['username']} is the last active admin", file=sys.stderr)
@@ -853,8 +1152,54 @@ def cmd_invite(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_unlock(args: argparse.Namespace) -> int:
+    """``wd unlock <identifier>``: clear the login lockout of a username / phone / e-mail for every client IP (DEPLOY §9, ops.md §6)."""
+    cfg = _cli_settings()
+    identifier = (args.identifier or "").strip()
+    if not identifier:
+        print("wd unlock: an identifier (username, phone or e-mail) is required", file=sys.stderr)
+        return 2
+    conn = _cli_conn(cfg)
+    try:
+        removed = unlock_identifier(conn, identifier)
+        print(f"unlocked: {removed} lockout row(s) removed")  # the identifier is not echoed: it may be a phone number or an e-mail
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_sms_probe(args: argparse.Namespace) -> int:
+    """``wd sms-probe <number>``: send ONE real login code (template 100001) through the configured SMS provider and print the
+    provider's answer — the day-0 check of the Aliyun signature / template before the login page depends on it. Prints neither the
+    code nor the full number; does not touch the database or the SMS budget counters. Exit 0 sent, 1 the provider refused, 2 usage."""
+    from .delivery.sms import TEMPLATE_BY_PURPOSE, SmsError, sms_sender_from_settings  # lazy: the delivery package is not needed by the web routes' import of this module
+
+    cfg = _cli_settings()
+    e164 = normalize_phone(args.number or "")
+    if e164 is None:
+        print("wd sms-probe: not a mainland mobile number (expected +86 1xxxxxxxxxx)", file=sys.stderr)
+        return 2
+    if not cfg.sms_configured:
+        print("wd sms-probe: WD_SMS_PROVIDER is off — set WD_SMS_PROVIDER=aliyun_verify with WD_ALIYUN_ACCESS_KEY_ID / WD_ALIYUN_ACCESS_KEY_SECRET_FILE / WD_ALIYUN_SMS_SIGN_NAME first (DEPLOY §4)", file=sys.stderr)
+        return 2
+    sender = sms_sender_from_settings(cfg)
+    if sender is None:  # pragma: no cover - sms_configured guarantees a sender
+        print("wd sms-probe: no SMS sender for the configured provider", file=sys.stderr)
+        return 2
+    template = TEMPLATE_BY_PURPOSE["login"]
+    try:
+        sender.send_code(e164, _new_code(), template, minutes=LOGIN_CODE_TTL_S // 60)
+    except SmsError as e:
+        print(f"wd sms-probe: {cfg.sms_provider} refused the send to {mask_phone(e164)} (template {template}): {e.kind}: {e}", file=sys.stderr)
+        return 1
+    result = getattr(sender, "last_result", None) or {}
+    detail = " ".join(f"{k}={result[k]}" for k in ("Code", "Message", "RequestId", "BizId") if result.get(k))
+    print(f"sms-probe: code sent to {mask_phone(e164)} via {cfg.sms_provider}, template {template}" + (f" — {detail}" if detail else ""))
+    return 0
+
+
 def register_cli(sub: argparse._SubParsersAction) -> None:
-    """``wd create-admin | set-password | promote | demote | invite`` (DEPLOY §9, owner ``wd.security``)."""
+    """``wd create-admin | set-password | promote | demote | invite | unlock | sms-probe`` (DEPLOY §9, owner ``wd.security``)."""
     p = sub.add_parser("create-admin", help="create an admin account (unattended: WD_ADMIN_USERNAME / WD_ADMIN_PASSWORD)")
     p.add_argument("--if-none", action="store_true", help="do nothing when any user already exists")
     p.add_argument("--username", help="admin username (default: WD_ADMIN_USERNAME)")
@@ -866,7 +1211,7 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--password-env", metavar="VAR", help="environment variable holding the new password (default: prompt; required when non-interactive)")
     p.set_defaults(func=cmd_set_password)
 
-    p = sub.add_parser("promote", help="make a user an admin")
+    p = sub.add_parser("promote", help="make a user an admin (refuses an account without a password: admins sign in with one)")
     p.add_argument("username")
     p.set_defaults(func=cmd_promote)
 
@@ -879,3 +1224,11 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--days", type=int, default=None, help="expires after N days (default: never)")
     p.add_argument("--note", default="", help="free-text note shown in the admin page")
     p.set_defaults(func=cmd_invite)
+
+    p = sub.add_parser("unlock", help="clear the login lockout of a username / phone / e-mail for every client IP")
+    p.add_argument("identifier", help="the username, phone number or e-mail the lockout was counted under")
+    p.set_defaults(func=cmd_unlock)
+
+    p = sub.add_parser("sms-probe", help="send one real login code through the configured SMS provider (day-0 check; prints the provider's answer)")
+    p.add_argument("number", help="a mainland mobile number, e.g. +8613800138000")
+    p.set_defaults(func=cmd_sms_probe)

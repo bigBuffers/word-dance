@@ -347,6 +347,28 @@ def test_prefetch_caps_at_50_per_user(settings, seeded, monkeypatch):
     assert uid  # silence unused warning
 
 
+def test_prefetch_and_batch_build_ignore_the_per_user_ai_quota(settings, seeded, monkeypatch):
+    """WD_AI_USER_DAILY_WORDS counts a learner's own marks only (CLAUDE_INTEGRATION §7): the 03:30 prefetch and build_batch step 9
+    pass no ``user_id`` to ``bank.enqueue_content_if_needed``, so a quota of 1 changes nothing there — they stay bounded by
+    ``PREFETCH_LIMIT`` and the user's daily counts — and nobody's counter moves."""
+    conn = seeded
+    FakeBudget(spent=0.0).install(monkeypatch)
+    tight = dataclasses.replace(settings, ai_user_daily_words=1)
+    monkeypatch.setattr(bank, "get_settings", lambda refresh=False: tight)
+    make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_new_count=0, daily_screen_count=50, stages_json='["zk","gk","cet4","cet6"]')
+    conn.execute("DELETE FROM jobs")
+    assert scheduler.prefetch(conn, datetime(2026, 10, 14, 19, 30, tzinfo=UTC), cfg=tight) == scheduler.PREFETCH_LIMIT == 50
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content' AND priority = 30").fetchone()[0] == 50
+    # a fresh user's first batch: every selected word lacking content gets its job, however small the quota
+    conn.execute("DELETE FROM jobs")
+    conn.execute("UPDATE words SET content_state = 'none' WHERE content_state = 'queued'")
+    bob = make_user(conn, "bob", next_push_at="2026-10-15T00:00:00Z", daily_new_count=0, daily_screen_count=5)
+    batches.build_batch(conn, bob, "2026-10-15", "scheduled", datetime(2026, 10, 14, 21, 0, tzinfo=UTC))
+    n = conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate_content'").fetchone()[0]
+    assert n > 1 and n == conn.execute("SELECT COUNT(*) FROM words WHERE content_state = 'queued'").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM auth_throttle WHERE key LIKE 'ai:user:%'").fetchone()[0] == 0
+
+
 def test_prefetch_skips_when_spend_is_high_or_ai_paused(settings, seeded, monkeypatch):
     conn = seeded
     uid = make_user(conn, "alice", next_push_at="2026-10-15T00:00:00Z", daily_screen_count=5)
@@ -627,10 +649,27 @@ def test_hourly_gc(settings, seeded):
     conn.execute("INSERT INTO auth_throttle(key, window_start, count, blocked_until) VALUES ('login:user:bob', '2026-10-01T00:00:00Z', 10, '2026-10-20T00:00:00Z')")
     job = queue.enqueue(conn, "send_webhook", {"batch_id": 1}, dedupe_key="webhook:1", now="2026-10-14T00:00:00Z")
     conn.execute("UPDATE jobs SET status = 'running', locked_by = 'io-1:otherboot', locked_at = '2026-10-14T00:50:00Z' WHERE id = ?", (job,))
+    # login_codes (0018): expired rows go, used rows after a day, live and freshly used ones stay
+    conn.executemany(
+        "INSERT INTO login_codes(id, channel, target, purpose, user_id, code_hash, expires_at, used_at) VALUES (?, 'phone', '+8613800138000', 'login', ?, 'h', ?, ?)",
+        [
+            (1, None, "2026-10-14T00:59:00Z", None),  # expired
+            (2, None, "2026-10-14T01:10:00Z", None),  # live
+            (3, uid, "2026-10-13T00:10:00Z", "2026-10-13T00:05:00Z"),  # used yesterday → gone (expired anyway)
+            (4, uid, "2026-10-14T01:10:00Z", "2026-10-13T00:55:00Z"),  # used more than a day ago, unexpired → gone
+            (5, uid, "2026-10-14T01:10:00Z", "2026-10-14T00:30:00Z"),  # used half an hour ago → kept a day (audit)
+            (6, uid, "2026-10-14T00:40:00Z", "2026-10-14T00:30:00Z"),  # used half an hour ago AND expired since (the real shape: a code is used before it expires) → kept a day
+        ],
+    )
+    # sms.sent.* kv counters (sms_budget): older than two days go, the rest stay
+    for key in ("sms.sent.2026-10-11", "sms.sent.2026-10-11T23", "sms.sent.2026-10-12", "sms.sent.2026-10-13T22", "sms.sent.2026-10-14", "sms.sent.2026-10-14T00"):
+        db.kv_set(conn, key, "3")
     now = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
     assert tick(conn, settings, now).gc is True
     assert [r[0] for r in conn.execute("SELECT token_hash FROM sessions")] == ["live"]
     assert [r[0] for r in conn.execute("SELECT key FROM auth_throttle")] == ["login:user:bob"]  # still locked out → kept
+    assert [r[0] for r in conn.execute("SELECT id FROM login_codes ORDER BY id")] == [2, 5, 6]
+    assert [r[0] for r in conn.execute("SELECT key FROM kv WHERE key LIKE 'sms.sent.%' ORDER BY key")] == ["sms.sent.2026-10-12", "sms.sent.2026-10-13T22", "sms.sent.2026-10-14", "sms.sent.2026-10-14T00"]
     assert conn.execute("SELECT status, locked_by FROM jobs WHERE id = ?", (job,)).fetchone()[:] == ("queued", None)
     assert tick(conn, settings, now + timedelta(minutes=30)).gc is False
     assert tick(conn, settings, now + timedelta(hours=1)).gc is True

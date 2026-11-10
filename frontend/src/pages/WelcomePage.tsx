@@ -1,4 +1,7 @@
-// WelcomePage — `/welcome` (FRONTEND §2, DESIGN §6.2). Step 1: who am I… quick picks pre-select target stages
+// WelcomePage — `/welcome` (FRONTEND §2, DESIGN §6.2). Step 0 (first setup) only while `user.needs_profile` (an account a
+// verification code created, API.md 81 / 89): required nickname, the age band (adult / guardian or student aged 14+; under-14 learners
+// are pointed to the coming guardian accounts), an optional one-time username and an optional password (strength meter)
+// → POST /api/account/profile → `applySession({user})` → step 1. Step 1: who am I… quick picks pre-select target stages
 // (primary pupil → xs · junior-high student → xs+zk · high-school student → zk+gk · university student → gk+cet4+cet6 · professional → cet4+cet6), main stage segmented, push time,
 // timezone (auto-detected) → POST /api/onboarding (state `screen`). Step 2: screening of up to 30 cards from
 // GET /api/screen/next?stage=auto&count=30 with known / unfamiliar / skip / peek, 5-s undo (server `restore`),
@@ -9,9 +12,11 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { useNavigate } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
+import type { ProfileBody } from '@/api/endpoints';
 import type { ScreenVerdict, ScreenWord, Stage } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
+import { Field } from '@/components/ui/Field';
 import { Segmented } from '@/components/ui/Segmented';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { STAGE_ORDER } from '@/components/word/StageChips';
@@ -22,9 +27,11 @@ import { useTapLock } from '@/hooks/useTapLock';
 import { UNDO_LIST_MS, useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
+import { USERNAME_RE, passwordStrength, validationFieldMessages } from '@/utils/auth';
 import { DEFAULT_TIMEZONE, detectTimeZone, isValidPushTime } from '@/utils/date';
 import { clientEventId } from '@/utils/format';
 import '@/components/bank/bank.css';
+import '@/components/ui/auth.css';
 import './WelcomePage.css';
 
 export type Role = 'xs' | 'zk' | 'gk' | 'uni' | 'pro';
@@ -53,12 +60,117 @@ export function toggleStage(stages: readonly Stage[], current: Stage, stage: Sta
   return { stages: next, current: nextCurrent };
 }
 
-function StepDots({ step }: { step: 1 | 2 }) {
+function StepDots({ step, withProfile = false }: { step: 0 | 1 | 2; withProfile?: boolean }) {
   return (
     <div className="welcome__steps" aria-hidden="true">
+      {withProfile && <span className="welcome__step is-active" />}
       <span className={`welcome__step${step >= 1 ? ' is-active' : ''}`} />
       <span className={`welcome__step${step >= 2 ? ' is-active' : ''}`} />
     </div>
+  );
+}
+
+type AgeChoice = ProfileBody['age_band'];
+
+/** Step 0 (first setup) of a code-created account (API.md 89): nickname + age band, optional username and password. */
+function ProfileStep({ onDone }: { onDone: () => void }) {
+  const { applySession, refresh } = useAuth();
+  const [nickname, setNickname] = useState('');
+  const [ageBand, setAgeBand] = useState<AgeChoice | null>(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const trimmedName = nickname.trim();
+  const trimmedUser = username.trim();
+  const usernameOk = trimmedUser === '' || USERNAME_RE.test(trimmedUser);
+  const strength = passwordStrength(password, trimmedUser);
+  const passwordOk = password === '' || strength >= 2;
+  const valid = trimmedName.length > 0 && trimmedName.length <= 32 && ageBand !== null && usernameOk && passwordOk;
+  const nameError = touched && !trimmedName ? zh.welcome.nicknameHint : null;
+  const usernameError = touched && !usernameOk ? zh.auth.usernameHint : null;
+  const passwordError = touched && !passwordOk ? zh.errors.weakPassword : null;
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setTouched(true);
+    if (!valid || saving || ageBand === null) return;
+    setSaving(true);
+    setError(null);
+    const body: ProfileBody = { display_name: trimmedName, age_band: ageBand };
+    if (trimmedUser) body.username = trimmedUser;
+    if (password) body.password = password;
+    try {
+      const res = await endpoints.saveProfile(body);
+      applySession({ user: res.user });
+      onDone();
+    } catch (err) {
+      if (isApiError(err) && err.code === 'invalid_transition') {
+        // the profile is already saved (another tab): take the server's user (display_name, needs_profile false) before step 1
+        await refresh().catch(() => undefined);
+        onDone();
+        return;
+      }
+      setError(validationFieldMessages(err) ?? errorMessage(err)); // 400 validation_error → the field messages (e.g. a phone-like username)
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="page page--narrow welcome">
+      <StepDots step={0} withProfile />
+      <h1 className="page__title">{zh.welcome.step0}</h1>
+      <p className="welcome__lead">{zh.welcome.step0Lead}</p>
+      <form className="auth__form" onSubmit={submit} noValidate>
+        <Field label={zh.welcome.nickname} hint={nameError ? undefined : zh.welcome.nicknameHint} error={nameError} required>
+          {(control) => <input {...control} type="text" autoComplete="nickname" maxLength={32} autoFocus value={nickname} onChange={(e) => setNickname(e.target.value)} />}
+        </Field>
+        <div className="welcome__group">
+          <span className="welcome__label" id="welcome-age">
+            {zh.welcome.ageBand}
+          </span>
+          <div className="auth__radios" role="radiogroup" aria-labelledby="welcome-age">
+            <label className="auth__radio">
+              <input type="radio" name="age_band" value="adult" checked={ageBand === 'adult'} onChange={() => setAgeBand('adult')} />
+              <span>{zh.welcome.ageAdult}</span>
+            </label>
+            <label className="auth__radio">
+              <input type="radio" name="age_band" value="14plus" checked={ageBand === '14plus'} onChange={() => setAgeBand('14plus')} />
+              <span>{zh.welcome.age14plus}</span>
+            </label>
+          </div>
+          <p className="settings__hint muted">{zh.welcome.under14}</p>
+        </div>
+        <Field label={zh.welcome.optionalUsername} hint={usernameError ? undefined : zh.auth.usernameHint} error={usernameError}>
+          {(control) => <input {...control} type="text" autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck={false} maxLength={32} value={username} onChange={(e) => setUsername(e.target.value)} />}
+        </Field>
+        <Field label={zh.welcome.optionalPassword} hint={passwordError ? undefined : zh.welcome.passwordWhy} error={passwordError}>
+          {(control) => (
+            <>
+              <input {...control} type="password" autoComplete="new-password" maxLength={64} value={password} onChange={(e) => setPassword(e.target.value)} />
+              <div className="auth__meter" data-level={strength} aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+            </>
+          )}
+        </Field>
+        {error && (
+          <p className="auth__error" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="welcome__actions">
+          <Button type="submit" variant="primary" size="lg" loading={saving} disabled={!valid && touched}>
+            {zh.welcome.next}
+          </Button>
+        </div>
+      </form>
+    </section>
   );
 }
 
@@ -67,7 +179,8 @@ export default function WelcomePage() {
   const { user, settings, applySession } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
-  const [step, setStep] = useState<1 | 2>(user?.onboarding_state === 'screen' ? 2 : 1);
+  const withProfile = user?.needs_profile === true;
+  const [step, setStep] = useState<0 | 1 | 2>(withProfile ? 0 : user?.onboarding_state === 'screen' ? 2 : 1);
 
   // ---- step 1 ----
   const detected = useMemo(() => detectTimeZone(), []);
@@ -224,10 +337,12 @@ export default function WelcomePage() {
     { enabled: step === 2 && card !== undefined },
   );
 
+  if (step === 0) return <ProfileStep onDone={() => setStep(1)} />;
+
   if (step === 1) {
     return (
       <section className="page page--narrow welcome">
-        <StepDots step={1} />
+        <StepDots step={1} withProfile={withProfile} />
         <h1 className="page__title">{zh.welcome.title}</h1>
         <p className="welcome__lead">{zh.welcome.step1}</p>
         <form onSubmit={saveStep1} noValidate>
@@ -308,7 +423,7 @@ export default function WelcomePage() {
   const exhausted = !loadingCards && cards.length === 0;
   return (
     <section className="page page--narrow welcome">
-      <StepDots step={2} />
+      <StepDots step={2} withProfile={withProfile} />
       <h1 className="page__title">{zh.welcome.step2}</h1>
       <p className="welcome__lead">{zh.welcome.step2Hint}</p>
       <div className="welcome__progress" aria-live="polite">

@@ -1,16 +1,20 @@
 // SettingsPage — `/settings` me (FRONTEND §5.8): sections push settings / learning settings / account / about & sources, each field
 // saved on its own (`PUT /api/settings` through AuthContext.updateSettings, inline saved), e-mail code
 // flow, webhook test, export (CSV / JSON links), import (JSON reduced client-side to `{version, words}`,
-// CSV posted as is → result sheet), change password, logout, delete account (password re-entry).
+// CSV posted as is → result sheet), the login-methods block (API.md §3.1: phone bind / rebind / unbind through endpoints 85–88,
+// set-password for a code-created account through a `reauth` code + endpoint 7, change-password otherwise, the read-only username),
+// logout, delete account (password re-entry, or a `reauth` code when the account has no password — endpoint 8).
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { errorMessage } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
-import type { DanceMode, ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
+import type { CodeChannel, DanceMode, ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
+import { CodeField, CODE_LENGTH } from '@/components/ui/CodeField';
 import { Field } from '@/components/ui/Field';
+import { PhoneField } from '@/components/ui/PhoneField';
 import { Segmented } from '@/components/ui/Segmented';
 import { Sheet } from '@/components/ui/Sheet';
 import { Switch } from '@/components/ui/Switch';
@@ -19,10 +23,12 @@ import { usePageTitle } from '@/hooks/usePageTitle';
 import { useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 import { isNative, reminderPermission, requestReminderPermission, syncDailyReminder, type ReminderPermission } from '@/native/capacitor';
-import { routePaths } from '@/routes';
+import { legalUrls, routePaths } from '@/routes';
+import { isMainlandPhone, phoneToE164 } from '@/utils/auth';
 import { DEFAULT_TIMEZONE, detectTimeZone, formatDateTime, isValidPushTime } from '@/utils/date';
 import { parseIntInRange } from '@/utils/format';
 import { AddStatusBadge } from '@/components/bank/AddWordPreviewRow';
+import '@/components/ui/auth.css';
 import './SettingsPage.css';
 
 const FORMATS: readonly WebhookFormat[] = ['generic', 'wecom', 'feishu', 'serverchan', 'bark'];
@@ -506,8 +512,50 @@ function LearnSection({ settings }: { settings: Settings }) {
 // account
 // ---------------------------------------------------------------------------------------------------
 
+/**
+ * Re-authentication by code for an account without a password (API.md 7 / 8 / 87): a `reauth` code of endpoint 85 goes to
+ * the bound phone (while the server can send SMS) or the verified e-mail (while the server can send mail); both available →
+ * the learner picks; neither → a hint instead of a code input the server could not serve.
+ */
+function ReauthCode({ user, smsOn, emailOn, code, onChange, disabled = false }: { user: User; smsOn: boolean; emailOn: boolean; code: string; onChange: (c: string) => void; disabled?: boolean }) {
+  const toast = useToast();
+  const [choice, setChoice] = useState<CodeChannel | null>(null);
+  const channels: CodeChannel[] = [...(smsOn && user.phone_masked ? (['phone'] as const) : []), ...(emailOn && user.email && user.email_verified ? (['email'] as const) : [])];
+  const channel: CodeChannel | null = choice !== null && channels.includes(choice) ? choice : (channels[0] ?? null);
+  const targetOf = (c: CodeChannel) => (c === 'phone' ? (user.phone_masked ?? '') : (user.email ?? ''));
+  const send = async () => {
+    if (!channel) return;
+    try {
+      await endpoints.requestAccountCode({ channel, purpose: 'reauth' });
+      toast.success(zh.auth.codeSent);
+    } catch (e) {
+      toast.error(errorMessage(e));
+      throw e;
+    }
+  };
+  if (channel === null) return <p className="settings__hint">{zh.settings.reauthUnavailable}</p>;
+  return (
+    <>
+      <p className="settings__hint">{zh.settings.reauthHint}</p>
+      {channels.length > 1 ? (
+        <div className="settings__row">
+          <span>{zh.settings.reauthVia}</span>
+          <Segmented size="sm" aria-label={zh.settings.reauthVia} options={channels.map((c) => ({ value: c, label: targetOf(c) }))} value={channel ?? channels[0]!} onChange={setChoice} />
+        </div>
+      ) : (
+        channel && (
+          <p className="settings__hint">
+            {zh.settings.reauthVia} {targetOf(channel)}
+          </p>
+        )
+      )}
+      <CodeField value={code} onChange={onChange} onSend={send} canSend={channel !== null} disabled={disabled} />
+    </>
+  );
+}
+
 function AccountSection({ user }: { user: User }) {
-  const { applySession, refresh, refreshCounters, logout } = useAuth();
+  const { server, applySession, refresh, refreshCounters, logout } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
@@ -516,14 +564,34 @@ function AccountSection({ user }: { user: User }) {
   const [email, setEmail] = useState(user.email ?? '');
   const [pwOpen, setPwOpen] = useState(false);
   const [pwCurrent, setPwCurrent] = useState('');
+  const [pwCode, setPwCode] = useState('');
   const [pwNew, setPwNew] = useState('');
   const [pwBusy, setPwBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState<ImportResponse | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePw, setDeletePw] = useState('');
+  const [deleteCode, setDeleteCode] = useState('');
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  // login methods: phone bind / rebind / unbind sheets (API.md 85–88)
+  const [bindOpen, setBindOpen] = useState(false);
+  const [bindDigits, setBindDigits] = useState('');
+  const [bindCode, setBindCode] = useState('');
+  const [bindBusy, setBindBusy] = useState(false);
+  const [rebindOpen, setRebindOpen] = useState(false);
+  const [rebindOldCode, setRebindOldCode] = useState('');
+  const [rebindDigits, setRebindDigits] = useState('');
+  const [rebindNewCode, setRebindNewCode] = useState('');
+  const [rebindBusy, setRebindBusy] = useState(false);
+  const [unbindOpen, setUnbindOpen] = useState(false);
+  const [unbindPw, setUnbindPw] = useState('');
+  const [unbindCode, setUnbindCode] = useState('');
+  const [unbindBusy, setUnbindBusy] = useState(false);
+
+  const smsOn = server?.sms_enabled === true;
+  const emailOn = server?.email_configured !== false; // the same flag PushSection reads (`smtpMissing`)
+  const hasPassword = user.has_password;
 
   useEffect(() => setName(user.display_name), [user.display_name]);
   useEffect(() => setEmail(user.email ?? ''), [user.email]);
@@ -553,15 +621,29 @@ function AccountSection({ user }: { user: User }) {
     }
   };
 
+  /** Sends a bind / rebind code (endpoint 85); the toast reports the outcome, the CodeField starts its countdown only on success. */
+  const sendAccountCode = async (body: Parameters<typeof endpoints.requestAccountCode>[0]) => {
+    try {
+      await endpoints.requestAccountCode(body);
+      toast.success(zh.auth.codeSent);
+    } catch (e) {
+      toast.error(errorMessage(e));
+      throw e;
+    }
+  };
+
+  const pwReady = pwNew.length >= 8 && (hasPassword ? pwCurrent.length > 0 : pwCode.length === CODE_LENGTH);
   const changePassword = async (e: FormEvent) => {
     e.preventDefault();
-    if (!pwCurrent || pwNew.length < 8) return;
+    if (!pwReady) return;
     setPwBusy(true);
     try {
-      await endpoints.changePassword({ current_password: pwCurrent, new_password: pwNew });
+      await endpoints.changePassword(hasPassword ? { current_password: pwCurrent, new_password: pwNew } : { code: pwCode, new_password: pwNew });
+      if (!hasPassword) await refresh().catch(() => undefined); // has_password flips to true
       toast.success(zh.common.saved);
       setPwOpen(false);
       setPwCurrent('');
+      setPwCode('');
       setPwNew('');
     } catch (err) {
       toast.error(errorMessage(err));
@@ -597,12 +679,13 @@ function AccountSection({ user }: { user: User }) {
     navigate(routePaths.login, { replace: true });
   };
 
+  const deleteReady = hasPassword ? deletePw.length > 0 : deleteCode.length === CODE_LENGTH;
   const doDelete = async (e: FormEvent) => {
     e.preventDefault();
-    if (!deletePw) return;
+    if (!deleteReady) return;
     setDeleteBusy(true);
     try {
-      await endpoints.deleteAccount(deletePw);
+      await endpoints.deleteAccount(hasPassword ? { password: deletePw } : { code: deleteCode });
       await logout().catch(() => undefined);
       navigate(routePaths.login, { replace: true });
     } catch (err) {
@@ -610,6 +693,66 @@ function AccountSection({ user }: { user: User }) {
       setDeleteBusy(false);
     }
   };
+
+  const bindTarget = isMainlandPhone(bindDigits) ? phoneToE164(bindDigits) : null;
+  const doBind = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!bindTarget || bindCode.length !== CODE_LENGTH) return;
+    setBindBusy(true);
+    try {
+      const res = await endpoints.bindPhone({ target: bindTarget, code: bindCode });
+      applySession({ user: res.user });
+      toast.success(zh.settings.phoneBound);
+      setBindOpen(false);
+      setBindDigits('');
+      setBindCode('');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBindBusy(false);
+    }
+  };
+
+  const rebindTarget = isMainlandPhone(rebindDigits) ? phoneToE164(rebindDigits) : null;
+  const doRebind = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!rebindTarget || rebindOldCode.length !== CODE_LENGTH || rebindNewCode.length !== CODE_LENGTH) return;
+    setRebindBusy(true);
+    try {
+      const res = await endpoints.rebindPhone({ code_old: rebindOldCode, target_new: rebindTarget, code_new: rebindNewCode });
+      applySession({ user: res.user });
+      toast.success(zh.settings.phoneRebound);
+      setRebindOpen(false);
+      setRebindOldCode('');
+      setRebindDigits('');
+      setRebindNewCode('');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setRebindBusy(false);
+    }
+  };
+
+  const unbindReady = hasPassword ? unbindPw.length > 0 : unbindCode.length === CODE_LENGTH;
+  const doUnbind = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!unbindReady) return;
+    setUnbindBusy(true);
+    try {
+      const res = await endpoints.unbindPhone(hasPassword ? { password: unbindPw } : { code: unbindCode });
+      applySession({ user: res.user });
+      toast.success(zh.settings.phoneUnbound);
+      setUnbindOpen(false);
+      setUnbindPw('');
+      setUnbindCode('');
+    } catch (err) {
+      toast.error(errorMessage(err)); // 409 last_login_method: the phone is the only login method
+    } finally {
+      setUnbindBusy(false);
+    }
+  };
+
+  const emailHint = user.email ? (user.email_verified ? zh.settings.emailVerified : zh.settings.emailUnverified) : undefined;
 
   return (
     <Section title={zh.settings.account} saved={saved}>
@@ -628,7 +771,31 @@ function AccountSection({ user }: { user: User }) {
           }}
         />
       </Field>
-      <Field label={zh.auth.email} htmlFor="acct-email" hint={user.email && user.email_verified ? zh.settings.emailVerified : undefined}>
+
+      <h3 className="settings__subtitle">{zh.settings.loginMethods}</h3>
+      {smsOn && (
+        <div className="settings__row">
+          <span>{zh.settings.phone}</span>
+          <div className="settings__inline">
+            <span className="muted">{user.phone_masked ?? zh.settings.unbound}</span>
+            {user.phone_masked ? (
+              <>
+                <Button size="sm" onClick={() => setRebindOpen(true)}>
+                  {zh.settings.rebind}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setUnbindOpen(true)}>
+                  {zh.settings.unbind}
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" onClick={() => setBindOpen(true)}>
+                {zh.settings.bind}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      <Field label={zh.auth.email} htmlFor="acct-email" hint={emailHint}>
         <input
           id="acct-email"
           type="email"
@@ -642,10 +809,20 @@ function AccountSection({ user }: { user: User }) {
           }}
         />
       </Field>
-      <div className="settings__buttons">
-        <Button size="sm" onClick={() => setPwOpen(true)}>
-          {zh.settings.changePassword}
-        </Button>
+      <div className="settings__row">
+        <span>{zh.auth.password}</span>
+        <div className="settings__inline">
+          {!hasPassword && <span className="settings__hint">{zh.settings.noPasswordYet}</span>}
+          <Button size="sm" onClick={() => setPwOpen(true)}>
+            {hasPassword ? zh.settings.changePassword : zh.settings.setPassword}
+          </Button>
+        </div>
+      </div>
+      <div className="settings__row">
+        <span>{zh.settings.username}</span>
+        <span className="muted" lang="en">
+          {user.username}
+        </span>
       </div>
 
       {!isNative() && (
@@ -681,16 +858,71 @@ function AccountSection({ user }: { user: User }) {
         </Button>
       </div>
 
-      <Sheet open={pwOpen} onClose={() => setPwOpen(false)} title={zh.settings.changePassword}>
+      <Sheet open={pwOpen} onClose={() => setPwOpen(false)} title={hasPassword ? zh.settings.changePassword : zh.settings.setPassword}>
         <form className="auth__form" onSubmit={changePassword}>
-          <Field label={zh.settings.currentPassword} required>
-            {(c) => <input {...c} type="password" autoComplete="current-password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />}
-          </Field>
+          {hasPassword ? (
+            <Field label={zh.settings.currentPassword} required>
+              {(c) => <input {...c} type="password" autoComplete="current-password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />}
+            </Field>
+          ) : (
+            <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={pwCode} onChange={setPwCode} disabled={pwBusy} />
+          )}
           <Field label={zh.settings.newPassword} hint={zh.auth.passwordHint} required>
             {(c) => <input {...c} type="password" autoComplete="new-password" minLength={8} maxLength={64} value={pwNew} onChange={(e) => setPwNew(e.target.value)} />}
           </Field>
-          <Button type="submit" variant="primary" block loading={pwBusy} disabled={!pwCurrent || pwNew.length < 8}>
+          <Button type="submit" variant="primary" block loading={pwBusy} disabled={!pwReady}>
             {zh.common.save}
+          </Button>
+        </form>
+      </Sheet>
+
+      <Sheet open={bindOpen} onClose={() => setBindOpen(false)} title={zh.settings.bindPhone}>
+        <form className="auth__form" onSubmit={doBind} noValidate>
+          <PhoneField value={bindDigits} onChange={setBindDigits} hint={zh.auth.phoneHint} disabled={bindBusy} autoFocus />
+          <CodeField
+            value={bindCode}
+            onChange={setBindCode}
+            onSend={() => sendAccountCode({ channel: 'phone', purpose: 'bind_phone', target: bindTarget ?? '' })}
+            canSend={bindTarget !== null}
+            disabled={bindBusy}
+          />
+          <Button type="submit" variant="primary" block loading={bindBusy} disabled={bindTarget === null || bindCode.length !== CODE_LENGTH}>
+            {zh.settings.bind}
+          </Button>
+        </form>
+      </Sheet>
+
+      <Sheet open={rebindOpen} onClose={() => setRebindOpen(false)} title={zh.settings.rebindPhone}>
+        <form className="auth__form" onSubmit={doRebind} noValidate>
+          <p className="settings__hint">{zh.settings.rebindHint}</p>
+          <CodeField label={zh.settings.oldPhoneCode} value={rebindOldCode} onChange={setRebindOldCode} onSend={() => sendAccountCode({ channel: 'phone', purpose: 'rebind_phone' })} disabled={rebindBusy} />
+          <PhoneField label={zh.settings.newPhone} value={rebindDigits} onChange={setRebindDigits} hint={zh.auth.phoneHint} disabled={rebindBusy} />
+          <CodeField
+            label={zh.settings.newPhoneCode}
+            value={rebindNewCode}
+            onChange={setRebindNewCode}
+            onSend={() => sendAccountCode({ channel: 'phone', purpose: 'bind_phone', target: rebindTarget ?? '' })}
+            canSend={rebindTarget !== null}
+            disabled={rebindBusy}
+          />
+          <Button type="submit" variant="primary" block loading={rebindBusy} disabled={rebindTarget === null || rebindOldCode.length !== CODE_LENGTH || rebindNewCode.length !== CODE_LENGTH}>
+            {zh.settings.rebind}
+          </Button>
+        </form>
+      </Sheet>
+
+      <Sheet open={unbindOpen} onClose={() => setUnbindOpen(false)} title={zh.settings.unbindPhone}>
+        <form className="auth__form" onSubmit={doUnbind} noValidate>
+          <p className="settings__hint">{zh.settings.unbindHint}</p>
+          {hasPassword ? (
+            <Field label={zh.auth.password} required>
+              {(c) => <input {...c} type="password" autoComplete="current-password" value={unbindPw} onChange={(e) => setUnbindPw(e.target.value)} />}
+            </Field>
+          ) : (
+            <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={unbindCode} onChange={setUnbindCode} disabled={unbindBusy} />
+          )}
+          <Button type="submit" variant="danger" block loading={unbindBusy} disabled={!unbindReady}>
+            {zh.settings.unbind}
           </Button>
         </form>
       </Sheet>
@@ -719,11 +951,15 @@ function AccountSection({ user }: { user: User }) {
         title={zh.settings.deleteAccount}
       >
         <form className="auth__form" onSubmit={doDelete}>
-          <p>{zh.settings.deleteConfirm}</p>
-          <Field label={zh.auth.password} required>
-            {(c) => <input {...c} type="password" autoComplete="current-password" value={deletePw} onChange={(e) => setDeletePw(e.target.value)} />}
-          </Field>
-          <Button type="submit" variant="danger" block loading={deleteBusy} disabled={!deletePw}>
+          <p>{hasPassword ? zh.settings.deleteConfirm : zh.settings.deleteConfirmCode}</p>
+          {hasPassword ? (
+            <Field label={zh.auth.password} required>
+              {(c) => <input {...c} type="password" autoComplete="current-password" value={deletePw} onChange={(e) => setDeletePw(e.target.value)} />}
+            </Field>
+          ) : (
+            <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={deleteCode} onChange={setDeleteCode} disabled={deleteBusy} />
+          )}
+          <Button type="submit" variant="danger" block loading={deleteBusy} disabled={!deleteReady}>
             {zh.settings.deleteAccount}
           </Button>
         </form>
@@ -746,6 +982,9 @@ function AboutSection() {
         <p>{zh.settings.sources.lists}</p>
         <p>{zh.settings.sources.images}</p>
         <p>{zh.settings.sources.ai}</p>
+        <p>
+          <a href={legalUrls.privacy}>{zh.settings.privacy}</a> · <a href={legalUrls.terms}>{zh.settings.terms}</a> · <a href={legalUrls.children}>{zh.auth.childrenLink}</a>
+        </p>
       </div>
     </Section>
   );

@@ -227,7 +227,8 @@ export default function WordDetailPage() {
         const resumesAt = typeof e.details?.['resumes_at'] === 'string' ? (e.details['resumes_at'] as string) : new Date().toISOString();
         patch({ content_deferred_until: resumesAt });
       }
-      toast.error(errorMessage(e));
+      if (isApiError(e) && e.code === 'rate_limited' && (e.detailNumber('retry_after_s') ?? 0) > 600) toast.error(zh.word.examplesQuotaToday); // the per-user daily quota (resets at UTC midnight), not a burst limit
+      else toast.error(errorMessage(e));
     } finally {
       setRequestingContent(false);
     }

@@ -27,7 +27,16 @@ Validation rules:
   accepted) and
   ``WD_AI_FALLBACK_BATCH_SIZE`` (words per ``generate_content`` call while the fallback takes the group, default 5)
   is clamped like ``WD_AI_BATCH_SIZE``; ``openai_http`` mode with a kind removed from ``WD_AI_FALLBACK_KINDS`` starts
-  with a warning that those jobs (and SVG / dance jobs, always) wait indefinitely.
+  with a warning that those jobs (and SVG / dance jobs, always) wait indefinitely;
+* sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2, DEPLOY §4): ``WD_REGISTRATION_MODE`` gains ``verified``;
+  ``WD_SMS_PROVIDER`` is ``off`` / ``aliyun_verify`` and ``aliyun_verify`` refuses to start without ``WD_ALIYUN_ACCESS_KEY_ID``,
+  ``WD_ALIYUN_ACCESS_KEY_SECRET_FILE`` and ``WD_ALIYUN_SMS_SIGN_NAME``; ``WD_MAIL_PROVIDER`` is ``smtp`` / ``aliyun_dm`` and
+  ``aliyun_dm`` needs the same key id + secret file plus ``WD_SMTP_FROM`` (its sender address); the secret file follows the
+  ``WD_AI_FALLBACK_API_KEY_FILE`` rule (an existing readable regular file, a group/other-readable mode warns; its first line is
+  read at call time); ``WD_SMS_DAILY_CAP`` / ``WD_SMS_HOURLY_CAP`` are 0–100000 (0 = the cap is already reached),
+  ``WD_CODE_IP_HOURLY`` 1–100000, ``WD_PHONE_STALE_DAYS`` 1–3650, ``WD_CAPTCHA`` ``on`` / ``off`` (the image captcha gates only
+  the public code sends, endpoints 80 / 90) and ``WD_AI_USER_DAILY_WORDS`` 0–100000 (0 = unlimited; the per-user AI quota
+  public sign-up relies on). An unchanged ``.env`` keeps today's behaviour: every default is the pre-0018 one.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass, field, fields
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,8 +60,12 @@ DEFAULT_DATA_DIR = Path("/home/sqin/word-dance-data")
 DEFAULT_SEED_PATH = REPO_ROOT / "data" / "seed" / "vocab.jsonl.gz"
 DEFAULT_FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 
-REGISTRATION_MODES = ("open", "invite", "closed")
+REGISTRATION_MODES = ("open", "invite", "closed", "verified")  # verified = a phone / e-mail code creates the account (docs/AUTH_SIGNUP_DESIGN.md)
 SMTP_TLS_MODES = ("starttls", "ssl", "none")
+# sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2)
+SMS_PROVIDERS = ("off", "aliyun_verify")  # aliyun_verify = Aliyun 号码认证 SendSmsVerifyCode (delivery/sms.py)
+MAIL_PROVIDERS = ("smtp", "aliyun_dm")  # aliyun_dm = Aliyun DirectMail SingleSendMail with the WD_ALIYUN_* key and WD_SMTP_FROM as the sender
+CAPTCHA_MODES = ("on", "off")  # the self-hosted image captcha in front of the public code sends (endpoints 79, 80, 90)
 COOKIE_SECURE_MODES = ("auto", "1", "0")
 IMAGE_PROVIDERS = ("wikimedia", "openverse", "pixabay", "pexels")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -78,6 +92,7 @@ SECRET_KEYS = frozenset(
         "WD_PEXELS_KEY",
         "WD_ADMIN_PASSWORD",
         "WD_AI_FALLBACK_API_KEY",
+        "WD_ALIYUN_ACCESS_KEY_ID",
     }
 )
 
@@ -153,6 +168,7 @@ class Settings:
     ai_hourly_call_cap: int = 60
     ai_svg_daily_budget_usd: float = 0.50
     ai_dance_daily_budget_usd: float = 0.50
+    ai_user_daily_words: int = 80  # words per learner per UTC day that may trigger content generation (0 = unlimited; docs/AUTH_SIGNUP_DESIGN.md D2, PUBLIC_LAUNCH A1/A2)
     ai_log_keep_days: int = 14
     # --- fallback provider + automatic failover (docs/AI_FALLBACK_MODEL.md §4.3) --------
     ai_provider: str = "claude_cli"  # claude_cli = today · openai_http = fallback only · auto = claude + automatic failover · split = learners' kinds on the fallback, prewarm / svg / dance on claude
@@ -199,12 +215,23 @@ class Settings:
     audio_cache_voices: str = ""  # provider cache: "en-US=Ava (Premium);en-GB=Serena (Premium)" — the voices the mirrored say clips were made with
     audio_cache_mb: int = 256  # cap of the clip cache under audio/; the least recently played clips are removed beyond it
     # --- e-mail ---------------------------------------------------------------------
+    mail_provider: str = "smtp"  # smtp | aliyun_dm — aliyun_dm sends through DirectMail with the WD_ALIYUN_* key; WD_SMTP_FROM stays the sender
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
-    smtp_from: str = ""
+    smtp_from: str = ""  # the sender address of both mail providers (the DirectMail AccountName is its address part)
     smtp_tls: str = "starttls"
+    # --- sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2) --------------
+    sms_provider: str = "off"  # off | aliyun_verify — phone codes are sent only when a provider is set (ServerFlags.sms_enabled)
+    aliyun_access_key_id: str = ""  # RAM user AccessKey ID shared by aliyun_verify and aliyun_dm (masked by GET /api/admin/config)
+    aliyun_access_key_secret_file: str = ""  # 0600 file whose first line is the AccessKey secret, read at call time
+    aliyun_sms_sign_name: str = ""  # the system signature shown in the 号码认证 console (the SendSmsVerifyCode SignName)
+    sms_daily_cap: int = 200  # phone codes per WD_TZ day for the whole site (0 = the cap is already reached); 503 sms_budget_exhausted beyond it
+    sms_hourly_cap: int = 40  # phone codes per UTC hour for the whole site
+    code_ip_hourly: int = 20  # verification-code sends per client IP per hour (endpoints 80, 85, 90)
+    phone_stale_days: int = 90  # a phone identity unused this long needs a second factor at code login (the stale-phone challenge)
+    captcha: str = "on"  # on | off — the image captcha in front of the public code sends when no session exists (tests set off)
     # --- logging / backups / misc ---------------------------------------------------
     log_level: str = "INFO"
     log_format: str = "json"
@@ -239,8 +266,17 @@ class Settings:
 
     @property
     def email_configured(self) -> bool:
-        """The e-mail channel exists when host and from-address are set (DEPLOY §4)."""
+        """The e-mail channel exists when the selected mail provider's variables are set (DEPLOY §4): ``smtp`` → host and
+        from-address; ``aliyun_dm`` → the Aliyun key id, its secret file and the from-address (the DirectMail sender)."""
+        if self.mail_provider == "aliyun_dm":
+            return bool(self.aliyun_access_key_id and self.aliyun_access_key_secret_file and self.smtp_from)
         return bool(self.smtp_host and self.smtp_from)
+
+    @property
+    def sms_configured(self) -> bool:
+        """Phone verification codes can be sent: ``WD_SMS_PROVIDER`` is not ``off`` (``from_env`` refused to start without the
+        provider's key id, secret file and signature, so no further check is needed here)."""
+        return self.sms_provider != "off"
 
     @property
     def fallback_configured(self) -> bool:
@@ -547,6 +583,32 @@ class Settings:
             if price and not {"input", "output"} <= set(price):
                 raise ConfigError('WD_AI_FALLBACK_PRICE_JSON needs both "input" and "output" (write 0 for a free side); "cache_read" is optional')
 
+        # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.2): the provider preconditions are checked here, at
+        # startup, like the fallback provider's — a missing key would otherwise surface as 503 sms_send_failed on the first code
+        sms_provider = choice("WD_SMS_PROVIDER", "off", SMS_PROVIDERS)
+        mail_provider = choice("WD_MAIL_PROVIDER", "smtp", MAIL_PROVIDERS)
+        aliyun_key_id = text("WD_ALIYUN_ACCESS_KEY_ID", "")
+        aliyun_secret_file = text("WD_ALIYUN_ACCESS_KEY_SECRET_FILE", "")
+        aliyun_sign_name = text("WD_ALIYUN_SMS_SIGN_NAME", "")
+        smtp_from = text("WD_SMTP_FROM", "")
+        if aliyun_secret_file:
+            # the WD_AI_FALLBACK_API_KEY_FILE rule: the file must exist and be readable now; the first line is read at call time
+            secret_path = Path(aliyun_secret_file).expanduser()
+            if not secret_path.is_file():
+                raise ConfigError(f"WD_ALIYUN_ACCESS_KEY_SECRET_FILE must name an existing regular file, got {aliyun_secret_file!r}")
+            if not os.access(secret_path, os.R_OK):
+                raise ConfigError(f"WD_ALIYUN_ACCESS_KEY_SECRET_FILE is not readable by this user: {aliyun_secret_file!r}")
+            secret_mode = stat.S_IMODE(secret_path.stat().st_mode)
+            if secret_mode & 0o077:
+                log.warning("WD_ALIYUN_ACCESS_KEY_SECRET_FILE %s is readable by group/others (mode %o); chmod 600 it", aliyun_secret_file, secret_mode)
+        if sms_provider == "aliyun_verify" and not (aliyun_key_id and aliyun_secret_file and aliyun_sign_name):
+            raise ConfigError("WD_SMS_PROVIDER=aliyun_verify needs WD_ALIYUN_ACCESS_KEY_ID, WD_ALIYUN_ACCESS_KEY_SECRET_FILE and WD_ALIYUN_SMS_SIGN_NAME")
+        if mail_provider == "aliyun_dm" and not (aliyun_key_id and aliyun_secret_file and smtp_from):
+            raise ConfigError("WD_MAIL_PROVIDER=aliyun_dm needs WD_ALIYUN_ACCESS_KEY_ID, WD_ALIYUN_ACCESS_KEY_SECRET_FILE and WD_SMTP_FROM (the DirectMail sender address)")
+        if mail_provider == "aliyun_dm" and "@" not in parseaddr(smtp_from)[1]:
+            # the DirectMail AccountName is the address part of WD_SMTP_FROM; a bare display name would only fail inside create_app
+            raise ConfigError('WD_MAIL_PROVIDER=aliyun_dm needs WD_SMTP_FROM to contain the DirectMail sender address, e.g. "word-Dance <noreply@mail.example.com>"')
+
         return cls(
             data_dir=data_dir,
             db_path=db_path,
@@ -593,6 +655,7 @@ class Settings:
             ai_hourly_call_cap=integer("WD_AI_HOURLY_CALL_CAP", 60, 1, 100_000),
             ai_svg_daily_budget_usd=money("WD_AI_SVG_DAILY_BUDGET_USD", 0.50),
             ai_dance_daily_budget_usd=money("WD_AI_DANCE_DAILY_BUDGET_USD", 0.50),
+            ai_user_daily_words=integer("WD_AI_USER_DAILY_WORDS", 80, 0, 100_000),
             ai_log_keep_days=integer("WD_AI_LOG_KEEP_DAYS", 14, 0, 3650),
             ai_provider=ai_provider,
             ai_fallback_kind=fallback_kind,
@@ -635,12 +698,22 @@ class Settings:
             audio_say_voice=text("WD_AUDIO_SAY_VOICE", ""),
             audio_cache_voices=audio_cache_voices,
             audio_cache_mb=integer("WD_AUDIO_CACHE_MB", 256, 16, 1_000_000),
+            mail_provider=mail_provider,
             smtp_host=text("WD_SMTP_HOST", ""),
             smtp_port=integer("WD_SMTP_PORT", 587, 1, 65535),
             smtp_user=text("WD_SMTP_USER", ""),
             smtp_password=text("WD_SMTP_PASSWORD", ""),
-            smtp_from=text("WD_SMTP_FROM", ""),
+            smtp_from=smtp_from,
             smtp_tls=choice("WD_SMTP_TLS", "starttls", SMTP_TLS_MODES),
+            sms_provider=sms_provider,
+            aliyun_access_key_id=aliyun_key_id,
+            aliyun_access_key_secret_file=aliyun_secret_file,
+            aliyun_sms_sign_name=aliyun_sign_name,
+            sms_daily_cap=integer("WD_SMS_DAILY_CAP", 200, 0, 100_000),
+            sms_hourly_cap=integer("WD_SMS_HOURLY_CAP", 40, 0, 100_000),
+            code_ip_hourly=integer("WD_CODE_IP_HOURLY", 20, 1, 100_000),
+            phone_stale_days=integer("WD_PHONE_STALE_DAYS", 90, 1, 3650),
+            captcha=choice("WD_CAPTCHA", "on", CAPTCHA_MODES),
             log_level=log_level,
             log_format=choice("WD_LOG_FORMAT", "json", LOG_FORMATS),
             log_file=text("WD_LOG_FILE", ""),

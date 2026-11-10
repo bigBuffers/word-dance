@@ -33,9 +33,13 @@ designed):
   first 30 words hold 0 FACTS-closed words (the §1.6 acceptance count, computed here); ``[info]`` prints the 小学 and 初中新增
   first 15 and a per-stage summary — the operator sees the order before touching production; ``UPDATE words SET learn_rank = NULL``
   is accepted (NULL is a legal state);
+* 0018 (whenever ``schema_migrations`` holds 18; docs/AUTH_SIGNUP_DESIGN.md §5.1): ``users`` carries the eight account columns in
+  file order, ``sessions.actor_user_id`` is last, ``identities`` / ``login_codes`` exist with their indexes (``ux_identities_live``,
+  ``ux_identities_user_provider`` …), ``email_codes`` stays; when the file ran here ``password_set_at = created_at`` on every row,
+  ``account_kind`` is ``learner`` everywhere and the two new tables are empty; the CHECK / FK / partial-unique probes are rejected;
 * the ``wd check db`` stage invariants hold on the migrated copy and, from 0014, the four learning-order lines
   (``learn_order.check_lines`` — the same code ``wd check db`` runs); a second run applies nothing; an empty database
-  migrates from 0001 to the same version with 25 tables and the ``v_bank`` view;
+  migrates from 0001 to the same version with 28 tables and the ``v_bank`` view;
 * informational: elapsed time, page / freelist counts and file size (PLAN §8 step 9 runs ``ANALYZE`` + ``VACUUM`` afterwards).
 
 The script is self-contained apart from the ``wd`` package (``.venv/bin/python -I`` keeps the script directory off
@@ -61,7 +65,9 @@ from wd.diag import LEARN_ORDER_INVARIANTS_FROM_VERSION, STAGE_INVARIANTS, STAGE
 from wd.schemas import STAGE_ORDER
 from wd.services import learn_order
 
-EXPECTED_TABLE_COUNT = 26  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26
+EXPECTED_TABLE_COUNT = 28  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26; 0018 adds identities + login_codes → 28
+USERS_0018_COLUMNS = ("password_set_at", "account_kind", "guardian_user_id", "age_band", "age_declared_at", "age_declared_ip", "guardian_consent_at", "guardian_pin_hash")  # 0018, file order
+INDEXES_0018 = frozenset({"ux_identities_live", "ux_identities_user_provider", "ix_identities_user", "ix_login_codes_live", "ix_login_codes_user", "ix_login_codes_expires", "ix_sessions_actor"})
 BOOKKEEPING_TABLES = frozenset({"schema_migrations", "kv", "system_events"})  # the only tables a migration may grow/shrink
 STAGE_COLUMNS = tuple(f"stage_{code}" for code in STAGE_ORDER)  # the 0011 column order (seed.SEED_COLUMNS order)
 WORD_IMAGES_META_COLUMNS = ("prompt_version", "model", "text_free", "eval_json")  # 0012
@@ -370,6 +376,74 @@ def check_0017(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
     rep.check("backfill_corrected is idempotent", dance.backfill_corrected(conn) == 0)
 
 
+def check_0018(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """identities / login_codes created, the eight account columns + sessions.actor_user_id appended, password_set_at backfilled with
+    created_at (docs/AUTH_SIGNUP_DESIGN.md §5.1, docs/releases/2026-11-auth-signup-1a.md; mirrors backend/tests/unit/test_db_0018.py on
+    the operator's copy)."""
+    users_cols = [c["name"] for c in columns(conn, "users")]
+    rep.check("users: the eight 0018 columns appended last, in file order", users_cols[-8:] == list(USERS_0018_COLUMNS), str(users_cols[-8:]))
+    kind = next((c for c in columns(conn, "users") if c["name"] == "account_kind"), None)
+    rep.check("users.account_kind TEXT NOT NULL DEFAULT 'learner'", kind is not None and kind["notnull"] == 1 and str(kind["dflt_value"]) == "'learner'", str(tuple(kind)) if kind else "missing")
+    sessions_cols = [c["name"] for c in columns(conn, "sessions")]
+    rep.check("sessions.actor_user_id appended last", sessions_cols[-1] == "actor_user_id", str(sessions_cols[-2:]))
+    tables = set(db.table_names(conn))
+    rep.check("identities + login_codes present, email_codes kept (stop-write only, no DROP)", {"identities", "login_codes", "email_codes"} <= tables)
+    idx = index_names(conn, "identities") | index_names(conn, "login_codes") | index_names(conn, "sessions")
+    rep.check("0018 indexes present", INDEXES_0018 <= idx, ", ".join(sorted(INDEXES_0018 - idx)) or "all present")
+    n_users = int(scalar(conn, "SELECT COUNT(*) FROM users"))
+    rep.check("users row count unchanged (no rebuild)", n_users == before["counts"].get("users", n_users), f"{n_users} rows")
+    rep.check("sessions row count unchanged (no rebuild)", int(scalar(conn, "SELECT COUNT(*) FROM sessions")) == before["counts"].get("sessions", 0))
+    if ran_here:
+        rep.check("password_set_at = created_at on every existing account (the backfill)", int(scalar(conn, "SELECT COUNT(*) FROM users WHERE password_set_at IS NULL OR password_set_at != created_at")) == 0, f"{n_users} rows")
+        rep.check("account_kind 'learner' everywhere, nothing declared yet", int(scalar(conn, "SELECT COUNT(*) FROM users WHERE account_kind != 'learner' OR age_band IS NOT NULL OR guardian_user_id IS NOT NULL")) == 0)
+        rep.check("identities / login_codes empty right after the file", int(scalar(conn, "SELECT COUNT(*) FROM identities")) == 0 and int(scalar(conn, "SELECT COUNT(*) FROM login_codes")) == 0)
+        rep.check("sessions.actor_user_id NULL everywhere (every existing session is a self login)", int(scalar(conn, "SELECT COUNT(*) FROM sessions WHERE actor_user_id IS NOT NULL")) == 0)
+    if n_users:
+        for label, stmt in (
+            ("users.account_kind CHECK", "UPDATE users SET account_kind = 'teacher' WHERE id = (SELECT MIN(id) FROM users)"),
+            ("users.age_band CHECK", "UPDATE users SET age_band = 'kid' WHERE id = (SELECT MIN(id) FROM users)"),
+            ("identities.provider CHECK", "INSERT INTO identities(user_id, provider, subject) VALUES ((SELECT MIN(id) FROM users), 'sms', '+8613800138000')"),
+            ("login_codes.channel CHECK", "INSERT INTO login_codes(channel, target, purpose, code_hash, expires_at) VALUES ('fax', 'x', 'login', 'h', '2099-01-01T00:00:00Z')"),
+            ("login_codes.purpose CHECK", "INSERT INTO login_codes(channel, target, purpose, code_hash, expires_at) VALUES ('phone', 'x', 'dance', 'h', '2099-01-01T00:00:00Z')"),
+            ("users.guardian_user_id FK (unknown guardian rejected)", "UPDATE users SET guardian_user_id = 999999999 WHERE id = (SELECT MIN(id) FROM users)"),
+        ):
+            ok, detail = rejected(conn, stmt)
+            rep.check(label, ok, detail[:60])
+        ok, detail = accepted(conn, "INSERT INTO identities(user_id, provider, subject) VALUES ((SELECT MIN(id) FROM users), 'phone', '+8613800138000')")
+        rep.check("a live phone identity is storable", ok, detail[:60])
+        # the partial unique indexes inside a rolled-back transaction: one live row per number (two users), one live phone per user,
+        # and a disputed row frees the number for its new holder
+        uids = [int(r[0]) for r in conn.execute("SELECT id FROM users ORDER BY id LIMIT 2")]
+        first, second = uids[0], (uids[1] if len(uids) > 1 else None)
+        conn.execute("BEGIN")
+        try:
+            conn.execute("INSERT INTO identities(id, user_id, provider, subject) VALUES (-1, ?, 'phone', '+8613800138000')", (first,))
+            try:
+                conn.execute("INSERT INTO identities(id, user_id, provider, subject) VALUES (-3, ?, 'phone', '+8613800138001')", (first,))
+                rep.check("ux_identities_user_provider: a second live phone on one account is rejected", False, "accepted")
+            except sqlite3.IntegrityError as e:
+                rep.check("ux_identities_user_provider: a second live phone on one account is rejected", "UNIQUE" in str(e) and "identities.user_id" in str(e), str(e)[:70])
+            if second is None:
+                rep.skip("ux_identities_live probe", "only one user on the copy")
+            else:
+                try:
+                    conn.execute("INSERT INTO identities(id, user_id, provider, subject) VALUES (-2, ?, 'phone', '+8613800138000')", (second,))
+                    rep.check("ux_identities_live: the same live number on two accounts is rejected", False, "accepted")
+                except sqlite3.IntegrityError as e:
+                    rep.check("ux_identities_live: the same live number on two accounts is rejected", "UNIQUE" in str(e) and "identities.provider, identities.subject" in str(e), str(e)[:70])
+                conn.execute("UPDATE identities SET disputed_at = '2026-01-01T00:00:00Z' WHERE id = -1")
+                conn.execute("INSERT INTO identities(id, user_id, provider, subject) VALUES (-2, ?, 'phone', '+8613800138000')", (second,))
+                rep.check("a disputed row frees the number for its new holder", True)
+        except sqlite3.Error as e:
+            rep.check("a disputed row frees the number for its new holder", False, f"probe failed: {e}")
+        finally:
+            conn.execute("ROLLBACK")
+    else:
+        rep.skip("0018 CHECK / unique probes", "no rows in users")
+    ok, detail = rejected(conn, "INSERT INTO identities(user_id, provider, subject) VALUES (999999999, 'phone', '+8613800138001')")
+    rep.check("identities.user_id FK (unknown user rejected)", ok, detail[:60])
+
+
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
     """words.learn_rank, the learning order recomputed on the copy (DESIGN §2.9; docs/analysis/2026-11-06-learn-order/DESIGN.md)."""
     cols = {r["name"]: r for r in columns(conn, "words")}
@@ -515,6 +589,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0017(rep, conn, before, ran_here=17 in applied_versions)
         else:
             rep.skip("0017 checks", "not recorded in schema_migrations")
+        if 18 in recorded:
+            check_0018(rep, conn, before, ran_here=18 in applied_versions)
+        else:
+            rep.skip("0018 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

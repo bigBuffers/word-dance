@@ -57,7 +57,7 @@ def test_0016_rebuilds_jobs_and_ai_calls_keeping_rows_and_adds_word_dances(setti
 
         assert (16, "word_dances") in result.applied and db.current_version(c) >= 16
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert set(db.table_names(c)) == before_tables | {"word_dances"}
+        assert set(db.table_names(c)) == before_tables | {"word_dances", "identities", "login_codes"}  # 0018's two tables ride along
         # rebuilt in place: same columns in the same order, every row intact, ids preserved
         assert [r["name"] for r in c.execute("PRAGMA table_info(jobs)")] == before_jobs_cols
         assert [r["name"] for r in c.execute("PRAGMA table_info(ai_calls)")] == before_calls_cols

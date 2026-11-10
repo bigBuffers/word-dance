@@ -29,6 +29,7 @@ from pydantic import BaseModel, ValidationError
 
 from .. import dance, db
 from ..clock import UTC, day_start, local_date as clock_local_date, now_iso, parse_iso, to_iso
+from ..config import get_settings
 from ..errors import ApiError, pydantic_error_zh
 from ..jobs import queue
 from . import stats_core, words
@@ -63,6 +64,7 @@ IMPORT_RESULT_ROWS = 200
 CONTENT_REQUESTS_DAILY_CAP = 60
 IMAGE_REFRESH_DAILY_CAP = 20
 REPORTS_DAILY_CAP = 20
+AI_QUOTA_EVENT = "ai_quota_user"  # system_events kind written once per user and UTC day when WD_AI_USER_DAILY_WORDS turns a mark away
 EXPORT_COLUMNS: tuple[str, ...] = (
     "word",
     "phonetic",
@@ -348,13 +350,17 @@ def quota_consume(conn: sqlite3.Connection, key: str, amount: int, now: str) -> 
     return new
 
 
-def check_daily_quota(conn: sqlite3.Connection, key: str, limit: int, *, now: str, amount: int = 1) -> None:
-    """429 ``rate_limited`` (with ``retry_after_s``) unless ``amount`` more units fit under ``limit`` today; consumes them."""
+def check_daily_quota(conn: sqlite3.Connection, key: str, limit: int, *, now: str, amount: int = 1, consume: bool = True) -> None:
+    """429 ``rate_limited`` (with ``retry_after_s`` / ``limit``) unless ``amount`` more units fit under ``limit`` today; consumes them
+    unless ``consume=False`` — the pre-check a route runs before a step that may still refuse (endpoint 30's provider / budget
+    gate): nothing is spent on a request that ends in 409, and the consuming call inside the route's transaction re-checks under
+    the write lock."""
     used = quota_used(conn, key, now)
     if used + amount > limit:
         _, retry = _day_window(now)
         raise ApiError("rate_limited", details={"retry_after_s": retry, "limit": limit})
-    quota_consume(conn, key, amount, now)
+    if consume:
+        quota_consume(conn, key, amount, now)
 
 
 # ------------------------------------------------------------------------------------- result types
@@ -372,6 +378,7 @@ class ActionResult:
     log_id: int | None = None
     content_job_id: int | None = None
     is_valid_english: int | None = None
+    content_quota_exceeded: bool = False  # the per-user AI quota (WD_AI_USER_DAILY_WORDS) skipped this mark's content job; never in the DTO
 
     def response(self) -> dict[str, Any]:
         return {"word_id": self.word_id, "state": self.state, "mine": self.mine, "status": self.status}
@@ -517,7 +524,14 @@ def clear_attention(conn: sqlite3.Connection, user_word_id: int, now: str) -> No
     )
 
 
-def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str, cfg: Any = None) -> int | None:
+def ai_user_quota_key(user_id: int) -> str:
+    """``auth_throttle`` key of the learner's AI quota: the words whose content generation THIS account triggered today
+    (UTC day, like the other bank quotas) — its ``unfamiliar`` / re-add marks and its explicit 「生成例句」 requests
+    (API.md 30) share it. Reset: ``DELETE FROM auth_throttle WHERE key = 'ai:user:<id>'`` (ops.md §6)."""
+    return f"ai:user:{int(user_id)}"
+
+
+def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str, cfg: Any = None, user_id: int | None = None) -> int | None:
     """``generate_content`` for a VALIDATED word lacking content (DESIGN §4 / CLAUDE_INTEGRATION §6.1 enqueue rule), plus the
     word's 单词之舞 annotation (WORD_DANCE_DESIGN §6.2) when it has none yet.
 
@@ -525,16 +539,64 @@ def enqueue_content_if_needed(conn: sqlite3.Connection, word: Mapping[str, Any],
     ``is_valid_english = 0`` or merged words. Sets ``words.content_state = 'queued'``. The ``generate_dance`` job is enqueued
     AFTER the content job and one priority notch below it (11 / 21 / 31), so a learner waiting for content never waits behind a
     dance call; it is gated, deduped and budget-checked by ``wd.dance.enqueue_if_needed`` itself. Returns the content job id.
+
+    ``user_id`` names the learner whose own mark triggers the call (only :func:`_apply_unfamiliar` passes it — batches,
+    prefetch, suggestions, ``lookup_word`` and consolidation are bounded by their own limits and stay uncounted): the enqueue
+    then counts against ``WD_AI_USER_DAILY_WORDS`` (CLAUDE_INTEGRATION §7; ``0`` = unlimited) under :func:`ai_user_quota_key`.
+    At the cap the word still enters the bank but nothing is queued — no content job, no ride-along dance, ``content_state``
+    untouched (the card keeps offering 「生成例句」, which answers 429 the same day) — and ``system_events('ai_quota_user')`` is
+    written once per user and day. A dedupe hit (a live ``content:<id>`` job already exists) generates nothing new, is not
+    counted and is never a skip — the mark folds into the live job whatever the counter says. ``cfg`` defaults to the process
+    settings (``wd.config.get_settings``, the ``dance.enqueue_if_needed`` precedent).
     """
+    job_id, _ = _enqueue_content(conn, word, priority=priority, now=now, cfg=cfg, user_id=user_id)
+    return job_id
+
+
+def _enqueue_content(conn: sqlite3.Connection, word: Mapping[str, Any], *, priority: int, now: str, cfg: Any, user_id: int | None) -> tuple[int | None, bool]:
+    """The body of :func:`enqueue_content_if_needed`: ``(content job id, quota_exceeded)`` — the second value is True exactly
+    when the learner's per-user AI quota skipped a content job the word would otherwise have got (``ActionResult.content_quota_exceeded``)."""
     if word.get("is_valid_english") != 1 or word.get("merged_into_word_id") is not None:
-        return None
+        return None, False
     wid = int(word["id"])
     job_id: int | None = None
     if (word.get("content_state") or "none") in ("none", "failed"):
-        job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=f"content:{wid}", priority=int(priority), now=now)
+        dedupe = f"content:{wid}"
+        quota_key: str | None = None
+        if user_id is not None:
+            limit = int(getattr(cfg if cfg is not None else get_settings(), "ai_user_daily_words", 0) or 0)
+            # a live job first: the mark folds into it (nothing new is generated, nothing counted) whatever the counter says — the
+            # quota turns away new calls only, so a dedupe hit is never reported as a skip
+            if limit > 0 and queue.live_job(conn, dedupe) is None:
+                quota_key = ai_user_quota_key(user_id)
+                used = quota_used(conn, quota_key, now)
+                if used >= limit:
+                    _note_ai_quota(conn, int(user_id), limit=limit, used=used, now=now)
+                    return None, True
+        job_id = queue.enqueue(conn, "generate_content", {"word_id": wid}, dedupe_key=dedupe, priority=int(priority), now=now)
         conn.execute("UPDATE words SET content_state = 'queued', updated_at = ? WHERE id = ?", (now, wid))
+        if quota_key is not None:
+            quota_consume(conn, quota_key, 1, now)
     dance.enqueue_if_needed(conn, wid, priority=int(priority) + 1, now=now, cfg=cfg)
-    return job_id
+    return job_id, False
+
+
+def _note_ai_quota(conn: sqlite3.Connection, user_id: int, *, limit: int, used: int, now: str) -> None:
+    """Admin visibility of a learner at the cap: ``system_events('ai_quota_user', {user_id, limit, used})`` once per user and UTC
+    day (it shows in the overview's events) and one structured log line with it; later skips of the day log at debug only."""
+    from ..ai import budget  # local import: services → ai must not become a module cycle at import time
+
+    since, _ = _day_window(now)
+    if budget.user_event_once(conn, AI_QUOTA_EVENT, since, user_id, {"limit": int(limit), "used": int(used)}, now=now):
+        log.info(
+            "ai quota: user %s reached %d/%d learner-triggered words today; content generation skipped until the next UTC day",
+            user_id,
+            used,
+            limit,
+            extra={"event": AI_QUOTA_EVENT, "user_id": user_id},
+        )
+    else:
+        log.debug("ai quota: user %s still at %d/%d; mark enqueued no content", user_id, used, limit, extra={"event": AI_QUOTA_EVENT, "user_id": user_id})
 
 
 def _uw_dict(conn: sqlite3.Connection, user_word_id: int, user_id: int) -> dict[str, Any] | None:
@@ -674,8 +736,8 @@ def _apply_unfamiliar(conn, user_id, word, row, action, origin, context, note, i
         new_row = _row(conn, "SELECT * FROM user_words WHERE id = ?", (uw_id,))
         log_id = write_log(conn, action=log_action, user_word_id=uw_id, prev_row=None, new_row=new_row, prev_state=None, new_state="new", **common)
         _stats(conn, user_id, today, action=log_action, context=context, new_state="new", item_kind=item_kind, prev_state=None)
-        job_id = enqueue_content_if_needed(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now)
-        return ActionResult(wid, "new", words.user_word_dict(conn, new_row, user_id), "added", created=True, prev_state=None, user_word_id=uw_id, log_id=log_id, content_job_id=job_id, is_valid_english=word.get("is_valid_english"))
+        job_id, over_quota = _enqueue_content(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now, cfg=None, user_id=int(user_id))
+        return ActionResult(wid, "new", words.user_word_dict(conn, new_row, user_id), "added", created=True, prev_state=None, user_word_id=uw_id, log_id=log_id, content_job_id=job_id, is_valid_english=word.get("is_valid_english"), content_quota_exceeded=over_quota)
 
     state = str(row["state"])
     if state in BANK_STATES:  # idempotent
@@ -697,8 +759,8 @@ def _apply_unfamiliar(conn, user_id, word, row, action, origin, context, note, i
     new_row = _row(conn, "SELECT * FROM user_words WHERE id = ?", (row["id"],))
     log_id = write_log(conn, action="readd", user_word_id=int(row["id"]), prev_row=row, new_row=new_row, prev_state=state, new_state="new", **common)
     _stats(conn, user_id, today, action="readd", context=context, new_state="new", item_kind=item_kind, prev_state=state)
-    job_id = enqueue_content_if_needed(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now)
-    return ActionResult(wid, "new", words.user_word_dict(conn, new_row, user_id), "readded", prev_state=state, user_word_id=int(row["id"]), log_id=log_id, content_job_id=job_id, is_valid_english=word.get("is_valid_english"))
+    job_id, over_quota = _enqueue_content(conn, word, priority=CONTENT_PRIORITY_WAITING if context in WAITING_CONTEXTS else CONTENT_PRIORITY_BANK, now=now, cfg=None, user_id=int(user_id))
+    return ActionResult(wid, "new", words.user_word_dict(conn, new_row, user_id), "readded", prev_state=state, user_word_id=int(row["id"]), log_id=log_id, content_job_id=job_id, is_valid_english=word.get("is_valid_english"), content_quota_exceeded=over_quota)
 
 
 def _master_row(conn, user_id, row, *, log_action: str, now: str, today: str, item_kind: str | None, context: str, common) -> ActionResult:
@@ -1240,6 +1302,7 @@ __all__ = [
     "add_resolved",
     "ai_enabled",
     "ai_paused_until",
+    "ai_user_quota_key",
     "apply_action",
     "attention_count",
     "bank_counts",

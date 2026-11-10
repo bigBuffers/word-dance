@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
@@ -8,7 +8,8 @@ import RegisterPage, { passwordStrength, validationFieldMessages } from './Regis
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const unauthorized = () => json(401, { error: { code: 'unauthorized', message: '' } });
-const health = (over: Record<string, unknown>) => () => json(200, { status: 'ok', version: '0.1.0', registration_mode: 'invite', needs_setup: false, time: '2026-10-14T00:00:00Z', ...over });
+const health = (over: Record<string, unknown>) => () =>
+  json(200, { status: 'ok', version: '0.1.0', registration_mode: 'invite', needs_setup: false, sms_enabled: false, email_enabled: false, captcha: false, time: '2026-10-14T00:00:00Z', ...over });
 
 function mockFetch(routes: Record<string, () => Response>) {
   vi.stubGlobal(
@@ -67,6 +68,37 @@ describe('RegisterPage', () => {
     renderRegister();
     expect(await screen.findByRole('button', { name: zh.auth.register })).toBeTruthy();
     expect(screen.queryByLabelText(inviteLabel)).toBeNull();
+  });
+
+  it('verified mode renders the code entry (channel tabs, consent, send) instead of the username form; the bootstrap keeps the form', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'verified', sms_enabled: true, email_enabled: true }) });
+    const first = renderRegister();
+    const tabs = await screen.findByRole('radiogroup', { name: zh.auth.loginMethod });
+    expect(within(tabs).getAllByRole('radio').map((r) => r.textContent)).toEqual([zh.auth.methodPhone, zh.auth.methodEmail]);
+    expect(screen.getByLabelText(new RegExp(`^${zh.auth.phone}`))).toBeTruthy();
+    expect(screen.getByRole('checkbox')).toBeTruthy(); // consent
+    expect(screen.getByRole('button', { name: zh.auth.sendCode })).toBeTruthy();
+    expect(screen.getByRole('button', { name: zh.auth.register })).toBeTruthy();
+    expect(screen.queryByLabelText(new RegExp(`^${zh.auth.username}`))).toBeNull();
+    expect(screen.queryByLabelText(inviteLabel)).toBeNull();
+    fireEvent.click(within(tabs).getByRole('radio', { name: zh.auth.methodEmail }));
+    expect(screen.getByLabelText(new RegExp(`^${zh.auth.emailAddress}`))).toBeTruthy();
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'verified', sms_enabled: true, needs_setup: true }) });
+    renderRegister();
+    expect(await screen.findByText(zh.auth.firstUser)).toBeTruthy();
+    expect(screen.getByLabelText(new RegExp(`^${zh.auth.username}`))).toBeTruthy();
+    expect(screen.queryByRole('checkbox')).toBeNull();
+  });
+
+  it('verified mode without any channel explains that sign-up is unavailable', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'verified' }) });
+    renderRegister();
+    expect(await screen.findByText(zh.auth.noChannel)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: zh.auth.register })).toBeNull();
+    expect(screen.getByRole('link', { name: zh.auth.login })).toBeTruthy();
   });
 
   it('a malformed e-mail shows errors.invalidEmail under the field (not the field label) and nothing is posted', async () => {

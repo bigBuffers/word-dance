@@ -1,10 +1,13 @@
 // FRONTEND §5.4 on /welcome step 2: one physical key press (keydown + OS auto-repeat keydowns) judges exactly
 // one card, a double tap on a verdict button cannot judge the card that advanced under the finger, and the
 // known toast / progress line use the shared screening copy. Step 1 (PLAN §6 S4): five roles whose presets keep
-// the main stage inside the target stages, and the K-12 default that mirrors the server before any pick.
+// the main stage inside the target stages, and the K-12 default that mirrors the server before any pick. Step 0
+// (API.md 89): nickname + age band → the profile; a 409 `invalid_transition` (saved in another tab) refreshes the
+// session and moves on; a 400 `validation_error` shows the server's field message.
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '@/api/client';
 import { ToastProvider } from '@/components/ui/Toast';
 import { STAGE_ORDER } from '@/components/word/StageChips';
 import { TAP_LOCK_MS } from '@/hooks/useTapLock';
@@ -34,7 +37,7 @@ const h = vi.hoisted(() => {
     },
     phonetic: null,
   });
-  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z' };
+  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z', has_password: true, phone_masked: null as string | null, needs_profile: false, age_band: null as string | null };
   const screenSettings = {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -59,6 +62,9 @@ const h = vi.hoisted(() => {
   return {
     cards: [1, 2, 3, 4, 5, 6, 7, 8].map(card),
     verdicts: [] as { word_id: number; verdict: string }[],
+    profiles: [] as { display_name: string; age_band: string; username?: string; password?: string }[],
+    profileError: null as unknown, // thrown once by the next saveProfile
+    refreshes: 0,
     screenUser,
     screenSettings,
     // what the mocked useAuth() returns; the step-1 tests swap in a `pending` user without settings
@@ -78,12 +84,32 @@ vi.mock('@/api/endpoints', async (importOriginal) => {
     }),
     markWord: vi.fn(),
     completeOnboarding: vi.fn(),
+    saveProfile: vi.fn(async (body: { display_name: string; age_band: string; username?: string; password?: string }) => {
+      if (h.profileError) {
+        const err = h.profileError;
+        h.profileError = null;
+        throw err;
+      }
+      h.profiles.push(body);
+      return { user: { ...h.screenUser, onboarding_state: 'pending', display_name: body.display_name, needs_profile: false, age_band: body.age_band } };
+    }),
   };
 });
 
 vi.mock('@/auth/AuthContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/auth/AuthContext')>();
-  const value = () => ({ ...h.auth, server: null, counters: null, health: null, loading: false, applySession: () => undefined, refreshCounters: async () => undefined });
+  const value = () => ({
+    ...h.auth,
+    server: null,
+    counters: null,
+    health: null,
+    loading: false,
+    applySession: () => undefined,
+    refreshCounters: async () => undefined,
+    refresh: async () => {
+      h.refreshes += 1;
+    },
+  });
   return { ...actual, useAuth: value, useOptionalAuth: value };
 });
 
@@ -205,6 +231,77 @@ describe('WelcomePage step 1', () => {
     fireEvent.click(screen.getByRole('button', { name: zh.welcome.roles.gk }));
     expect(pressedStages()).toEqual([zh.stages.zkFull, zh.stages.gkFull]);
     expect(checkedMainStage()).toEqual([zh.stages.gk]);
+  });
+});
+
+describe('WelcomePage step 0 (first setup of a code-created account, API.md 89)', () => {
+  beforeEach(() => {
+    h.profiles.length = 0;
+    h.profileError = null;
+    h.refreshes = 0;
+    h.auth = { user: { ...h.screenUser, username: 'u_ab23cd45', display_name: '', onboarding_state: 'pending', has_password: false, phone_masked: '138****8000', needs_profile: true }, settings: null };
+  });
+  afterEach(() => {
+    h.auth = { user: h.screenUser, settings: h.screenSettings };
+  });
+
+  it('asks for the nickname and the age band before step 1, posts the profile and moves on to the roles', async () => {
+    render(
+      <MemoryRouter initialEntries={['/welcome']}>
+        <ToastProvider>
+          <WelcomePage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { name: zh.welcome.step0 })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: zh.welcome.whoAreYou })).toBeNull();
+    expect(screen.getByText(zh.welcome.under14)).toBeTruthy();
+    const next = screen.getByRole('button', { name: zh.welcome.next });
+    fireEvent.click(next); // nothing filled: the nickname error shows, nothing is posted
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', zh.welcome.nicknameHint);
+    expect(h.profiles).toEqual([]);
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: ' Xiao Ming ' } });
+    fireEvent.click(screen.getByLabelText(zh.welcome.age14plus));
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.optionalPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Xiao Ming', age_band: '14plus', password: 'Str0ng-Passphrase!' }]));
+    expect(await screen.findByRole('group', { name: zh.welcome.whoAreYou })).toBeTruthy(); // step 1
+    expect(screen.queryByRole('heading', { name: zh.welcome.step0 })).toBeNull();
+    expect(h.refreshes).toBe(0);
+  });
+
+  const renderStep0 = () =>
+    render(
+      <MemoryRouter initialEntries={['/welcome']}>
+        <ToastProvider>
+          <WelcomePage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+
+  it('a 409 invalid_transition (the profile was saved in another tab) refreshes the session and moves on without an error', async () => {
+    h.profileError = new ApiError('invalid_transition', 409, '');
+    renderStep0();
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Xiao Ming' } });
+    fireEvent.click(screen.getByLabelText(zh.welcome.ageAdult));
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    expect(await screen.findByRole('group', { name: zh.welcome.whoAreYou })).toBeTruthy(); // step 1
+    expect(h.refreshes).toBe(1); // the context's user (display_name, needs_profile) comes from the server, not from the stale copy
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(h.profiles).toEqual([]);
+  });
+
+  it('a 400 validation_error shows the server field message (a username that looks like a phone number) and stays on step 0', async () => {
+    h.profileError = new ApiError('validation_error', 400, '', { fields: { username: 'username-must-not-be-a-phone-number' } });
+    renderStep0();
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Xiao Ming' } });
+    fireEvent.click(screen.getByLabelText(zh.welcome.age14plus));
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.optionalUsername}`)), { target: { value: '13800138000' } }); // passes the client shape check
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'username-must-not-be-a-phone-number');
+    expect(screen.getByRole('heading', { name: zh.welcome.step0 })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: zh.welcome.whoAreYou })).toBeNull();
+    expect(h.refreshes).toBe(0);
   });
 });
 

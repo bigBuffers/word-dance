@@ -489,7 +489,11 @@ def apply_item(conn: sqlite3.Connection, word: Mapping[str, Any], item: Mapping[
         filled = fill_fields(conn, final, item, now=now, own_row=own_row)
         final = words.word_row(conn, int(final["id"])) or final
         suggested = _apply_correction(conn, final, wid, item, row_ids=own_rows, now=now)
-        job_id = bank.enqueue_content_if_needed(conn, final, priority=CONTENT_PRIORITY, now=now)
+        # the validated custom word's content counts toward its creator's per-user AI quota (CLAUDE_INTEGRATION §7): the lookup
+        # call itself stays uncounted (CUSTOM_DAILY_CAP bounds it), but a throw-away account must not turn 200 custom words a day
+        # into 200 content calls; a merge into an existing headword (not the learner's own row) stays uncounted
+        creator = final.get("created_by_user_id") if own_row else None
+        job_id = bank.enqueue_content_if_needed(conn, final, priority=CONTENT_PRIORITY, now=now, user_id=int(creator) if creator is not None else None)
         _clear_pending(conn, int(final["id"]), now=now)
         if not own_row:
             _clear_pending(conn, wid, now=now)

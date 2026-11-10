@@ -1,10 +1,13 @@
-"""``/api/auth/*`` — API.md endpoints 2–5 (WP2).
+"""``/api/auth/*`` — API.md endpoints 2–5 (WP2; the sign-in by verification code of §3.1 lives in ``auth_codes.py``).
 
 * ``POST /api/auth/register`` (201): bootstrap rule (empty ``users`` → accepted in any mode, no invite code,
   role ``admin``), otherwise ``WD_REGISTRATION_MODE`` (``open`` / ``invite`` with atomic code consumption /
-  ``closed``); user + ``user_settings`` (``next_push_at`` from the defaults) + session in one ``BEGIN IMMEDIATE``.
-* ``POST /api/auth/login``: IP throttle 20/10 min, persistent username lockout (423), constant-time verify,
-  ``account_disabled`` only after a correct password, a brand-new session every time (no fixation).
+  ``closed`` / ``verified`` → 403 ``verification_required``: accounts are created by a phone or e-mail code, endpoints 80 / 81);
+  user + ``user_settings`` (``next_push_at`` from the defaults) + session in one ``BEGIN IMMEDIATE``.
+* ``POST /api/auth/login``: ``username`` is an *identifier* (:func:`resolve_identifier`: the username, else the live phone
+  identity, else the verified e-mail), IP throttle 20/10 min counting **failures only** (``security.throttle_check`` before the
+  password, ``throttle_hit`` on the failure path), persistent lockout per identifier **and** client IP (423), constant-time
+  verify, ``account_disabled`` only after a correct password, a brand-new session every time (no fixation). Admins sign in here only.
 * ``POST /api/auth/logout`` (204) and ``GET /api/auth/me`` (user, settings, server flags, badge counters).
 """
 
@@ -46,11 +49,35 @@ def _auth_payload(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
     user = security.load_user(conn, user_id)
     if user is None:  # pragma: no cover - the row was just written/read
         raise ApiError("internal_error")
-    return {"user": security.user_dto(user), "settings": security.settings_dto(conn, user_id)}
+    return {"user": security.user_dto_for(conn, user), "settings": security.settings_dto(conn, user_id)}
 
 
-def server_flags(conn: sqlite3.Connection, cfg: Settings) -> dict[str, Any]:
-    """API.md §9 ``ServerFlags`` (``needs_setup`` mirrors ``GET /api/health``)."""
+def resolve_identifier(conn: sqlite3.Connection, identifier: str) -> dict[str, Any] | None:
+    """The account an identifier names (API.md 3, 90, 91): the exact username (``COLLATE NOCASE``) first; else, when it
+    normalises to a mainland mobile number, the account of the live ``identities(provider='phone')`` row; else, when it contains
+    ``@``, the account whose ``users.email`` equals it (NFKC, lower-cased) **and** is verified. None for anything else — the caller
+    takes the dummy-hash path, so an unresolved identifier costs the same as a wrong password. The phone / e-mail spellings come
+    from ``security.canonical_identifier`` — the same function keys the login lockout, so the two can never drift apart."""
+    ident = identifier.strip()
+    if not ident:
+        return None
+    user = security.load_user_by_name(conn, ident)
+    if user is not None:
+        return user
+    canonical = security.canonical_identifier(ident)
+    if canonical.startswith("+"):  # a mainland mobile number in E.164
+        identity = security.identity_by_subject(conn, "phone", canonical)
+        if identity is not None:
+            return security.load_user(conn, int(identity["user_id"]))
+        return None
+    if "@" in canonical:
+        return security.row_dict(conn.execute("SELECT * FROM users WHERE email = ? AND email_verified_at IS NOT NULL", (canonical,)).fetchone())
+    return None
+
+
+def server_flags(conn: sqlite3.Connection, cfg: Settings, *, sms_sender: object | None = None) -> dict[str, Any]:
+    """API.md §9 ``ServerFlags`` (``needs_setup`` mirrors ``GET /api/health``). ``sms_sender`` is ``app.state.sms``: a sender
+    installed next to an ``off`` provider (tests) still means phone codes can be sent."""
     users = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
     ai_enabled = cfg.ai_enabled and db.kv_get(conn, "claude.enabled", "1") != "0"
     return {
@@ -63,6 +90,7 @@ def server_flags(conn: sqlite3.Connection, cfg: Settings) -> dict[str, Any]:
         "needs_setup": users == 0,
         "audio": cfg.audio_provider_effective != "off",  # GET /media/audio serves clips (API.md 76)
         "audio_key": audio.voice_key(cfg),  # provider + voice fingerprint: a switched voice is a new clip URL for the browser cache
+        "sms_enabled": bool(cfg.sms_configured or sms_sender is not None),  # phone verification codes can be sent (endpoints 80, 85)
     }
 
 
@@ -95,6 +123,8 @@ def register(body: RegisterRequest, request: Request, response: Response, conn: 
             role = "user"
             if cfg.registration_mode == "closed":
                 raise ApiError("registration_closed")
+            if cfg.registration_mode == "verified":
+                raise ApiError("verification_required")  # accounts come from a phone / e-mail code (endpoints 80 / 81); username + password are added later (89 / 7)
             if cfg.registration_mode == "invite":
                 if not body.invite_code or not security.consume_invite(conn, body.invite_code, now):
                     raise ApiError("invalid_invite")
@@ -111,6 +141,7 @@ def register(body: RegisterRequest, request: Request, response: Response, conn: 
                 role=role,
                 display_name=body.display_name,
                 email=body.email,
+                password_set_at=to_iso(now),
             )
         except sqlite3.IntegrityError as e:  # a racing duplicate slipped past the pre-checks
             raise ApiError("email_taken" if "email" in str(e).lower() else "username_taken") from e
@@ -123,20 +154,24 @@ def register(body: RegisterRequest, request: Request, response: Response, conn: 
 def login(body: LoginRequest, request: Request, response: Response, conn: sqlite3.Connection = Depends(get_db)):
     now = request.app.state.clock.now_utc()
     ip = client_ip(request)
-    username = body.username.strip()
-    security.rate_limit(conn, f"login:ip:{ip}", limit=security.LOGIN_IP_LIMIT, window_s=security.LOGIN_IP_WINDOW_S, now=now)
-    security.check_lockout(conn, username, now)
+    identifier = body.username.strip()
+    ip_key = f"login:ip:{ip}"
+    retry = security.throttle_check(conn, ip_key, limit=security.LOGIN_IP_LIMIT, window_s=security.LOGIN_IP_WINDOW_S, now=now)  # failures only: read here, counted below
+    if retry is not None:
+        raise ApiError("rate_limited", details={"retry_after_s": retry})
+    security.check_lockout(conn, identifier, now, ip=ip)
 
-    user = security.load_user_by_name(conn, username)
+    user = resolve_identifier(conn, identifier)
     if not security.verify_password(body.password, user["password_hash"] if user else None):
-        security.record_login_failure(conn, username, now)
+        security.throttle_hit(conn, ip_key, limit=security.LOGIN_IP_LIMIT, window_s=security.LOGIN_IP_WINDOW_S, now=now)  # the failure spends the IP window
+        security.record_login_failure(conn, identifier, now, ip=ip)
         raise ApiError("invalid_credentials")
     assert user is not None
     if not int(user["is_active"]):
         raise ApiError("account_disabled")
 
     with db.tx(conn):
-        security.clear_login_failures(conn, username)
+        security.clear_login_failures(conn, identifier, ip=ip)
         security.gc_sessions(conn, to_iso(now))
         conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (to_iso(now), user["id"]))
         _issue_session(request, response, conn, int(user["id"]), now)
@@ -157,8 +192,8 @@ def logout(request: Request, user: dict[str, Any] = Depends(current_user), conn:
 def me(request: Request, user: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)):
     cfg: Settings = request.app.state.settings
     return {
-        "user": security.user_dto(user),
+        "user": security.user_dto_for(conn, user),
         "settings": security.settings_dto(conn, int(user["id"])),
-        "server": server_flags(conn, cfg),
+        "server": server_flags(conn, cfg, sms_sender=getattr(request.app.state, "sms", None)),
         "counters": counters(conn, int(user["id"]), to_iso(request.app.state.clock.now_utc())),
     }

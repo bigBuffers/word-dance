@@ -150,14 +150,14 @@
 
 | # | 缺口 | 出处 | 建议 | 估算 |
 |---|---|---|---|---|
-| A1 | 「不熟悉」触发的内容生成无按用户配额；客户端可通过 `context: detail/today` 自选优先级 10 | `services/bank.py:465-478,606-642`；`routers/words.py:233-255` | 在 `enqueue_content_if_needed` 加每日按用户计数（复用 `check_daily_quota`）；`jobs` / `ai_calls` 增 `user_id` 列以便归因与取消；标记触发的任务固定优先级 ≥ 20 | 2–3 天 |
-| A2 | 预算全部全局；一人耗尽则全员顺延，且无管理员取消队列 | `ai/budget.py:187-235`；`ai/ledger.py` | 按用户 AI 额度（词 / 天）+ 管理员「取消某用户队列」；全局上限按用户数重调 | 含 A1 |
+| A1 | 「不熟悉」触发的内容生成无按用户配额；客户端可通过 `context: detail/today` 自选优先级 10 | `services/bank.py:465-478,606-642`；`routers/words.py:233-255` | 在 `enqueue_content_if_needed` 加每日按用户计数（复用 `check_daily_quota`）；`jobs` / `ai_calls` 增 `user_id` 列以便归因与取消；标记触发的任务固定优先级 ≥ 20 | 2–3 天 (1-A: WD_AI_USER_DAILY_WORDS per-user cap; attribution/cancel deferred) |
+| A2 | 预算全部全局；一人耗尽则全员顺延，且无管理员取消队列 | `ai/budget.py:187-235`；`ai/ledger.py` | 按用户 AI 额度（词 / 天）+ 管理员「取消某用户队列」；全局上限按用户数重调 | 含 A1 (1-A: WD_AI_USER_DAILY_WORDS per-user cap; attribution/cancel deferred) |
 | A3 | 可信代理写死 `127.0.0.1` | `cli.py:146-148`；`deps.py:37` | 新增 `WD_TRUSTED_PROXIES`，同时喂 uvicorn 与 `client_ip`；文档要求同机 Caddy 终止 TLS，若前置 CDN 则配置 real IP | 0.5 天 |
-| A4 | 按用户名锁定可被任意第三方触发，无解锁 | `security.py:282-339` | 改为用户名 + IP（或设备）联合键；N 次失败后 CAPTCHA；`wd unlock <username>` | 1 天 |
+| A4 | 按用户名锁定可被任意第三方触发，无解锁 | `security.py:282-339` | 改为用户名 + IP（或设备）联合键；N 次失败后 CAPTCHA；`wd unlock <username>` | 1 天 (done in 1-A: the lockout key is `login:user:<identifier>:<ip>`, `wd unlock <identifier>` clears every IP; the self-hosted image captcha gates the public code sends — the password login has no captcha) |
 | A5 | 注册只有 5 次 / 小时 / IP，无验证码、无邮箱验证、存在用户名 / 邮箱枚举 | `routers/auth.py:79-117` | 起步用邀请制（`WD_REGISTRATION_MODE=invite`）；开放注册前加 Turnstile 类验证码 + 邮箱验证门控 AI 功能 | 1–2 天 |
-| A6 | 无找回密码 | `routers/account.py` | 邮件重置流程（依赖事务邮件服务商） | 1–2 天 |
+| A6 | 无找回密码 | `routers/account.py` | 邮件重置流程（依赖事务邮件服务商） | 1–2 天 (done in 1-A: `POST /api/auth/password/forgot` / `reset` — a code to the bound phone, else the verified e-mail, always 202; a reset revokes every session) |
 | A7 | 共享图片可被任一用户「换一张」或单次举报替换（阈值 1，设计给 1–5 人） | `routers/words.py:259-301`；`images/service.py:186-211` | 举报阈值 / 投票；或换图只影响本人 | 1 天 |
-| A8 | 登录限流把成功登录也计数；CGNAT 下误伤 | `routers/auth.py:122-131` | 成功不计数或改按账号 | 0.5 天 |
+| A8 | 登录限流把成功登录也计数；CGNAT 下误伤 | `routers/auth.py:122-131` | 成功不计数或改按账号 | 0.5 天 (done in 1-A: `login:ip` counts failures only — checked before the password, counted on the failure path) |
 
 **B. 公网前必须（合规与产品）**
 

@@ -78,7 +78,8 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert r.status_code == 201, r.text
     user, st = r.json()["user"], r.json()["settings"]
     assert user["role"] == "admin" and user["onboarding_state"] == "pending" and user["display_name"] == "小张"
-    assert user["email"] == "Alice@Example.com" and user["email_verified"] is False and user["created_at"] == NOW_ISO
+    assert user["email"] == "alice@example.com" and user["email_verified"] is False and user["created_at"] == NOW_ISO  # e-mails are normalised on write (API.md 2 / 6)
+    assert user["has_password"] is True and user["phone_masked"] is None and user["needs_profile"] is False and user["age_band"] is None
     assert st["timezone"] == "Asia/Shanghai" and st["push_time"] == "08:00" and st["stages"] == ["xs", "zk"] and st["current_stage"] == "xs"  # K-12 DDL defaults
     assert st["next_push_at"] == "2026-10-15T00:00:00Z" == to_iso(compute_next_push(NOW, "Asia/Shanghai", "08:00"))
     assert st["email_verified"] is False and st["push_enabled"] is True and st["daily_new_count"] == 10 and st["webhook_url"] is None
@@ -90,7 +91,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert me.status_code == 200, me.text
     body = me.json()
     assert body["user"]["username"] == "alice" and body["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
-    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False, "audio_key": ""}
+    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False, "audio_key": "", "sms_enabled": False}
     assert body["counters"] == {"suggestions_open": 0, "attention": 0}
     bob = register(client, "bob")
     assert bob["user"]["role"] == "user" and bob["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
@@ -251,10 +252,71 @@ def test_login_lockout_persists_across_app_instances(client: TestClient, setting
     r = client.post("/api/auth/login", json={"username": "alice", "password": PW})
     assert r.status_code == 423 and r.json()["error"]["details"]["retry_after_s"] == 1
     frozen_clock.advance(seconds=2)
+    assert count(settings, "auth_throttle", "key = 'login:user:alice:testclient'") == 1  # the lockout is keyed by identifier AND client IP (API.md 3)
     assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200
-    assert count(settings, "auth_throttle", "key = 'login:user:alice'") == 0  # reset on success
+    assert count(settings, "auth_throttle", "key = 'login:user:alice:testclient'") == 0  # reset on success
     assert client.post("/api/auth/login", json={"username": "alice", "password": "wrong-password-1"}).status_code == 401
     assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200
+
+
+def test_lockout_is_per_client_ip_and_wd_unlock_clears_every_ip(client: TestClient, settings, frozen_clock):
+    """PUBLIC_LAUNCH A4: a stranger's guesses never lock the owner out; `security.unlock_identifier` (wd unlock) clears every IP's row."""
+    register(client, "alice")
+    for _ in range(10):
+        assert client.post("/api/auth/login", json={"username": "alice", "password": "wrong-password-1"}).status_code == 401
+    assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 423
+    c = db.connect(settings.db_path)
+    try:
+        # the same account from another address is not locked: only the (identifier, ip) row exists
+        assert [r[0] for r in c.execute("SELECT key FROM auth_throttle WHERE key LIKE 'login:user:%'")] == ["login:user:alice:testclient"]
+        assert security.lockout_remaining(c, "alice", frozen_clock.now_utc(), ip="203.0.113.9") is None
+        assert security.unlock_identifier(c, "Alice") == 1
+    finally:
+        c.close()
+    assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200
+
+
+def test_lockout_bucket_is_shared_by_every_spelling_of_a_phone_number(client: TestClient, settings, frozen_clock):
+    """API.md 3: the lockout key uses the canonical identifier — ten failures typed as 「138 0013 8000」 lock `+8613800138000` and
+    `008613800138000` too (one row), and `wd unlock` with yet another spelling clears it."""
+    alice = register(client, "alice")["user"]
+    c = db.connect(settings.db_path)
+    try:
+        c.execute("INSERT INTO identities(user_id, provider, subject, verified_at, last_login_at) VALUES (?, 'phone', '+8613800138000', ?, ?)", (alice["id"], NOW_ISO, NOW_ISO))
+    finally:
+        c.close()
+    for _ in range(10):
+        assert client.post("/api/auth/login", json={"username": "138 0013 8000", "password": "wrong-password-1"}).status_code == 401
+    r = client.post("/api/auth/login", json={"username": "+8613800138000", "password": PW})
+    assert r.status_code == 423 and error_code(r) == "account_locked"
+    assert client.post("/api/auth/login", json={"username": "008613800138000", "password": PW}).status_code == 423
+    assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200  # the username is a bucket of its own
+    c = db.connect(settings.db_path)
+    try:
+        assert [r[0] for r in c.execute("SELECT key FROM auth_throttle WHERE key LIKE 'login:user:%'")] == ["login:user:+8613800138000:testclient"]
+        assert security.unlock_identifier(c, "13800138000") == 1
+    finally:
+        c.close()
+    assert client.post("/api/auth/login", json={"username": "138 0013 8000", "password": PW}).status_code == 200
+    # an e-mail identifier: NFKC + lower-case is the bucket
+    c = db.connect(settings.db_path)
+    try:
+        c.execute("UPDATE users SET email = 'alice@example.com', email_verified_at = ? WHERE id = ?", (NOW_ISO, alice["id"]))
+    finally:
+        c.close()
+    frozen_clock.advance(minutes=10)  # a fresh login:ip window
+    for _ in range(10):
+        assert client.post("/api/auth/login", json={"username": "ａlice@Example.com", "password": "wrong-password-1"}).status_code == 401  # a full-width first letter
+    assert client.post("/api/auth/login", json={"username": "alice@example.com", "password": PW}).status_code == 423
+    assert count(settings, "auth_throttle", "key = 'login:user:alice@example.com:testclient'") == 1
+
+
+def test_register_refuses_a_phone_number_as_username(client: TestClient):
+    """API.md 2: a username that reads as a mainland mobile number would shadow that number's own identity in endpoint 3."""
+    for name in ("13800138000", "8613800138000", "008613800138000"):
+        r = client.post("/api/auth/register", json={"username": name, "password": PW})
+        assert r.status_code == 400 and error_code(r) == "validation_error" and r.json()["error"]["details"]["fields"] == {"username": "用户名不能是手机号"}, name
+    assert client.post("/api/auth/register", json={"username": "1380013800", "password": PW}).status_code == 201  # ten digits are not a number
 
 
 def test_login_ip_throttle_20_per_10_minutes(client: TestClient, frozen_clock):
@@ -265,6 +327,56 @@ def test_login_ip_throttle_20_per_10_minutes(client: TestClient, frozen_clock):
     assert r.status_code == 429 and error_code(r) == "rate_limited" and r.json()["error"]["details"]["retry_after_s"] == 600
     frozen_clock.advance(minutes=10)
     assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200
+
+
+def test_login_ip_throttle_counts_failures_only(client: TestClient, settings, frozen_clock):
+    """PUBLIC_LAUNCH A8: successful logins never spend the IP window (a shared Wi-Fi of real users is not throttled)."""
+    register(client, "alice")
+    for _ in range(25):
+        assert client.post("/api/auth/login", json={"username": "alice", "password": PW}).status_code == 200
+    assert count(settings, "auth_throttle", "key = 'login:ip:testclient'") == 0  # nothing counted
+    for i in range(20):
+        assert client.post("/api/auth/login", json={"username": f"ghost{i}", "password": PW}).status_code == 401
+    assert count(settings, "auth_throttle", "key = 'login:ip:testclient' AND count = 20") == 1
+    r = client.post("/api/auth/login", json={"username": "alice", "password": PW})
+    assert r.status_code == 429 and error_code(r) == "rate_limited"
+    assert count(settings, "auth_throttle", "key = 'login:ip:testclient' AND count = 20") == 1  # the refused attempt is not counted either
+
+
+def test_login_by_phone_or_verified_email_identifier(client: TestClient, settings):
+    """API.md 3: `username` is an identifier — the username, a bound phone number or a verified e-mail."""
+    alice = register(client, "alice", email="alice@example.com")["user"]
+    c = db.connect(settings.db_path)
+    try:
+        c.execute("INSERT INTO identities(user_id, provider, subject, verified_at, last_login_at) VALUES (?, 'phone', '+8613800138000', ?, ?)", (alice["id"], NOW_ISO, NOW_ISO))
+    finally:
+        c.close()
+    r = client.post("/api/auth/login", json={"username": "138 0013 8000", "password": PW})
+    assert r.status_code == 200 and r.json()["user"]["username"] == "alice" and r.json()["user"]["phone_masked"] == "138****8000"
+    assert client.post("/api/auth/login", json={"username": "+8613800138000", "password": PW}).status_code == 200
+    r = client.post("/api/auth/login", json={"username": "Alice@Example.com", "password": PW})
+    assert r.status_code == 401 and error_code(r) == "invalid_credentials"  # the e-mail is not verified yet
+    c = db.connect(settings.db_path)
+    try:
+        c.execute("UPDATE users SET email_verified_at = ? WHERE id = ?", (NOW_ISO, alice["id"]))
+        c.execute("UPDATE identities SET disputed_at = ? WHERE user_id = ?", (NOW_ISO, alice["id"]))  # a disputed binding no longer resolves
+    finally:
+        c.close()
+    assert client.post("/api/auth/login", json={"username": "Alice@Example.com", "password": PW}).status_code == 200
+    assert client.post("/api/auth/login", json={"username": "13800138000", "password": PW}).status_code == 401
+    r = client.post("/api/auth/login", json={"username": "x" * 255, "password": PW})
+    assert r.status_code == 400 and error_code(r) == "validation_error"
+
+
+def test_verified_mode_refuses_password_registration_after_the_bootstrap(settings, frozen_clock):
+    app = create_app(replace(settings, registration_mode="verified"), clock=frozen_clock, configure_logs=False)
+    with TestClient(app, base_url="http://testserver") as c:
+        c.headers["X-WD-Request"] = "1"
+        assert c.get("/api/health").json()["registration_mode"] == "verified"
+        assert register(c, "alice")["user"]["role"] == "admin"  # the bootstrap is a username + password in every mode
+        r = second_client(app).post("/api/auth/register", json={"username": "bob", "password": PW})
+        assert r.status_code == 403 and error_code(r) == "verification_required"
+        assert c.get("/api/auth/me").json()["server"]["registration_mode"] == "verified"
 
 
 def test_disabled_account_cannot_log_in(client: TestClient, app, settings):
@@ -437,14 +549,16 @@ def test_email_verification_flow(client: TestClient, app, settings, frozen_clock
     mailer = RecordingMailer()
     app.state.mailer = mailer
     r = client.post("/api/account/email/request-code")
-    assert r.status_code == 202 and r.json() == {"sent": True, "expires_in_s": 900}
-    assert len(mailer.sent) == 1 and mailer.sent[0].to == "alice@example.com" and "邮箱验证码" in mailer.sent[0].subject
+    assert r.status_code == 202 and r.json() == {"sent": True, "expires_in_s": 600}
+    assert len(mailer.sent) == 1 and mailer.sent[0].to == "alice@example.com" and "邮箱验证码" in mailer.sent[0].subject and "10 分钟" in mailer.sent[0].text
     code = re.search(r"(\d{6})", mailer.sent[0].text).group(1)
     c = db.connect(settings.db_path)
     try:
-        row = c.execute("SELECT * FROM email_codes WHERE user_id = ?", (alice["id"],)).fetchone()
-        assert row["code_hash"] == security.email_code_hash(settings.secret_key, code, alice["id"]) and row["used_at"] is None
-        assert row["expires_at"] == "2026-10-14T00:15:00Z"
+        row = c.execute("SELECT * FROM login_codes WHERE user_id = ?", (alice["id"],)).fetchone()  # a login_codes row, not email_codes (0018)
+        assert (row["channel"], row["target"], row["purpose"], row["ip"]) == ("email", "alice@example.com", "bind_email", "testclient")
+        assert row["code_hash"] == security.login_code_hash(settings.secret_key, code, "email", "alice@example.com", "bind_email") and row["used_at"] is None
+        assert row["expires_at"] == "2026-10-14T00:10:00Z"
+        assert c.execute("SELECT COUNT(*) FROM email_codes").fetchone()[0] == 0  # the legacy table is no longer written
     finally:
         c.close()
     wrong = "000000" if code != "000000" else "111111"
@@ -470,11 +584,11 @@ def test_email_verification_flow(client: TestClient, app, settings, frozen_clock
     r = client.post("/api/account/email/request-code")
     assert r.status_code == 429 and error_code(r) == "rate_limited"
     assert len(mailer.sent) == 3
-    # expiry after 15 minutes
+    # expiry after 10 minutes
     frozen_clock.advance(hours=1)
     client.post("/api/account/email/request-code")
     code3 = re.search(r"(\d{6})", mailer.sent[-1].text).group(1)
-    frozen_clock.advance(minutes=15)
+    frozen_clock.advance(minutes=10)
     r = client.post("/api/account/email/verify", json={"code": code3})
     assert r.status_code == 400 and r.json()["error"]["details"]["attempts_left"] == 0
     # a newer code invalidates the previous one
@@ -484,11 +598,20 @@ def test_email_verification_flow(client: TestClient, app, settings, frozen_clock
     code5 = re.search(r"(\d{6})", mailer.sent[-1].text).group(1)
     assert client.post("/api/account/email/verify", json={"code": code4}).status_code == 400
     assert client.post("/api/account/email/verify", json={"code": code5}).status_code == 200
-    # SMTP failure → 503 and nothing marked verified by it
+    # SMTP failure → 503, the code voided and nothing marked verified by it
     frozen_clock.advance(hours=1)
     mailer.fail_with = "boom"
     r = client.post("/api/account/email/request-code")
     assert r.status_code == 503 and error_code(r) == "email_send_failed"
+    assert count(settings, "login_codes", "user_id = ? AND purpose = 'bind_email' AND used_at IS NULL", (alice["id"],)) == 0
+    # a code sent to the previous address does not verify the next one
+    mailer.fail_with = None
+    frozen_clock.advance(hours=1)
+    client.post("/api/account/email/request-code")
+    code6 = re.search(r"(\d{6})", mailer.sent[-1].text).group(1)
+    client.put("/api/account", json={"email": "alice-new@example.com"})
+    r = client.post("/api/account/email/verify", json={"code": code6})
+    assert r.status_code == 400 and r.json()["error"]["details"]["attempts_left"] == 0
 
 
 def test_delete_account_cascade_keeps_shared_private_word(client: TestClient, app, settings):
@@ -509,6 +632,8 @@ def test_delete_account_cascade_keeps_shared_private_word(client: TestClient, ap
         batch = c.execute("INSERT INTO push_batches(user_id, local_date, timezone, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'manual')", (bob["id"],)).lastrowid
         c.execute("INSERT INTO push_items(batch_id, word_id, kind, position) VALUES (?, ?, 'new', 1)", (batch, public))
         c.execute("INSERT INTO email_codes(user_id, email, code_hash, expires_at) VALUES (?, 'b@example.com', 'h', '2026-10-14T00:15:00Z')", (bob["id"],))
+        c.execute("INSERT INTO identities(user_id, provider, subject) VALUES (?, 'phone', '+8613800138000')", (bob["id"],))
+        c.execute("INSERT INTO login_codes(channel, target, purpose, user_id, code_hash, expires_at) VALUES ('phone', '+8613800138000', 'reauth', ?, 'h', '2026-10-14T00:10:00Z')", (bob["id"],))
         c.execute("INSERT INTO bank_suggestions(user_id, type, payload_json) VALUES (?, 'fill_data', '{}')", (bob["id"],))
         c.execute("INSERT INTO content_reports(user_id, word_id, target, reason) VALUES (?, ?, 'content', 'other')", (bob["id"], public))
         job_private = queue.enqueue(c, "lookup_word", {"word_id": private}, dedupe_key=f"lookup:{private}", priority=10, now=NOW_ISO)
@@ -520,7 +645,7 @@ def test_delete_account_cascade_keeps_shared_private_word(client: TestClient, ap
     assert r.status_code == 401 and error_code(r) == "invalid_credentials"
     r = bob_c.request("DELETE", "/api/account", json={"password": PW})
     assert r.status_code == 204 and "wd_session=" in r.headers["set-cookie"].lower()
-    for table in ("users", "sessions", "user_settings", "user_words", "review_logs", "daily_stats", "push_batches", "email_codes", "bank_suggestions", "content_reports"):
+    for table in ("users", "sessions", "user_settings", "user_words", "review_logs", "daily_stats", "push_batches", "email_codes", "identities", "login_codes", "bank_suggestions", "content_reports"):
         assert count(settings, table, "user_id = ?" if table != "users" else "id = ?", (bob["id"],)) == 0, table
     assert count(settings, "push_items", "batch_id = ?", (batch,)) == 0
     c = db.connect(settings.db_path)

@@ -641,6 +641,131 @@ def test_daily_quota_counts_within_the_utc_day(seeded, user):
     assert bank.quota_used(seeded, key, "2026-10-15T00:00:00Z") == 3
 
 
+# ----------------------------------------------------------------------------------- per-user AI quota
+NOW_S = "2026-10-14T08:00:00Z"
+
+
+def _quota_limit(monkeypatch, settings, limit: int) -> None:
+    """``WD_AI_USER_DAILY_WORDS=limit`` for the mark path, which reads the process settings (``apply_action`` carries no cfg)."""
+    from dataclasses import replace
+
+    tight = replace(settings, ai_user_daily_words=limit)
+    monkeypatch.setattr(bank, "get_settings", lambda refresh=False: tight)
+
+
+def _content_state(conn, word_id: int) -> str:
+    return str(conn.execute("SELECT content_state FROM words WHERE id = ?", (word_id,)).fetchone()[0])
+
+
+def _quota_events(conn) -> list[dict]:
+    return [json.loads(r[0]) for r in conn.execute("SELECT detail_json FROM system_events WHERE kind = 'ai_quota_user' ORDER BY id")]
+
+
+def _job_words(conn, type_: str) -> list[int]:
+    return [json.loads(j["payload_json"])["word_id"] for j in jobs(conn, type_)]
+
+
+def test_ai_user_quota_skips_learner_content_beyond_the_limit(seeded, user, settings, monkeypatch):
+    """CLAUDE_INTEGRATION §7 per-user daily words: with a cap of 2 the third 不熟悉 mark of the day still adds the word but queues
+    nothing (no content job, no ride-along dance), the word stays ``content_state='none'``, the skip shows on the ActionResult
+    only (API.md 26 unchanged), one ``ai_quota_user`` event is written for the user-day, and other learners / the next UTC day
+    are untouched."""
+    assert bank.ai_user_quota_key(7) == "ai:user:7"
+    _quota_limit(monkeypatch, settings, 2)
+    w1, w2, w3, w4 = (wid(seeded, x) for x in ("abandon", "apple", "bank", "cat"))
+    r1 = act(seeded, user, w1, "unfamiliar", context="browse")
+    r2 = act(seeded, user, w2, "unfamiliar", context="detail")
+    r3 = act(seeded, user, w3, "unfamiliar", context="browse")
+    assert (r1.content_quota_exceeded, r2.content_quota_exceeded, r3.content_quota_exceeded) == (False, False, True)
+    assert r1.content_job_id is not None and r2.content_job_id is not None and r3.content_job_id is None
+    assert (r3.status, r3.state, r3.created) == ("added", "new", True)  # the bank row itself is never refused
+    assert r3.response() == {"word_id": w3, "state": "new", "mine": r3.mine, "status": "added"}  # no DTO change
+    assert _job_words(seeded, "generate_content") == [w1, w2]
+    assert w3 not in _job_words(seeded, "generate_dance")  # the dance ride-along is skipped together with the content job
+    assert _content_state(seeded, w3) == "none" and _content_state(seeded, w1) == "queued"
+    assert bank.quota_used(seeded, bank.ai_user_quota_key(user), NOW_S) == 2
+    assert _quota_events(seeded) == [{"limit": 2, "used": 2, "user_id": user}]
+    # a further mark the same day: skipped again, no second event
+    r4 = act(seeded, user, w4, "unfamiliar", context="today")
+    assert r4.content_quota_exceeded and r4.content_job_id is None and len(_quota_events(seeded)) == 1
+    assert uw(seeded, user, w4)["origin"] == "push" and _content_state(seeded, w4) == "none"
+    # another learner has a counter of their own
+    bob = make_user(seeded, "bob")
+    rb = act(seeded, bob, w3, "unfamiliar")
+    assert rb.content_job_id is not None and rb.content_quota_exceeded is False
+    assert _content_state(seeded, w3) == "queued" and bank.quota_used(seeded, bank.ai_user_quota_key(bob), NOW_S) == 1
+    assert bank.quota_used(seeded, bank.ai_user_quota_key(user), NOW_S) == 2
+    # the next UTC day starts a fresh window
+    r5 = act(seeded, user, wid(seeded, "dog"), "unfamiliar", now=NOW + timedelta(days=1))
+    assert r5.content_quota_exceeded is False and r5.content_job_id is not None
+    assert bank.quota_used(seeded, bank.ai_user_quota_key(user), "2026-10-15T08:00:00Z") == 1
+
+
+def test_ai_user_quota_zero_is_unlimited(seeded, user, settings, monkeypatch):
+    _quota_limit(monkeypatch, settings, 0)
+    ids = [wid(seeded, x) for x in ("abandon", "apple", "bank")]
+    results = [act(seeded, user, w, "unfamiliar") for w in ids]
+    assert all(r.content_job_id is not None and r.content_quota_exceeded is False for r in results)
+    assert _job_words(seeded, "generate_content") == ids
+    assert bank.quota_used(seeded, bank.ai_user_quota_key(user), NOW_S) == 0  # unlimited: nothing is even counted
+    assert _quota_events(seeded) == []
+
+
+def test_ai_user_quota_dedupe_hit_is_never_a_skip(seeded, user, settings, monkeypatch):
+    """A live content job for the word folds the mark in — the job id back, no skip, no `ai_quota_user` event — even when the
+    learner's counter is at the cap: the quota turns away NEW calls only, and the live job is checked before the counter."""
+    from wd.jobs import queue
+
+    _quota_limit(monkeypatch, settings, 1)
+    first, live, fresh = (wid(seeded, x) for x in ("abandon", "apple", "bank"))
+    assert act(seeded, user, first, "unfamiliar").content_job_id is not None  # the cap (1) is reached
+    live_job = queue.enqueue(seeded, "generate_content", {"word_id": live}, dedupe_key=f"content:{live}", priority=30, now=NOW_S)  # state stays 'none'
+    r = act(seeded, user, live, "unfamiliar")
+    assert r.content_job_id == live_job and r.content_quota_exceeded is False and _content_state(seeded, live) == "queued"
+    assert bank.quota_used(seeded, bank.ai_user_quota_key(user), NOW_S) == 1 and _quota_events(seeded) == []
+    r2 = act(seeded, user, fresh, "unfamiliar")  # a word without a live job is still turned away
+    assert r2.content_job_id is None and r2.content_quota_exceeded is True and _content_state(seeded, fresh) == "none"
+    assert _quota_events(seeded) == [{"limit": 1, "used": 1, "user_id": user}]
+
+
+def test_ai_user_quota_counts_only_marks_that_generate_something(seeded, user, settings, monkeypatch):
+    """Already queued / ready words, a dedupe hit on a live job and an invalid word consume nothing; a first mark counts, a re-add
+    while the job is live counts nothing, and a re-add after that job died counts again (DESIGN §4 readd → enqueue)."""
+    from wd.jobs import queue
+
+    _quota_limit(monkeypatch, settings, 2)
+    key = bank.ai_user_quota_key(user)
+    bob = make_user(seeded, "bob")
+    queued, ready, live, invalid, fresh = (wid(seeded, x) for x in ("abandon", "apple", "bank", "cat", "dog"))
+    act(seeded, bob, queued, "unfamiliar")  # bob's mark queued it (his counter)
+    seeded.execute("UPDATE words SET content_state = 'ready' WHERE id = ?", (ready,))
+    live_job = queue.enqueue(seeded, "generate_content", {"word_id": live}, dedupe_key=f"content:{live}", priority=30, now=NOW_S)  # state stays 'none'
+    seeded.execute("UPDATE words SET is_valid_english = 0 WHERE id = ?", (invalid,))
+    results = {w: act(seeded, user, w, "unfamiliar") for w in (queued, ready, live, invalid)}
+    assert all(r.content_quota_exceeded is False for r in results.values())
+    assert results[live].content_job_id == live_job and _content_state(seeded, live) == "queued"  # folded into the live job
+    assert results[queued].content_job_id is None and results[ready].content_job_id is None and results[invalid].content_job_id is None
+    assert bank.quota_used(seeded, key, NOW_S) == 0 and bank.quota_used(seeded, bank.ai_user_quota_key(bob), NOW_S) == 1
+    assert len(jobs(seeded, "generate_content")) == 2  # bob's and the pre-existing live one
+    # a first mark of a fresh word counts once; the re-add while its job is live adds nothing
+    first = act(seeded, user, fresh, "unfamiliar")
+    assert first.content_job_id is not None and bank.quota_used(seeded, key, NOW_S) == 1
+    act(seeded, user, fresh, "remove")
+    again = act(seeded, user, fresh, "unfamiliar")
+    assert (again.status, again.content_job_id, again.content_quota_exceeded) == ("readded", None, False)
+    assert bank.quota_used(seeded, key, NOW_S) == 1
+    # the job died → the next re-add generates again and counts again
+    seeded.execute("UPDATE jobs SET status = 'dead' WHERE id = ?", (first.content_job_id,))
+    seeded.execute("UPDATE words SET content_state = 'failed' WHERE id = ?", (fresh,))
+    act(seeded, user, fresh, "remove")
+    third = act(seeded, user, fresh, "unfamiliar")
+    assert third.status == "readded" and third.content_job_id not in (None, first.content_job_id)
+    assert bank.quota_used(seeded, key, NOW_S) == 2 and _quota_events(seeded) == []
+    # the cap is now reached: the next fresh word is skipped and the event appears
+    skipped = act(seeded, user, wid(seeded, "glass"), "unfamiliar")
+    assert skipped.content_quota_exceeded and _quota_events(seeded) == [{"limit": 2, "used": 2, "user_id": user}]
+
+
 def test_bank_counts(seeded, user):
     for lemma, action in (("abandon", "unfamiliar"), ("apple", "unfamiliar"), ("bank", "known")):
         act(seeded, user, wid(seeded, lemma), action)

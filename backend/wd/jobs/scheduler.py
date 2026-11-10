@@ -11,7 +11,8 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   downtime builds today only — and when the service comes back on a later local day *before* that day's push
   time, ``next_push_at`` is re-anchored to that instant (guarded) so today's batch is built in its normal window
   and published + delivered at push time instead of being published at once with ``skipped`` deliveries;
-* ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, stale ``running`` jobs, timed-out open
+* ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, expired / day-old used ``login_codes`` and the
+  ``sms.sent.*`` kv counters older than two days (docs/AUTH_SIGNUP_DESIGN.md §5.1), stale ``running`` jobs, timed-out open
   ``bank_suggestions`` → ``expired`` for every user — ``consolidate.expire_stale_suggestions``);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
 * 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, the failed-image retry sweep
@@ -173,19 +174,26 @@ def process_pushes(conn: sqlite3.Connection, now: datetime, *, prebuild_hours: i
 
 # -------------------------------------------------------------------------------------------- hourly
 def hourly_gc(conn: sqlite3.Connection, now: datetime, *, boot_id: str) -> bool:
-    """Once per hour: expired sessions, finished throttle rows, stale ``running`` jobs (boot-id sweep), and open
-    ``bank_suggestions`` past their 30-day ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6; the nightly
-    ``consolidate_bank`` job does the same for its user only, and only when the bank needs a run)."""
+    """Once per hour: expired sessions, finished throttle rows, verification codes that expired or were used more than a day ago
+    (the used row is kept a day as the audit trail of a login / binding / dispute), the site-wide ``sms.sent.<day|hour>`` kv
+    counters older than two days, stale ``running`` jobs (boot-id sweep), and open ``bank_suggestions`` past their 30-day
+    ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6; the nightly ``consolidate_bank`` job does the same for its user only,
+    and only when the bank needs a run)."""
     now_s = to_iso(now)
     last = db.kv_get(conn, KV_HOURLY)
     if last and parse_iso(last) > now - HOURLY:
         return False
+    day_ago = to_iso(now - timedelta(days=1))
     with db.maybe_tx(conn):
         conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now_s,))
         conn.execute(
             "DELETE FROM auth_throttle WHERE (blocked_until IS NULL OR blocked_until <= ?) AND window_start < ?",
-            (now_s, to_iso(now - timedelta(days=1))),
+            (now_s, day_ago),
         )
+        # an unused code goes when it expires; a used one (a login / binding / dispute happened) is kept a day as the audit trail
+        conn.execute("DELETE FROM login_codes WHERE (used_at IS NULL AND expires_at <= ?) OR (used_at IS NOT NULL AND used_at <= ?)", (now_s, day_ago))
+        # `sms.sent.<YYYY-MM-DD>` / `sms.sent.<YYYY-MM-DDTHH>` (sms_budget): the part after the 9-character prefix sorts by date
+        conn.execute("DELETE FROM kv WHERE key LIKE 'sms.sent.%' AND substr(key, 10) < ?", ((now - timedelta(days=2)).strftime("%Y-%m-%d"),))
         swept = queue.requeue_stale(conn, boot_id, now=now_s)
         expired = consolidate.expire_stale_suggestions(conn, None, now=now_s)
         db.kv_set(conn, KV_HOURLY, now_s, now=now_s)

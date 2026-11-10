@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from .. import db, images, schemas
+from .. import db, images, schemas, sms_budget
 from ..ai import budget, failover, ledger, prewarm, probe
 from ..clock import Clock, local_date, parse_iso, to_iso
 from ..config import Settings
@@ -142,6 +142,7 @@ def overview(
         "ai": budget.spend_summary(conn, cfg, now),
         "images": {"providers": _provider_status(conn, cfg, now)},
         "scheduler": {"last_tick_at": last_tick, "alive": sched_alive},
+        "sms": sms_budget.sms_usage(conn, cfg, parse_iso(now)),  # the site-wide SMS counters against the WD_SMS_* caps (API.md 54)
         "events_24h": events,
     }
 

@@ -1,39 +1,27 @@
-// RegisterPage — `/register` (guest; FRONTEND §2, API.md 2): username、password(strength hint)、display name(optional)、e-mail(optional)、
-// invite code (shown when `registration_mode='invite'` and not `needs_setup`). With `needs_setup` the form shows
-// "the first registration becomes admin" and no invite field (bootstrap rule); a closed server without `needs_setup`
-// shows registration closed. After registration <RequireGuest/> redirects (→ /welcome through RequireOnboarded).
+// RegisterPage — `/register` (guest; FRONTEND §2, API.md 2 / §3.1): in `verified` mode (after the bootstrap) the page is
+// the shared code entry — phone / e-mail tabs by `health.sms_enabled` / `email_enabled`, the consent line, captcha, code →
+// endpoint 81 creates the account (username + password come later, /welcome step 0 or settings); username/password
+// registration (strength hint, optional display name / e-mail, invite code when `registration_mode='invite'`) stays
+// for `open` / `invite` and for the bootstrap (`needs_setup`: "the first registration becomes admin", no invite field,
+// any mode). A closed server without `needs_setup` shows registration closed. After registration <RequireGuest/>
+// redirects (→ /welcome through RequireOnboarded).
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { errorMessage, isApiError } from '@/api/client';
+import { errorMessage } from '@/api/client';
 import type { RegisterBody } from '@/api/endpoints';
+import type { CodeChannel } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
+import { CodeSignIn } from '@/components/ui/CodeSignIn';
 import { Field } from '@/components/ui/Field';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
-import './LoginPage.css';
+import { EMAIL_RE, USERNAME_RE, passwordStrength, validationFieldMessages } from '@/utils/auth';
+import '@/components/ui/auth.css';
 
-const USERNAME_RE = new RegExp(`^[A-Za-z0-9_${String.fromCharCode(0x4e00)}-${String.fromCharCode(0x9fa5)}]{2,32}$`); // CJK range from code points (no Chinese characters in this file)
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-/** 0 (empty) … 3 (strong) — a visual hint only; the server enforces API.md 2 / DESIGN §10. */
-export function passwordStrength(password: string, username: string): 0 | 1 | 2 | 3 {
-  if (!password) return 0;
-  if (password.length < 8 || (username && password.toLowerCase() === username.toLowerCase())) return 1;
-  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z\d]/].filter((re) => re.test(password)).length;
-  if (password.length >= 12 && classes >= 3) return 3;
-  return 2;
-}
-
-/** Joins the per-field messages of a 400 `validation_error` (API.md §1.1), or null. */
-export function validationFieldMessages(e: unknown): string | null {
-  if (!isApiError(e) || e.code !== 'validation_error') return null;
-  const fields = e.details?.fields;
-  if (typeof fields !== 'object' || fields === null) return null;
-  const messages = Object.values(fields as Record<string, unknown>).filter((m): m is string => typeof m === 'string' && m.length > 0);
-  return messages.length ? messages.join(' · ') : null;
-}
+// the helpers moved to utils/auth.ts (shared with /forgot and /welcome); re-exported for their tests and older imports
+export { passwordStrength, validationFieldMessages };
 
 export default function RegisterPage() {
   usePageTitle(zh.auth.register);
@@ -56,7 +44,10 @@ export default function RegisterPage() {
   const needsSetup = health?.needs_setup === true;
   const mode = health?.registration_mode ?? 'open';
   const closed = !needsSetup && mode === 'closed';
+  const verified = !needsSetup && mode === 'verified';
   const showInvite = !needsSetup && mode === 'invite';
+  // the channels the server can send a code on (API.md 1); none → the code sign-up cannot happen here
+  const channels: CodeChannel[] = [...(health?.sms_enabled ? (['phone'] as const) : []), ...(health?.email_enabled ? (['email'] as const) : [])];
   const next = params.get('next');
   const loginTo = next ? `${routePaths.login}?next=${encodeURIComponent(next)}` : routePaths.login;
 
@@ -109,6 +100,19 @@ export default function RegisterPage() {
           <p className="auth__error" role="status">
             {zh.errors.registrationClosed}
           </p>
+          <p className="auth__hint muted">
+            {zh.auth.hasAccount} <Link to={loginTo}>{zh.auth.login}</Link>
+          </p>
+        </>
+      ) : verified ? (
+        <>
+          {channels.length > 0 ? (
+            <CodeSignIn channels={channels} captcha={health?.captcha === true} registrationMode={mode} submitLabel={zh.auth.register} />
+          ) : (
+            <p className="auth__error" role="status">
+              {zh.auth.noChannel}
+            </p>
+          )}
           <p className="auth__hint muted">
             {zh.auth.hasAccount} <Link to={loginTo}>{zh.auth.login}</Link>
           </p>

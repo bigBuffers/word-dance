@@ -20,6 +20,9 @@ export type AiProvider = 'claude' | 'fallback';   // ai_calls.provider: the Clau
 export type DanceMode = 'full' | 'form_only' | 'off';   // 单词之舞 (docs/WORD_DANCE_DESIGN.md §6.3): full = spelling + stress + semantic dance, form_only = spelling + stress only, off
 export type DancePrimitive = 'rise' | 'fall' | 'hop' | 'grow' | 'shrink' | 'dash' | 'creep' | 'enter' | 'exit' | 'arc' | 'onto' | 'under' | 'behind' | 'between' | 'split' | 'join' | 'shiver' | 'shimmer' | 'wave' | 'droop' | 'stretch' | 'squash' | 'thud' | 'float' | 'spin' | 'repeat' | 'multiply' | 'dim' | 'glow' | 'color';   // the semantic dance library (§4.3): one motion per meaning class, chosen by Claude from this closed list
 export type DanceColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'brown' | 'black' | 'white' | 'grey';   // the only colours the `color` primitive may name
+export type AgeBand = 'u14' | '14plus' | 'adult';   // users.age_band — the learner's own declaration, never verified (docs/AUTH_SIGNUP_DESIGN.md §5.1)
+export type CodeChannel = 'phone' | 'email';         // login_codes.channel (endpoints 80, 81, 85)
+export type IdentityProvider = 'phone' | 'wechat_mini' | 'qq' | 'apple';   // identities.provider — only `phone` is issued in slice 1-A
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -27,15 +30,36 @@ export interface Page<T> { items: T[]; page: number; page_size: number; total: n
 export interface User {
   id: number; username: string; display_name: string; email: string | null; email_verified: boolean;
   role: 'user' | 'admin'; onboarding_state: 'pending' | 'screen' | 'done'; created_at: string;
+  has_password: boolean;                // users.password_set_at IS NOT NULL — false for an account created by a verification code until it sets one (endpoint 89 / 7)
+  phone_masked: string | null;          // the live phone identity with its middle digits hidden (`138****8000`); null without one
+  needs_profile: boolean;               // a code-created account that has not saved its nickname + age band yet (endpoint 89); the SPA shows 「首次设置」 before step 1 of /welcome
+  age_band: AgeBand | null;             // null = not declared
 }
 export interface ServerFlags {
-  version: string; registration_mode: 'open' | 'invite' | 'closed'; email_configured: boolean;
+  version: string; registration_mode: 'open' | 'invite' | 'closed' | 'verified'; email_configured: boolean;
   ai_enabled: boolean; images_enabled: boolean; dev: boolean;
   needs_setup: boolean;                 // true while no user exists (also in GET /api/health)
   audio: boolean;                       // GET /media/audio serves pronunciation clips (WD_AUDIO_PROVIDER is not off; endpoint 76) — the fallback for devices without an English voice
   audio_key: string;                    // fingerprint of the provider + voice behind endpoint 76 (empty without a provider): the client appends it to clip URLs as `v`, so a switched voice is a new URL for the browser cache
+  sms_enabled: boolean;                 // WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
 }
 export interface Counters { suggestions_open: number; attention: number }   // GET /api/auth/me → badges
+export interface CaptchaChallenge { id: string; image: string; exp: number; sig: string; expires_in_s: number }   // endpoint 79: `image` is a PNG data: URI; the client returns id/exp/sig with the digits it read
+export interface CodeSendResponse { sent: boolean; expires_in_s: number }   // endpoints 9, 80, 82, 85, 90 — always `sent: true`; identical for known and unknown targets
+export interface StaleChallenge {
+  token: string;                        // one-time, 10 minutes (endpoints 82–84)
+  display_name_masked: string;          // first character + ＊＊ — 「这是你的账号吗」
+  since: string;                        // the account's registration month `YYYY-MM`
+  can_password: boolean; can_email: boolean;   // the second factors this account can offer; both false → the SPA shows the contact-admin text
+  email_masked: string | null;          // `a***@qq.com` when can_email
+}
+export interface CodeLoginResponse {
+  user: User | null; settings: Settings | null;   // set when a session was issued (cookie in the same response)
+  created: boolean;                     // true when this call created the account (HTTP 201)
+  challenge: StaleChallenge | null;     // set instead of a session when the phone identity is stale (WD_PHONE_STALE_DAYS)
+}
+export interface DemoWord { word: WordBrief; content: Content | null; image: ImageMeta; dance: DanceSpec | null }   // endpoint 77
+export interface DemoResponse { items: DemoWord[] }
 export interface Settings {
   timezone: string; push_time: string; push_enabled: boolean;
   daily_new_count: number; daily_screen_count: number; max_reviews: number;
@@ -209,6 +233,7 @@ export interface AdminOverview {
   // · active_provider = kv ai.active_provider · fallback_* = the HTTP fallback provider; fallback_available null = never probed, false = marked unavailable until the next fallback success (CLAUDE_INTEGRATION §10)
   images: { providers: { provider: string; minute_count: number; day_count: number; minute_limit: number | null; day_limit: number | null; cooldown_until: string | null }[] };
   scheduler: { last_tick_at: string | null; alive: boolean };
+  sms: { provider: string; sent_today: number; daily_cap: number; sent_hour: number; hourly_cap: number; registration_open: boolean };   // WD_SMS_* caps (WD_TZ day / current hour); registration_open = new-account code sends still below 70 % of the day cap
   events_24h: SystemEvent[];
 }
 export interface AdminHealth {
@@ -219,6 +244,7 @@ export interface AdminHealth {
   last_backup: { file: string; at: string; bytes: number } | null;
 }
 export interface AdminUser extends User { is_active: boolean; last_login_at: string | null; bank_size: number; streak_days: number }
+export interface DisputedIdentity { id: number; user: { id: number; username: string; display_name: string }; provider: IdentityProvider; subject_masked: string; verified_at: string; last_login_at: string | null; disputed_at: string; current_user_id: number | null }   // endpoints 92/93; current_user_id = the account now holding the live binding
 export interface Job {
   id: number; type: string; payload: Record<string, unknown>; dedupe_key: string | null; priority: number; status: string;
   attempts: number; max_attempts: number; run_after: string; locked_by: string | null; last_error: string | null; created_at: string; finished_at: string | null;

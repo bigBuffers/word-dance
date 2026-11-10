@@ -43,6 +43,7 @@ from .ai import ledger
 from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
 from .delivery.mailer import mailer_from_settings
+from .delivery.sms import sms_sender_from_settings
 from .deps import SESSION_COOKIE, csrf_violation
 from .errors import ApiError, error_response, install_handlers
 from .jobs import lease, queue, registry
@@ -57,7 +58,9 @@ from .routers import (
     admin_users,
     audio as audio_router,
     auth,
+    auth_codes,
     bank,
+    demo,
     health,
     history,
     media,
@@ -78,7 +81,9 @@ http_log = logging.getLogger("wd.http")
 ROUTERS = (
     health,
     auth,
+    auth_codes,
     account,
+    demo,
     onboarding,
     settings_router,
     vocab,
@@ -521,6 +526,14 @@ def startup(app: FastAPI) -> None:
             log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
         app.state.audio_warm_up = audio.warm_up_async(cfg)  # `say -v ?` and the voice probes (1–3 s) on a daemon thread: before the first tap, never on its request
         log.info(
+            "sign-in channels: sms %s, mail %s, captcha %s, registration %s",
+            cfg.sms_provider,
+            cfg.mail_provider if cfg.email_configured else "off",
+            cfg.captcha,
+            cfg.registration_mode,
+            extra={"event": "sms_provider"},
+        )
+        log.info(
             "AI provider mode %s (fallback: %s)",
             cfg.ai_provider,
             f"{cfg.ai_fallback_kind} {cfg.ai_fallback_model} for {','.join(cfg.ai_fallback_kinds)}" if cfg.fallback_configured else "not configured",
@@ -581,6 +594,7 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None, 
     app.state.lease_instance = None
     app.state.lease_waiter = None
     app.state.mailer = mailer_from_settings(cfg)
+    app.state.sms = sms_sender_from_settings(cfg)  # None while WD_SMS_PROVIDER=off → 409 sms_unconfigured (API.md 80 / 85); tests swap in RecordingSmsSender
     if cfg.smoke_mock_http:  # WD_SMOKE_MOCK_HTTP=1 (dev only): fixture-backed httpx transport, nothing leaves the box
         from . import smoke_mock
 

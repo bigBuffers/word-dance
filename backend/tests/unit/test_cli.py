@@ -26,7 +26,7 @@ def test_migrate_twice(settings, capsys):
     try:
         shipped = [(f.version, f.name) for f in db.list_migration_files()]
         assert [tuple(r) for r in c.execute("SELECT version, name FROM schema_migrations ORDER BY version")] == shipped  # one row per file, runner-written
-        assert len(db.table_names(c)) == 26 and db.view_names(c) == ["v_bank"]
+        assert len(db.table_names(c)) == 28 and db.view_names(c) == ["v_bank"]
     finally:
         c.close()
     # DEPLOY §1: the DB is 0600 even when `wd migrate` created it under a permissive shell umask
