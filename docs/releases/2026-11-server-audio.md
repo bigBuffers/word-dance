@@ -27,7 +27,7 @@
 
 ## 4 上线步骤与回滚
 
-1. Mac：`git pull`，构建前端快照并切换符号链接，`launchctl kickstart -k gui/$(id -u)/com.word-dance.server`（后端代码变了，必须重启；`auto` 在 Mac 上自动等于 `say`，`.env` 不用改）。可选：先在 系统设置 → 辅助功能 → 朗读内容 → 系统语音 下载「Ava（高级）」或「Samantha（增强）」，重启后自动选用（日志事件 `audio_voice`）。
+1. Mac：`git pull`，构建前端快照并切换符号链接，`launchctl kickstart -k gui/$(id -u)/com.word-dance.server`（后端代码变了，必须重启；`auto` 在 Mac 上自动等于 `say`，`.env` 不用改）。可选：先在 系统设置 → 辅助功能 → 朗读内容 → 系统语音 下载「Ava（高级）」或「Samantha（增强）」（`say -v '?'` 里叫 `Ava (Premium)`），重启后自动选用（启动日志 `audio_voice`；`WD_DATA_DIR=/Users/sqin/word-dance-data .venv/bin/wd audio-voices` 直接打印选择），再跑 `… wd audio-prewarm --dry-run` 看计划、`… wd audio-prewarm --purge-others` 预生成有内容或在词库里的词及其例句并清掉旧语音的片段（§6）。
 2. 验证：`curl --noproxy '*' http://127.0.0.1:8000/media/audio?text=farmer` 未登录应答 401；启动日志有 `audio_provider … say`；登录后 `GET /api/auth/me` 的 `server.audio` 为 `true`；平板 App 里点单词和例句的发音都出声，连点两次只响后一次；华为浏览器里网页发音仍走系统语音。
 3. Linux 服务器：在 `.env` 里显式写 `WD_AUDIO_PROVIDER="youdao"`（或接受没有兜底）。
 4. 回滚：`git checkout c4574cd`，重建前端快照并重启；`audio/` 目录可留可删（只是缓存）。无迁移，无数据风险。
@@ -39,3 +39,17 @@
 - 这台 Mac 只装了普通版 Samantha（en-US）与 Daniel（en-GB）；下载「Ava（高级）」或「Samantha（增强）」并重启服务即可自动换用（§4 第 1 步）。
 - 平板上的 App 不用重装：壳加载的是线上站点，下次点发音即走服务器音频；首次播放会在日志里留下 `audio_voice`（选用的语音）与 `/media/audio` 的 200 / 206 记录（WebView 的 `<audio>` 带 `Range` 头请求时答 206）。
 - 2026-11-10 09:08 真机确认：业主在鸿蒙 NEXT 平板的 App 里点发音，正常出声。日志：09:07:54 首次点击记下 `say voice for en-US: Samantha`（`audio_voice`；两条并发的首请求各记了一次——选择结果在计算完才入缓存，无害），首条 3.2 秒（含语音探测与合成），之后每个新词 / 例句 0.6–0.8 秒，命中缓存的请求 1 毫秒级；WebView 全部带 `Range` 头，答 206。缓存 11 条、132 KB，无临时文件残留。
+
+## 6 后续（2026-11-10 上午）：Ava（高级）、启动预热、整表预生成
+
+- **语音（一次性操作记录，不是流程）**：正常做法是 系统设置 → 辅助功能 → 朗读内容 → 系统语音 → 管理语音 里点下载；这台 Mac 的终端没有辅助访问权限点不了面板，当天改走系统自己的接口：面板点「下载」时调用的 `TextToSpeech.framework` `TTSAXResourceManager downloadResourceWithVoiceId:userInitiated:`（语音 id `com.apple.voice.premium.en-US.Ava`）发出请求，再由 MobileAsset 拉取同一资源（类型 `com.apple.MobileAsset.TTSAXResourceModelAssets`，280 MB，21 秒），系统的语音数据库随即记为已安装，`say -v '?'` 列出 `Ava (Premium)`——这台中文 Mac 上档次不本地化，只有 Eloquence 语音带「英语（美国）」之类的限定，`_PREMIUM_RE` 两种都认。第一次误下的旧式 `VoiceServices.CombinedVocalizerVoices` 包（479 MB，这版 macOS 的 `say` 不读）已清除。`wd audio-voices`：en-US → Ava (Premium)，en-GB → Daniel（普通版；两位学习者都用美音，日后有人选英音再在系统设置里下载 Serena（高级）即可）。
+- **代码**（`backend/wd/audio.py`、`main.py`、`cli.py`、`schemas.py`、`routers/auth.py`；前端 `audio/serverAudio.ts`、`hooks/useSpeech.ts`、`auth/AuthContext.tsx`、`api/types.ts`；无迁移）：
+  1. 启动预热 `warm_up_async`：守护线程先跑 `say -v ?` 与语音探测（1–3 秒），首次点击不再等它；失败记一条 `audio_voice_failed`；关闭时等它结束；顺手清掉上一进程遗留的探测文件；`say_voice_for` 并发首调只记一条 `audio_voice`。
+  2. `wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--db PATH]`：把学习路径上的文本——有内容或在某人词库里的词的 display、其例句英文，`--stage` 再加整个阶段的公开有效词头——按学习顺序两路并行合成（`youdao` 单路、每次间隔 0.5 秒）；已缓存的只计数不重做，`--limit` 只数要做的；计划会先对照 `WD_AUDIO_CACHE_MB`（超过九成即拒绝，运行中被上限删掉的片段也会报出）；连续 5 次失败即停止，Ctrl-C 给出部分报告（退出码 130）；`--purge-others` 先删掉集合之外的缓存再合成（换语音后留下的旧语音片段，也包括临时点过、不在集合里的词；保留所有在用口音；要在服务重启到新语音之后再跑，计划行里的语音要和服务日志 `audio_voice` 一致）。`wd audio-voices` 列出偏好表里已装的语音、档次、`say` 是否真能解析（探测失败与「被替换」分开报），以及每个口音的选择。
+  3. 缓存计量每 5 分钟（`SCAN_INTERVAL_S`）在新增片段时重新扫目录，扫描容忍文件中途消失：另一个进程（预生成命令、清理）增删片段既不会让服务里的总量失真，也不会让请求 500。
+  4. 换语音后浏览器缓存的问题：`/media/audio` 的 `Cache-Control` 是一周，平板里昨天播过的词会继续放旧语音。现在 `GET /api/auth/me` 的 `server.audio_key`（提供方 + 各口音已解析语音的 8 位指纹）附在每个片段 URL 的 `v` 参数上，换了语音就是新 URL（API.md §9.1；服务器忽略 `v`）。
+  5. 浏览器路线的语音挑选也按档次：`pickVoice` 先取名字带 Premium / Enhanced（高级 / 增强）的，再按原来的 Google / Microsoft / Samantha / Daniel 名单——Mac 上的网页从此也用 Ava (Premium)。
+- **数据核对**（只读快照）：694 个有内容的词（600 个小学）、2769 条例句（平均 30 字）、去重后 3401 段文本，全部通过发音文本规则（非 ASCII 只出现 é）；两位学习者都是 en-US。
+- **评审**：`review-word-dance-audio-prewarm`，6 个视角、58 条发现、每条 3 人复核，51 条确认（去重后十几组：扫描竞态、中止规则、容量感知、`--purge-others` 的保护范围、`--db` 误建空库、`audio-voices` 不建目录、CLI 无日志处理器、浏览器一周旧缓存、文案与范围不符等）全部修正；7 条驳回。随后 `verify-word-dance-audio-prewarm-fixes`（8 位复核者按修正簇逐一核对）又提出 24 条问题（4 条中等：容量估算没扣除将被清理的片段、帮助文案仍写「每个可点到的文本」、ops.md 对 `--purge-others` 的描述、FRONTEND §6.4 漏了 `v` 参数；其余为低），同样全部修正：`--purge-others` 改为先清理再合成，扫描连根目录消失也不抛错，探测文件清理按进程是否存活判断，中止时把正在跑的结果也计入，未解析语音的占位符按进程唯一，CLI 只让本模块到 INFO。
+- **暂缓 / 已知限制**：同形异音词（live / read / close …）用 `say` 的默认读法，无音标输入可用；`sb.` / `sth.` 会被读成字母（词表里 2 个词，均不在可点范围）；搭配（collocations）只显示不发音；预生成之后新生成的内容在第一次点击时合成（大批导入后重跑一次命令即可）。
+- **门禁与上线**：（上线后补）

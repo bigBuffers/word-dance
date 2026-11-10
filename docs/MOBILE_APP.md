@@ -113,7 +113,7 @@ Xcode 里：选 App target → Signing & Capabilities → 勾 Automatically mana
 2. 网站本身要含 `frontend/src/native/`（2026-11-09 的前端快照已上线，见 `docs/releases/2026-11-mobile-shell.md` §5），否则壳里没有提醒、发音等原生功能，只是普通网页；没有英文语音的设备要能出声，还要部署含 `GET /media/audio` 的后端并重启（`docs/releases/2026-11-server-audio.md`）。
 3. 隐私政策：两家商店都要一个可公开访问的 URL。目前站内「关于与来源」只有数据来源说明，**上架前需要补一页隐私政策**（收集什么：用户名、可选邮箱、学习记录；用途；删除账号的途径——设置页已有「删除账号」）。
 4. 审核用账号：注册是邀请制，提审时要在「审核备注」里给一个测试账号和邀请码。
-5. **服务器发音**：没有英文语音的设备（鸿蒙 NEXT 的安卓兼容环境、不少国产 ROM、Android WebView）靠后端 `GET /media/audio` 出声。Mac 主机默认就开（`WD_AUDIO_PROVIDER=auto` → 系统 `say`，离线、每词约 8 KB，缓存在数据目录 `audio/`）；换到 Linux 服务器后要显式设 `WD_AUDIO_PROVIDER="youdao"`（有道词典的公开发音接口，非官方，每个没缓存的文本都会发给它）或接受没有兜底（DEPLOY §4）。缓存上限 `WD_AUDIO_CACHE_MB`（默认 256 MB，最少播放的先删）。想要更好听的声音：在 系统设置 → 辅助功能 → 朗读内容 → 系统语音 下载 Ava（高级）/ Samantha（增强）等语音，重启服务后自动选用（日志事件 `audio_voice` 显示选了谁）；或用 `WD_AUDIO_SAY_VOICE` 指定，名字要和 `say -v '?'` 列出的一致——写错会 503 并记日志，不会用别的声音凑数。
+5. **服务器发音**：没有英文语音的设备（鸿蒙 NEXT 的安卓兼容环境、不少国产 ROM、Android WebView）靠后端 `GET /media/audio` 出声。Mac 主机默认就开（`WD_AUDIO_PROVIDER=auto` → 系统 `say`，离线、每词约 8 KB，缓存在数据目录 `audio/`）；换到 Linux 服务器后要显式设 `WD_AUDIO_PROVIDER="youdao"`（有道词典的公开发音接口，非官方，每个没缓存的文本都会发给它）或接受没有兜底（DEPLOY §4）。缓存上限 `WD_AUDIO_CACHE_MB`（默认 256 MB，最少播放的先删）。想要更好听的声音：在 系统设置 → 辅助功能 → 朗读内容 → 系统语音 下载 Ava（高级）/ Samantha（增强）等语音（设置里的中文名；`say -v '?'` 列出的是 `Ava (Premium)`），重启服务后自动选用（`WD_DATA_DIR=… wd audio-voices` 或启动日志 `audio_voice` 显示选了谁），再跑一次 `WD_DATA_DIR=… wd audio-prewarm --purge-others` 把有内容或在词库里的词及其例句预先生成并清掉旧语音的片段（`--stage xs` 连同整个阶段的词头），点击就不用等合成（DEPLOY §9）；或用 `WD_AUDIO_SAY_VOICE` 指定，名字要和 `say -v '?'` 列出的一致——写错会 503 并记日志，不会用别的声音凑数。
 
 ## 6. 上架步骤
 

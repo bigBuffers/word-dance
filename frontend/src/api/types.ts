@@ -33,6 +33,7 @@ export interface ServerFlags {
   ai_enabled: boolean; images_enabled: boolean; dev: boolean;
   needs_setup: boolean;                 // true while no user exists (also in GET /api/health)
   audio: boolean;                       // GET /media/audio serves pronunciation clips (WD_AUDIO_PROVIDER is not off; endpoint 76) — the fallback for devices without an English voice
+  audio_key: string;                    // fingerprint of the provider + voice behind endpoint 76 (empty without a provider): the client appends it to clip URLs as `v`, so a switched voice is a new URL for the browser cache
 }
 export interface Counters { suggestions_open: number; attention: number }   // GET /api/auth/me → badges
 export interface Settings {

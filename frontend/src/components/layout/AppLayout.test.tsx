@@ -33,7 +33,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
     email_verified: false,
     updated_at: ISO,
   },
-  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false },
+  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '' },
   counters,
 });
 

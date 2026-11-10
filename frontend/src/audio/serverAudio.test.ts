@@ -170,3 +170,17 @@ describe('diagnose', () => {
     expect(fetchMock).toHaveBeenCalledWith('/media/audio?text=x&accent=en-GB', { credentials: 'same-origin', headers: { Accept: 'audio/*' } });
   });
 });
+
+describe('clipUrl (FRONTEND §6.4)', () => {
+  it("carries the server's voice fingerprint as `v` when one is known, so a switched voice is a new URL for the browser cache", () => {
+    setServerAudio(true);
+    expect(clipUrl('farmer', 'en-US')).toBe('/media/audio?text=farmer&accent=en-US');
+    setServerAudio(true, 'k1a2b3c4');
+    expect(clipUrl('The farmer grows rice.', 'en-GB')).toBe('/media/audio?text=The+farmer+grows+rice.&accent=en-GB&v=k1a2b3c4');
+    setServerAudio(true, null); // an older server without the field
+    expect(clipUrl('farmer', 'en-US')).not.toContain('v=');
+    setServerAudio(true, 'k1a2b3c4');
+    resetServerAudio();
+    expect(clipUrl('farmer', 'en-US')).not.toContain('v=');
+  });
+});

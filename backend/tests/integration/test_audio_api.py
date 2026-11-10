@@ -5,6 +5,8 @@ unresolvable WD_AUDIO_SAY_VOICE → 503 {reason:failed}, and the log that never 
 from __future__ import annotations
 
 import logging
+import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -122,3 +124,26 @@ def test_an_override_say_cannot_resolve_is_503_failed_not_clips_in_another_voice
     r = client.get("/media/audio", params={"text": "farmer"})
     assert r.status_code == 503 and r.json()["error"]["details"] == {"reason": "failed"}
     assert calls(fakes) == []
+
+
+def test_me_carries_the_voice_fingerprint(say_client: TestClient, login, fakes):
+    """API.md §9.1 `ServerFlags.audio_key`: provider + the resolved voice per accent — the client's clip URLs change with the voice."""
+    from wd import audio
+    from wd.config import Settings
+
+    login("alice")
+    audio.join_warm_up()
+    before = say_client.get("/api/auth/me").json()["server"]
+    assert before["audio"] is True and re.fullmatch(r"[0-9a-f]{8}", before["audio_key"])
+    r = say_client.get("/media/audio", params={"text": "farmer", "accent": "en-US", "v": before["audio_key"]})  # the client's `v` is accepted and ignored
+    assert r.status_code == 200
+    audio.say_voice_for(Settings.from_env(), "en-GB")
+    after = say_client.get("/api/auth/me").json()["server"]["audio_key"]  # both voices resolved: the settled key (§9.1: the first /me after a start may differ)
+    assert after == hashlib.sha256(b"say\n\nSamantha\nDaniel").hexdigest()[:8] == audio.voice_key(Settings.from_env())  # this module's LISTING
+    assert say_client.get("/api/auth/me").json()["server"]["audio_key"] == after
+
+
+def test_me_without_a_provider_has_an_empty_voice_fingerprint(client: TestClient, login):
+    login("alice")
+    server = client.get("/api/auth/me").json()["server"]
+    assert server["audio"] is False and server["audio_key"] == ""

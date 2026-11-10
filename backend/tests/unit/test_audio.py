@@ -1,10 +1,16 @@
 """wd.audio (API.md 76): the text rule, voice choice from a localised `say -v ?` listing (tiers, the resolution probe), the
 content-addressed cache and its size cap, the `say` and `youdao` providers against fakes, the synthesis slots and waiters, the
-allow-listed child environment and the `auto` provider resolution."""
+allow-listed child environment, the `auto` provider resolution, the startup warm-up, the periodic re-count of the cache and
+the `wd audio-prewarm` / `wd audio-voices` commands (DEPLOY §9)."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
+import re
+import sqlite3
 import stat
 import threading
 import time
@@ -411,3 +417,296 @@ def test_reporting_lists_the_three_variables(test_env: dict[str, str]):
     assert keys["WD_AUDIO_SAY_VOICE"]["value"] == "Samantha"
     assert keys["WD_AUDIO_CACHE_MB"] == {"key": "WD_AUDIO_CACHE_MB", "value": "256", "source": "default"}
     assert os.environ.get("WD_AUDIO_PROVIDER") == "off"  # the test environment opts out so `auto` never picks the Mac's say
+
+
+# --------------------------------------------------------------------------------- warm-up, re-count, prewarm
+def test_warm_up_resolves_both_accents_on_a_thread_before_the_first_request(test_env: dict[str, str], fakes: dict[str, Path], caplog: pytest.LogCaptureFixture):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    with caplog.at_level(logging.INFO, logger="wd.audio"):
+        thread = audio.warm_up_async(cfg)
+        assert thread is not None and thread.daemon
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert sorted(r.getMessage() for r in caplog.records if getattr(r, "event", "") == "audio_voice") == ["say voice for en-GB: Stephanie (Premium)", "say voice for en-US: Ava (Premium)"]
+    probed = len(probes(fakes))
+    assert probed >= 2
+    assert audio.say_voice_for(cfg, "en-US") == "Ava (Premium)" and audio.say_voice_for(cfg, "en-GB") == "Stephanie (Premium)"
+    assert len(probes(fakes)) == probed, "the request path paid no probe after the warm-up"
+    assert audio.warm_up_async(make_settings(test_env, WD_AUDIO_PROVIDER="off")) is None
+
+
+def test_warm_up_logs_a_missing_voice_once_and_never_raises(test_env: dict[str, str], fake_say, caplog: pytest.LogCaptureFixture):
+    fake_say("Ting-Ting           zh_CN    # 您好，我叫Ting-Ting。\n")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    with caplog.at_level(logging.WARNING, logger="wd.audio"):
+        audio.warm_up(cfg)
+    assert [getattr(r, "event", "") for r in caplog.records] == ["audio_voice_failed"]
+    assert "no English voice" in caplog.records[0].getMessage()
+
+
+def test_the_running_total_is_recounted_from_disk_after_the_scan_interval(test_env: dict[str, str], fakes: dict[str, Path], monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    one = audio.synthesize(cfg, "en-US", "one").path.stat().st_size
+    assert audio.cache_bytes(cfg) == one
+    # another process (`wd audio-prewarm`) drops a clip in: the running total does not see it yet …
+    foreign = cfg.audio_dir / "zz" / ("f" * 64 + ".m4a")
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"x" * 1000)
+    two = audio.synthesize(cfg, "en-US", "two").path.stat().st_size
+    assert audio.cache_bytes(cfg) == one + two
+    # … until the interval has passed: the next synthesis re-counts from disk
+    monkeypatch.setattr(audio, "SCAN_INTERVAL_S", 0.0)
+    three = audio.synthesize(cfg, "en-US", "three").path.stat().st_size
+    assert audio.cache_bytes(cfg) == one + two + three + 1000
+    foreign.unlink()
+    audio.synthesize(cfg, "en-US", "four")
+    assert audio.cache_bytes(cfg) == sum(size for _m, size, _p in audio._scan(cfg.audio_dir))
+
+
+def seed_tappable(conn: sqlite3.Connection) -> None:
+    """What learners can tap: `farmer` with content (three examples, one the text rule refuses), `hop` and `zebra` in a bank
+    without content, `ghost` in nobody's reach; one en-US and one en-GB learner."""
+    conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'kid', 'x'), (2, 'mum', 'x')")
+    conn.execute("INSERT INTO user_settings (user_id, accent) VALUES (1, 'en-US'), (2, 'en-GB')")
+    conn.executemany(
+        "INSERT INTO words (id, lemma, display, source, learn_rank) VALUES (?, ?, ?, 'seed', ?)",
+        [(1, "farmer", "farmer", 20), (2, "hop", "hop", 10), (3, "ghost", "ghost", 30), (4, "zebra", "zebra", None)],
+    )
+    content = {"examples": [{"en": "The farmer grows rice.", "zh": "农民种水稻。"}, {"en": "  A   farmer   works  hard — every day. ", "zh": "…"}, {"en": "bad text ✓", "zh": "…"}, "junk"]}
+    conn.execute("INSERT INTO word_contents (id, word_id, version, prompt_version, model, content_json) VALUES (11, 1, 1, 'content-v1', 'm', ?)", (json.dumps(content),))
+    conn.execute("UPDATE words SET active_content_id = 11 WHERE id = 1")
+    conn.execute("INSERT INTO user_words (user_id, word_id, state, origin) VALUES (1, 2, 'new', 'custom'), (1, 4, 'new', 'browse')")
+    conn.execute("UPDATE words SET stage_xs = 1, is_public = 1, is_valid_english = 1 WHERE id = 3")  # a 小学 word the screening can draw
+    conn.commit()
+
+
+def test_prewarm_texts_are_the_tappable_headwords_and_examples_in_learning_order(conn: sqlite3.Connection):
+    seed_tappable(conn)
+    chosen = audio.prewarm_texts(conn)
+    assert chosen.texts == ["hop", "farmer", "The farmer grows rice.", "A farmer works hard — every day.", "zebra"]
+    assert chosen.refused == ["bad text ✓"]
+    assert audio.prewarm_texts(conn, stages=("xs",)).texts == ["hop", "farmer", "The farmer grows rice.", "A farmer works hard — every day.", "ghost", "zebra"]
+    with pytest.raises(ValueError):
+        audio.prewarm_texts(conn, stages=("xs; DROP TABLE words",))
+    assert audio.accents_in_use(conn) == ("en-US", "en-GB")
+    conn.execute("DELETE FROM user_settings WHERE user_id = 2")
+    assert audio.accents_in_use(conn) == ("en-US",)
+
+
+def test_prewarm_makes_the_missing_clips_two_at_a_time_and_counts_the_cached_ones(test_env: dict[str, str], fakes: dict[str, Path]):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    texts = ["hop", "farmer", "The farmer grows rice."]
+    played = audio.synthesize(cfg, "en-US", "farmer").path  # a learner played it already
+    old = time.time() - 300
+    os.utime(played, (old, old))
+    seen: list[int] = []
+    report = audio.prewarm(cfg, texts, ("en-US", "en-GB"), progress=lambda r: seen.append(r.done))
+    assert (report.clips, report.cached, report.todo, report.skipped, report.made, report.failed) == (6, 1, 5, 0, 5, 0)
+    assert not report.aborted and not report.interrupted and report.seconds >= 0
+    assert report.bytes_made == sum(audio.locate(cfg, a, t)[0].path.stat().st_size for a in ("en-US", "en-GB") for t in texts) - played.stat().st_size
+    assert seen == [5]
+    assert played.stat().st_mtime == pytest.approx(old)  # the cached clip was neither re-made nor touched
+    made = calls(fakes)
+    assert len(made) == 6 and made.count("Ava (Premium)|farmer") == 1
+    assert {c.split("|", 1)[0] for c in made} == {"Ava (Premium)", "Stephanie (Premium)"}
+    again = audio.prewarm(cfg, texts, ("en-US", "en-GB"))
+    assert (again.cached, again.todo, again.made) == (6, 0, 0) and len(calls(fakes)) == 6
+    # --limit bounds the clips to make, not the pairs: a cached pair does not use it up
+    limited = audio.prewarm(cfg, ["new one", "new two", "new three"], ("en-US",), limit=1)
+    assert (limited.clips, limited.cached, limited.todo, limited.made, limited.skipped) == (3, 0, 1, 1, 2)
+    limited = audio.prewarm(cfg, ["new one", "new two", "new three"], ("en-US",), limit=1)
+    assert (limited.cached, limited.todo, limited.made, limited.skipped) == (1, 1, 1, 1)
+    assert audio.cache_bytes(cfg) == sum(size for _m, size, _p in audio._scan(cfg.audio_dir))
+
+
+def test_prewarm_without_a_voice_raises_up_front(test_env: dict[str, str], fake_say):
+    fake_say("Ting-Ting           zh_CN    # 您好，我叫Ting-Ting。\n")  # no English voice: nothing can even be located
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    with pytest.raises(audio.AudioError) as e:
+        audio.prewarm(cfg, [f"text {i}" for i in range(20)], ("en-US",))
+    assert e.value.reason == "failed" and "no English voice" in e.value.detail
+    with pytest.raises(audio.AudioError) as e:
+        audio.prewarm(make_settings(test_env, WD_AUDIO_PROVIDER="off"), ["text"], ("en-US",))
+    assert e.value.reason == "off"
+
+
+def test_prewarm_stops_after_five_failures_in_a_row_even_after_a_success(test_env: dict[str, str], fakes: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`say` wedged half-way through a run: the streak rule stops it (the old 'nothing made yet' rule would have ground on)."""
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    first = tmp_path / "afconvert-first-run"  # mkdir is atomic: exactly one of the two concurrent runs wins, every later one fails
+    flaky = tmp_path / "afconvert-flaky"
+    flaky.write_text(f"#!/bin/sh\nmkdir '{first}' 2>/dev/null || exit 1\nexec '{fakes['afconvert']}' \"$@\"\n", encoding="utf-8")
+    flaky.chmod(0o755)
+    monkeypatch.setattr(audio, "AFCONVERT_BIN", str(flaky))
+    report = audio.prewarm(cfg, [f"text {i}" for i in range(20)], ("en-US",))
+    assert report.aborted and report.made == 1 and audio.PREWARM_ABORT_AFTER <= report.failed <= audio.PREWARM_ABORT_AFTER + 1 + audio.SLOTS  # the success may land after a failure; the attempts running at the abort are counted too
+    assert report.done == report.made + report.failed
+    assert all("afconvert" in e and "exited 1" in e for e in report.errors)
+
+
+def test_scan_skips_a_clip_that_vanishes_mid_walk(test_env: dict[str, str], fakes: dict[str, Path], monkeypatch: pytest.MonkeyPatch):
+    """The re-count runs on the request path while a prune or `wd audio-prewarm --purge-others` may be unlinking clips."""
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    keep = audio.synthesize(cfg, "en-US", "keep").path
+    gone = audio.synthesize(cfg, "en-US", "gone").path
+    real_stat = Path.stat
+
+    def racy_stat(self: Path, *args, **kwargs):
+        if self == gone and os.path.exists(str(self)):
+            os.unlink(str(self))  # another process got there between the listing and the stat
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", racy_stat)
+    assert [p for _m, _s, p in audio._scan(cfg.audio_dir)] == [keep]
+    monkeypatch.setattr(audio, "SCAN_INTERVAL_S", 0.0)
+    audio._account(cfg, 0)  # the re-count on the request path neither raises nor counts the vanished clip
+    assert audio.cache_bytes(cfg) == real_stat(keep).st_size
+
+
+def test_say_voice_for_keeps_the_choice_a_concurrent_first_call_stored(test_env: dict[str, str], fakes: dict[str, Path], caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    real = audio.choose_voice
+
+    def racing(voices, accent, resolves=lambda name: True):
+        chosen = real(voices, accent, resolves=resolves)
+        with audio._choice_lock:
+            audio._choices["\nen-US"] = "Samantha"  # the other thread finished (and logged) first
+        return chosen
+
+    monkeypatch.setattr(audio, "choose_voice", racing)
+    with caplog.at_level(logging.INFO, logger="wd.audio"):
+        assert audio.say_voice_for(cfg, "en-US") == "Samantha"
+    assert [r for r in caplog.records if getattr(r, "event", "") == "audio_voice"] == []
+
+
+def test_voice_key_fingerprints_the_provider_and_the_resolved_voices(test_env: dict[str, str], fakes: dict[str, Path]):
+    assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="off")) == ""
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    before = audio.voice_key(cfg)  # the voices are not resolved yet
+    assert re.fullmatch(r"[0-9a-f]{8}", before)
+    audio.warm_up(cfg)
+    after = audio.voice_key(cfg)
+    assert re.fullmatch(r"[0-9a-f]{8}", after) and after != before and audio.voice_key(cfg) == after
+    assert after == hashlib.sha256(b"say\n\nAva (Premium)\nStephanie (Premium)").hexdigest()[:8]
+    assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE="Samantha")) not in (before, after)  # an override is another key even before it resolves
+    assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="youdao")) == hashlib.sha256(b"youdao").hexdigest()[:8]
+
+
+def test_warm_up_sweeps_the_probe_files_of_an_earlier_process(test_env: dict[str, str], fakes: dict[str, Path]):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    stale = cfg.tmp_dir / "audio-probe-4000000-1.aiff"  # no such process (pids stop at 99998 on macOS)
+    stale.write_bytes(b"x")
+    mine = cfg.tmp_dir / f"audio-probe-{os.getpid()}-7.aiff"
+    mine.write_bytes(b"y")
+    alive = cfg.tmp_dir / f"audio-probe-{os.getppid()}-3.aiff"  # another live process (wd audio-voices next door) keeps its probe
+    alive.write_bytes(b"z")
+    odd = cfg.tmp_dir / "audio-probe-x.aiff"
+    odd.write_bytes(b"?")
+    audio.warm_up(cfg)
+    assert not stale.exists() and mine.exists() and alive.exists() and odd.exists()
+    for f in (mine, alive, odd):
+        f.unlink()
+
+
+def test_purge_others_removes_only_the_clips_outside_the_set(test_env: dict[str, str], fakes: dict[str, Path]):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    texts = ["hop", "farmer"]
+    audio.prewarm(cfg, texts, ("en-US",))
+    keep = audio.expected_paths(cfg, texts, ("en-US",))
+    assert len(keep) == 2 and all(p.is_file() for p in keep)
+    stale = cfg.audio_dir / "00" / ("0" * 64 + ".m4a")  # another voice's clip (the key carries the voice)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"x" * 600)
+    adhoc = audio.synthesize(cfg, "en-GB", "farmer").path  # a text outside the set
+    adhoc_size = adhoc.stat().st_size
+    assert audio.purge_others(cfg, keep) == (2, 600 + adhoc_size)
+    assert not stale.exists() and not adhoc.exists() and all(p.is_file() for p in keep)
+    assert audio.cache_bytes(cfg) == sum(p.stat().st_size for p in keep)
+    assert audio.purge_others(cfg, keep) == (0, 0)
+
+
+def test_cli_audio_voices_and_audio_prewarm(test_env: dict[str, str], fakes: dict[str, Path], conn: sqlite3.Connection, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from wd import cli
+
+    seed_tappable(conn)
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "off")
+    assert cli.main(["audio-voices"]) == 0
+    assert "provider: off" in capsys.readouterr().out
+    assert cli.main(["audio-prewarm"]) == 2
+    assert "resolves to off" in capsys.readouterr().err
+
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "say")
+    missing_db = tmp_path / "nowhere" / "x.db"
+    assert cli.main(["audio-prewarm", "--db", str(missing_db)]) == 2  # never creates an empty database at a mistyped path
+    assert "no database at" in capsys.readouterr().err and not missing_db.exists()
+
+    monkeypatch.setenv("WD_AUDIO_SAY_VOICE", "Nobody")  # an override say does not know: no clips in a substituted voice
+    assert cli.main(["audio-voices"]) == 1
+    assert "en-US → none:" in capsys.readouterr().out
+    assert cli.main(["audio-prewarm", "--dry-run"]) == 1
+    assert "no voice — WD_AUDIO_SAY_VOICE='Nobody'" in capsys.readouterr().err
+    monkeypatch.delenv("WD_AUDIO_SAY_VOICE")
+    audio.reset_voice_cache()
+
+    monkeypatch.setenv("WD_AUDIO_CACHE_MB", "16")
+    monkeypatch.setattr(audio, "PREWARM_CLIP_ESTIMATE", 4 * audio.MB)  # 10 clips × 4 MB against a 16 MB cap: the run would prune its own clips
+    assert cli.main(["audio-prewarm", "--dry-run"]) == 1
+    captured = capsys.readouterr()
+    assert "≈ 40 MB in the cache afterwards, cap WD_AUDIO_CACHE_MB=16" in captured.out and "more than 90 % of WD_AUDIO_CACHE_MB=16 — set it to at least 45" in captured.err
+    old_db = tmp_path / "old.db"
+    sqlite3.connect(old_db).close()  # a database without the schema
+    assert cli.main(["audio-prewarm", "--db", str(old_db)]) == 1
+    assert "schema version 0 has no words.learn_rank" in capsys.readouterr().err
+    monkeypatch.delenv("WD_AUDIO_CACHE_MB")
+    monkeypatch.setattr(audio, "PREWARM_CLIP_ESTIMATE", 20 * 1024)
+
+    assert cli.main(["audio-voices"]) == 0
+    out = capsys.readouterr().out
+    assert "provider: say (WD_AUDIO_PROVIDER=say)" in out and "cache: 0.0 MB of 256 MB" in out
+    assert re.search(r"Ava \(Premium\)\s+premium\s+resolves", out) and re.search(r"Samantha \(增强\)\s+enhanced\s+resolves", out) and re.search(r"Samantha\s+compact\s+resolves", out)
+    assert "en-US → Ava (Premium)" in out and "en-GB → Stephanie (Premium)" in out and "Eddy" not in out
+
+    assert cli.main(["audio-prewarm", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "5 text(s) a learner can tap (headwords with content or in a bank and their example sentences; learning order); en-US → Ava (Premium), en-GB → Stephanie (Premium)" in out
+    assert "1 text(s) the text rule refuses" in out and "'bad text ✓'" in out
+    assert "10 clip(s) planned: 0 cached, 10 to synthesise; ≈ 0 MB in the cache afterwards, cap WD_AUDIO_CACHE_MB=256" in out
+    assert "0 other clip(s) (0.0 MB) outside this set would be purged first" in out and calls(fakes) == []
+    assert cli.main(["audio-prewarm", "--dry-run", "--stage", "xs"]) == 0
+    out = capsys.readouterr().out
+    assert "6 text(s) a learner can tap" in out and ", the headwords of xs;" in out and "12 clip(s) planned" in out
+
+    assert cli.main(["audio-prewarm", "--accent", "en-US"]) == 0
+    out = capsys.readouterr().out
+    assert "5 clip(s) planned: 0 cached, 5 to synthesise" in out and "audio-prewarm: 5 clip(s) made" in out and "0 already cached, 0 failed" in out
+    assert len(calls(fakes)) == 5 and all(c.startswith("Ava (Premium)|") for c in calls(fakes))
+
+    assert cli.main(["audio-prewarm", "--limit", "2"]) == 0  # --limit counts the clips to make: the five cached ones do not use it up
+    out = capsys.readouterr().out
+    assert "10 clip(s) planned: 5 cached, 5 to synthesise, 2 in this run (--limit 2)" in out
+    assert "audio-prewarm: 2 clip(s) made" in out and "5 already cached, 0 failed, 3 left for the next run (--limit)" in out
+    assert len(calls(fakes)) == 7 and sum(c.startswith("Stephanie (Premium)|") for c in calls(fakes)) == 2
+
+    cfg = Settings.from_env()
+    stale = cfg.audio_dir / "00" / ("0" * 64 + ".m4a")
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"x" * 600)
+    assert cli.main(["audio-prewarm", "--accent", "en-US", "--purge-others"]) == 0  # keeps the en-GB clips: the mum's accent is in use
+    out = capsys.readouterr().out
+    assert "1 other clip(s) (0.0 MB) outside this set are purged first" in out and "purged 1 other clip(s) (0.0 MB)" in out
+    assert out.index("purged 1 other") < out.index("5 clip(s) planned: 5 cached, 0 to synthesise") and not stale.exists()
+    assert len([p for _m, _s, p in audio._scan(cfg.audio_dir)]) == 7 and len(calls(fakes)) == 7
+
+    assert cli.main(["audio-prewarm", "--purge-others"]) == 0
+    out = capsys.readouterr().out
+    assert "10 clip(s) planned: 7 cached, 3 to synthesise" in out and "3 clip(s) made" in out and "purged 0 other clip(s)" in out
+    assert len(calls(fakes)) == 10 and sum(c.startswith("Stephanie (Premium)|") for c in calls(fakes)) == 5
+
+    def pruned_during_the_run(cfg, texts, accents, *, limit=0, progress=None):  # the cap evicted one planned clip while the run went on
+        victim = sorted(audio.expected_paths(cfg, texts, accents))[0]
+        victim.unlink()
+        return audio.PrewarmReport(clips=len(texts) * len(accents), cached=len(texts) * len(accents))
+
+    monkeypatch.setattr(audio, "prewarm", pruned_during_the_run)
+    assert cli.main(["audio-prewarm", "--accent", "en-US"]) == 1
+    assert "1 clip(s) of the set were pruned by WD_AUDIO_CACHE_MB=256 during the run" in capsys.readouterr().err

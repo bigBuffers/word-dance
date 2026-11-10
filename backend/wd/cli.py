@@ -41,6 +41,7 @@ CLI_MODULES: tuple[str, ...] = (
     "wd.diag",
     "wd.services.learn_order",
     "wd.ai.dance",
+    "wd.audio",
 )
 
 # module → the commands it owns (DEPLOY §9); build_parser() verifies every one of them was registered
@@ -57,6 +58,7 @@ COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.diag": ("stats", "check", "logs"),
     "wd.services.learn_order": ("learn-order",),
     "wd.ai.dance": ("dance-annotate",),
+    "wd.audio": ("audio-voices", "audio-prewarm"),
 }
 
 LEASE_HINT = "word-dance.service is running — watch `journalctl -u word-dance -f` or GET /api/admin/jobs instead"

@@ -5,7 +5,8 @@
 // 'self'`, no `blob:`) allows it, and `play()` runs synchronously inside the tap, so autoplay policies are satisfied however long the
 // server takes to synthesise. Only when the element fails is the URL fetched once more to learn why (`diagnose`: the API error →
 // a `ServerAudioReason`). `setServerAudio` mirrors `ServerFlags.audio` (AuthContext, after /me) so a server without a provider is
-// never asked; a 503 {reason:'off'} switches it off for the rest of the session as well.
+// never asked; a 503 {reason:'off'} switches it off for the rest of the session as well. `ServerFlags.audio_key` (provider + voice
+// fingerprint) rides on every clip URL as `v`, so a switched voice is a new URL and no browser keeps last week's voice from its cache.
 import { toApiError } from '@/api/client';
 import type { Accent } from '@/hooks/useSpeech';
 
@@ -35,19 +36,26 @@ export function isServerAudioError(e: unknown): e is ServerAudioError {
 }
 
 let enabled = false;
+let cacheKey = '';
 
-/** Mirrors `ServerFlags.audio` (true when the server has a pronunciation provider); `null`/`undefined` count as false. */
-export function setServerAudio(on: boolean | null | undefined): void {
+/**
+ * Mirrors `ServerFlags.audio` (true when the server has a pronunciation provider; `null`/`undefined` count as false) and
+ * `ServerFlags.audio_key` (the provider + voice fingerprint the clip URLs carry; missing on an older server → none).
+ */
+export function setServerAudio(on: boolean | null | undefined, key?: string | null): void {
   enabled = on === true;
+  cacheKey = typeof key === 'string' ? key : '';
 }
 
 export function serverAudioEnabled(): boolean {
   return enabled;
 }
 
-/** The request URL of a clip (same-origin; the cookie session authenticates it). */
+/** The request URL of a clip (same-origin; the cookie session authenticates it) — with the server's voice fingerprint as `v` when known. */
 export function clipUrl(text: string, accent: Accent): string {
-  return `/media/audio?${new URLSearchParams({ text, accent }).toString()}`;
+  const params = new URLSearchParams({ text, accent });
+  if (cacheKey) params.set('v', cacheKey); // the server ignores it; a switched provider or voice is a new URL for the browser's HTTP cache
+  return `/media/audio?${params.toString()}`;
 }
 
 /**
@@ -168,6 +176,7 @@ export function stopServerAudio(): void {
 
 /** Test hook: forgets the shared element and the flag. */
 export function resetServerAudio(): void {
+  cacheKey = '';
   stopServerAudio();
   element = null;
   enabled = false;

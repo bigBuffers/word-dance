@@ -38,7 +38,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import __version__, dance, db, security
+from . import __version__, audio, dance, db, security
 from .ai import ledger
 from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
@@ -458,6 +458,10 @@ def start_background(app: FastAPI, conn) -> None:
 
 
 def stop_background(app: FastAPI) -> None:
+    warm_up = getattr(app.state, "audio_warm_up", None)
+    if warm_up is not None:  # a `say` probe still running must not outlive the process (nor a test's fixtures)
+        warm_up.join(timeout=audio.WARM_UP_JOIN_S)
+        app.state.audio_warm_up = None
     waiter = getattr(app.state, "lease_waiter", None)
     if waiter is not None:  # first, so a takeover in flight finishes before the thread list is read
         waiter.stop()
@@ -512,6 +516,7 @@ def startup(app: FastAPI) -> None:
             db.kv_set(conn, "public_url_guess", f"http://{guess}:{cfg.port}")
         registry.load_handlers()
         log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
+        app.state.audio_warm_up = audio.warm_up_async(cfg)  # `say -v ?` and the voice probes (1–3 s) on a daemon thread: before the first tap, never on its request
         if cfg.worker_enabled:
             start_background(app, conn)
         else:

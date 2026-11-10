@@ -18,6 +18,7 @@ export type Accent = 'en-US' | 'en-GB';
 export type SpeechRoute = 'native' | 'synth' | 'server';
 
 export const DEFAULT_RATE = 0.92;
+const BETTER_VOICE = /Premium|Enhanced|高级|增强/i; // a downloaded system voice beats the compact one (macOS lists `Ava (Premium)`, `Samantha (Enhanced)`)
 const PREFERRED_VOICE = /Google|Microsoft|Samantha|Daniel/i;
 
 export function speechSupported(): boolean {
@@ -32,13 +33,13 @@ export function speechAvailable(): boolean {
 const normLang = (lang: string) => lang.replace('_', '-').toLowerCase();
 
 /**
- * Exact lang match first (preferring voices whose name contains Google/Microsoft/Samantha/Daniel),
- * else any English voice, else undefined (the browser default is used).
+ * Exact lang match first — a Premium / Enhanced voice, then one whose name contains Google/Microsoft/Samantha/Daniel, then the
+ * first listed —, else any English voice, else undefined (the browser default is used).
  */
 export function pickVoice(voices: readonly SpeechSynthesisVoice[], accent: Accent): SpeechSynthesisVoice | undefined {
   const wanted = accent.toLowerCase();
   const exact = voices.filter((v) => normLang(v.lang) === wanted);
-  return exact.find((v) => PREFERRED_VOICE.test(v.name)) ?? exact[0] ?? voices.find((v) => normLang(v.lang).startsWith('en'));
+  return exact.find((v) => BETTER_VOICE.test(v.name)) ?? exact.find((v) => PREFERRED_VOICE.test(v.name)) ?? exact[0] ?? voices.find((v) => normLang(v.lang).startsWith('en'));
 }
 
 /**

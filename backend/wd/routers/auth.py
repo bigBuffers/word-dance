@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from .. import __version__, db, security
+from .. import __version__, audio, db, security
 from ..clock import to_iso
 from ..config import Settings
 from ..deps import client_ip, current_user, get_db
@@ -62,6 +62,7 @@ def server_flags(conn: sqlite3.Connection, cfg: Settings) -> dict[str, Any]:
         "dev": cfg.dev,
         "needs_setup": users == 0,
         "audio": cfg.audio_provider_effective != "off",  # GET /media/audio serves clips (API.md 76)
+        "audio_key": audio.voice_key(cfg),  # provider + voice fingerprint: a switched voice is a new clip URL for the browser cache
     }
 
 

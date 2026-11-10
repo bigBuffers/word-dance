@@ -73,6 +73,13 @@ describe('pickVoice (FRONTEND §6.4)', () => {
     expect(pickVoice([voice('Ting-Ting', 'zh-CN')], 'en-US')).toBeUndefined();
     expect(pickVoice([], 'en-GB')).toBeUndefined();
   });
+
+  it('prefers a Premium / Enhanced system voice over the compact one, then the Google/Microsoft/Samantha/Daniel names', () => {
+    expect(pickVoice([voice('Samantha', 'en-US'), voice('Ava (Premium)', 'en-US'), voice('Eddy', 'en-US')], 'en-US')?.name).toBe('Ava (Premium)');
+    expect(pickVoice([voice('Daniel', 'en-GB'), voice('Serena (Enhanced)', 'en-GB')], 'en-GB')?.name).toBe('Serena (Enhanced)');
+    expect(pickVoice([voice('Google US English', 'en-US'), voice('Samantha', 'en-US')], 'en-US')?.name).toBe('Google US English');
+    expect(pickVoice([voice('Ava (Premium)', 'en-US'), voice('Daniel', 'en-GB')], 'en-GB')?.name).toBe('Daniel'); // the accent first, the tier within it
+  });
 });
 
 describe('speak() without speechSynthesis (jsdom)', () => {

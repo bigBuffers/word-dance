@@ -161,6 +161,7 @@ class ServerFlags(Model):
     dev: bool
     needs_setup: bool
     audio: bool
+    audio_key: str  # fingerprint of the provider + voice behind GET /media/audio (empty without a provider): the client appends it to clip URLs
 
 
 class Counters(Model):

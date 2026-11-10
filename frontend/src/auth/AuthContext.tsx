@@ -68,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadMe = useCallback(async (): Promise<boolean> => {
     try {
       const me = await endpoints.getMe();
-      setServerAudio(me.server.audio); // the module-level speak() (auto-pronounce, key P) reads the flag without the context
+      setServerAudio(me.server.audio, me.server.audio_key); // the module-level speak() (auto-pronounce, key P) reads the flag without the context
       setState((s) => ({ ...s, user: me.user, settings: me.settings, server: me.server, counters: me.counters }));
       return true;
     } catch (e) {
