@@ -1,7 +1,7 @@
 # 注册与登录改造 切片 1-A：手机号 / 邮箱验证码、`verified` 注册模式、重认证与找回密码（迁移 0018，加列不停机）
 
 > 设计：[`docs/AUTH_SIGNUP_DESIGN.md`](../AUTH_SIGNUP_DESIGN.md) §5.1、§5.2、§5.5 行 1-A、§5.6；证据：[`docs/AUTH_SIGNUP_EVIDENCE.md`](../AUTH_SIGNUP_EVIDENCE.md)。业主 2026-11-10 按建议默认值确认了全部 13 项决定（D1a–D12），本切片实现 D1a、D2（含按用户 AI 配额）、D5、D7、D9、D10。
-> 状态：实现中（本文随实现更新；「验收」「上线记录」在上线后补齐）。
+> 状态：**已上线**（Mac，2026-11-11 00:03，commit `d15f87a`）。短信 / 邮件推送通道尚未开通（`.env` 未改：`WD_SMS_PROVIDER=off`、`WD_MAIL_PROVIDER=smtp`、注册模式仍为 `invite`），开通步骤见第 3 节。
 
 ## 1 起因
 
@@ -58,7 +58,9 @@
 
 ## 4 验收
 
-（上线前补：pytest / vitest / tsc / lint / build / check_contract / smoke 的结果，迁移演练输出，评审结论。）
+- 门禁（2026-11-10 23:5x，Mac）：pytest **2475 passed / 3 skipped**（Mac 上排除 `test_deploy_files.py` 与 `test_config.py::test_defaults_without_environment`；`test_audio.py::test_too_many_waiters_is_busy_at_once` 的 1 秒计时断言在本机单独运行时因首次 `say -v ?` 探测超过 1 秒而失败、在全量运行中通过——与本切片无关，音频代码未改）；`make check-contract` OK；前端 typecheck、vitest **454**、lint、build（首屏 108.6 KB gzip）；`make smoke` 29 步通过。
+- 迁移演练：线上库只读 `VACUUM INTO` 副本上 `scripts/rehearse_migration.py` **92 项通过**（0018 的列序、回填、CHECK、两个部分唯一索引、外键、幂等、空库 28 表）。
+- 评审：7 个视角 58 条意见，逐条反驳验证后确认 16 条并全部修复（锁定键规范化、验证码尝试计数原子化、找回密码的 IP 双计数与错误码枚举、`wd promote` 无密码规则、DirectMail 错误回显泄露收件人、二次确认弹层嵌套表单重复提交、「生成例句」先扣配额后拒绝等），另补齐 6 组测试缺口与 20 余项低优先级改进；顺带发现并修复 `code_login` 日志 extra 使用了保留字段 `created`（生产日志级别下会在建号后抛 KeyError）。
 
 ## 5 回滚
 
@@ -66,4 +68,6 @@
 
 ## 6 上线记录
 
-（待填：时间、commit、迁移快照文件、健康检查、首个真实验证码登录。）
+- 2026-11-11 00:03:09–00:03:16（Mac）：commit `d15f87a`；前端快照 `frontend-releases/d15f87a`（含 `legal/*.html` 与三个 APK），符号链接切换；`launchctl kickstart -k` 后 2 秒健康；启动日志 `applied migration 0018_auth_identities`，快照 `backups/pre-migrate-17-to-18.db.gz`（2.6 MB）；`sign-in channels: sms off, mail off, captcha on, registration invite`。
+- 验证：`/api/health` 带 `sms_enabled:false, email_enabled:false, captcha:true`；`GET /api/demo` 返回 up / jump / cold 三词（均有 Claude SVG、释义、舞步），`/media/demo/1958.svg` 200；`GET /api/auth/captcha` 出图；三张法律页 200；无短信通道时发码 → 409 `sms_unconfigured`；`wd check` 全 `[ok]`。
+- 待业主：第 3.1 节的阿里云步骤与法律文案审定；之后把 `.env` 切到 `aliyun_verify`（并视情况 `verified`）。首个真实验证码登录待记录。
