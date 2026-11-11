@@ -1,7 +1,7 @@
 # 注册与登录改造 切片 1-B：家长账号与孩子子账号、家长门、孩子登录码、存量账号补充信息（迁移 0019，加列加表不停机）
 
 > 设计：[`docs/AUTH_SIGNUP_DESIGN.md`](../AUTH_SIGNUP_DESIGN.md) §5.1「家长 + 孩子」、§5.2「切换与边界」「未成年人」「存量账号」、§5.5 行 1-B、§5.6 不变量 2 / 3 / 5；上一切片：[`2026-11-auth-signup-1a.md`](2026-11-auth-signup-1a.md)。业主 2026-11-10 确认 D1b、D3、D10、D12。
-> 状态：**〔待填：上线时间 / commit〕**。短信通道仍未开通（`.env` 未改）。**注意：家长功能实际上整体等着短信**——家长账号的两因子规则要求一个已验证的手机号，而手机号只能经短信验证码绑定（81 / 86 / 101 / 109），所以在 `WD_SMS_PROVIDER=off` 的机器上，建子账号（95）、切换（104）、孩子登录码（99）、独立（100 / 101）都会答 409 `guardian_factors_required`，认领（108）答 409 `sms_unconfigured`；页面会提示「服务器尚未开启短信」。短信开通（1-A 发布说明 §3.1）之后这些功能即刻可用，不需再上线。
+> 状态：**已上线**——`dbb6c1a` 于 2026-11-11 12:19 在 Mac 上生效（迁移 0019 启动时自动应用，快照 `backups/pre-migrate-18-to-19.db.gz`）。短信通道仍未开通（`.env` 未改）。**注意：家长功能实际上整体等着短信**——家长账号的两因子规则要求一个已验证的手机号，而手机号只能经短信验证码绑定（81 / 86 / 101 / 109），所以在 `WD_SMS_PROVIDER=off` 的机器上，建子账号（95）、切换（104）、孩子登录码（99）、独立（100 / 101）都会答 409 `guardian_factors_required`，认领（108）答 409 `sms_unconfigured`；页面会提示「服务器尚未开启短信」。短信开通（1-A 发布说明 §3.1）之后这些功能即刻可用，不需再上线。
 
 ## 1 起因
 
@@ -47,4 +47,8 @@ Mac 上线：`git pull` 后按 1-A 的步骤构建前端快照并 `launchctl kic
 
 ## 6 上线记录
 
-〔待填〕
+- 2026-11-11 12:18:59 按 1-A 的步骤上线 `dbb6c1a`：前端构建到 `frontend-releases/dbb6c1a`（APK 三个文件照抄进 `dl/`），软链原子切换，`launchctl kickstart -k` 重启；2 秒后 `/api/health` ok。
+- 启动日志：`applied migration 0019_family`；schema 18 → 19；`backups/pre-migrate-18-to-19.db.gz`（2.6 MB）已写；`sign-in channels: sms off, mail off, captcha on, registration invite`（`.env` 未改）；AI 仍为 `split`。
+- 上线后检查：`GET /api/guardian/children` 无会话 → 401；`POST /api/auth/child-login` 假码 → 400 `invalid_code`（`attempts_left: 0`）；`POST /api/auth/switch/back` 无会话 → 401；`/api/demo` 200；三个法律页 200（儿童规则页不再写「尚未上线」）；新包里含「我的孩子」文案；`family_codes` 表与 `sessions.guardian_gate_at` / `users.profile_prompted_at` 列就位；`wd check` 全 ok。
+- 线上库此时 2 个用户，均未声明身份：两人下次登录会看到一次「补充信息」（可跳过，30 天后再提醒）。短信未开通，所以「我是家长」在当前机器上只能走到「家长账号还缺：绑定手机号」的提示（见顶部说明）。
+- 回滚（仅在业主明确要求时）：`git checkout eac30ac`，按同样步骤重建前端快照并重启；数据库不必回退（0019 只加列加表）。
