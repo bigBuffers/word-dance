@@ -659,3 +659,118 @@ def test_third_party_variables_are_not_secret_keys():
     from wd.config import SECRET_KEYS
 
     assert not {k for k in SECRET_KEYS if k.startswith(("WD_WECHAT_", "WD_QQ_", "WD_APPLE_", "WD_AUTH_FAKE"))}
+
+
+# ------------------------------------------------------- pronunciation: 百炼 cloud TTS (provider bailian, DEPLOY §4 WD_BAILIAN_*, slice server-audio-2)
+BAILIAN_ENDPOINT = "https://llm-ws1.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+
+
+def _bailian_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    """A 0600 key file, the workspace id and the provider — what `bailian` needs to start."""
+    key = tmp_path / "bailian.key"
+    key.write_text("sk-test\n", encoding="utf-8")
+    key.chmod(0o600)
+    return {"WD_AUDIO_PROVIDER": "bailian", "WD_BAILIAN_API_KEY_FILE": str(key), "WD_BAILIAN_WORKSPACE_ID": "llm-ws1", **extra}
+
+
+def test_bailian_defaults_are_dark():
+    """An unchanged .env: provider `auto` (never bailian), every WD_BAILIAN_* at its default, nothing required, nothing secret."""
+    from wd.config import AUDIO_PROVIDERS, SECRET_KEYS
+
+    cfg = Settings.from_env({})
+    assert cfg.audio_provider == "auto" and cfg.audio_provider_effective in ("say", "off")
+    assert (cfg.bailian_api_key_file, cfg.bailian_workspace_id, cfg.bailian_region, cfg.bailian_tts_url) == ("", "", "cn-beijing", "")
+    assert cfg.bailian_tts_model == "cosyvoice-v3-flash" and cfg.bailian_tts_voices == "en-US=loongabby_v3;en-GB=loongemily_v3"
+    assert cfg.bailian_voice_map == {"en-US": "loongabby_v3", "en-GB": "loongemily_v3"}
+    entries = {e["key"]: e for e in cfg.entries()}
+    for key, value in (
+        ("WD_BAILIAN_API_KEY_FILE", ""),
+        ("WD_BAILIAN_WORKSPACE_ID", ""),
+        ("WD_BAILIAN_REGION", "cn-beijing"),
+        ("WD_BAILIAN_TTS_URL", ""),
+        ("WD_BAILIAN_TTS_MODEL", "cosyvoice-v3-flash"),
+        ("WD_BAILIAN_TTS_VOICES", "en-US=loongabby_v3;en-GB=loongemily_v3"),
+    ):
+        assert entries[key] == {"key": key, "value": value, "source": "default"}, key
+    assert AUDIO_PROVIDERS == ("auto", "say", "youdao", "bailian", "cache", "off")
+    assert not {k for k in SECRET_KEYS if k.startswith("WD_BAILIAN_")}  # the key FILE path is shown; the key itself never enters Settings
+
+
+def test_bailian_needs_the_key_file_and_the_workspace_id(tmp_path: Path):
+    """`WD_AUDIO_PROVIDER=bailian` refuses to start without the key file and the workspace id (each error names its variable, like
+    `aliyun_verify`); the variables alone switch nothing on; `bailian_tts_url` is the endpoint derived from workspace + region."""
+    with pytest.raises(ConfigError) as e:
+        Settings.from_env({"WD_AUDIO_PROVIDER": "bailian"})
+    assert "WD_AUDIO_PROVIDER=bailian" in str(e.value) and "WD_BAILIAN_API_KEY_FILE" in str(e.value)
+    env = _bailian_env(tmp_path)
+    with pytest.raises(ConfigError, match="WD_BAILIAN_WORKSPACE_ID"):
+        Settings.from_env({k: v for k, v in env.items() if k != "WD_BAILIAN_WORKSPACE_ID"})
+    cfg = Settings.from_env(env)
+    assert cfg.audio_provider == cfg.audio_provider_effective == "bailian"
+    assert cfg.bailian_tts_url == BAILIAN_ENDPOINT and cfg.bailian_workspace_id == "llm-ws1"
+    entries = {e["key"]: e for e in cfg.entries()}
+    assert entries["WD_BAILIAN_API_KEY_FILE"] == {"key": "WD_BAILIAN_API_KEY_FILE", "value": env["WD_BAILIAN_API_KEY_FILE"], "source": "env"}
+    assert entries["WD_BAILIAN_TTS_URL"] == {"key": "WD_BAILIAN_TTS_URL", "value": BAILIAN_ENDPOINT, "source": "default"}  # the endpoint in force, like WD_DB_PATH
+    assert "sk-test" not in str(cfg.entries())
+    quiet = Settings.from_env({k: v for k, v in env.items() if k != "WD_AUDIO_PROVIDER"})
+    assert quiet.audio_provider == "auto" and quiet.bailian_tts_url == BAILIAN_ENDPOINT
+
+
+def test_bailian_key_file_follows_the_secret_file_rule(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """`WD_BAILIAN_API_KEY_FILE` is validated like `WD_ALIYUN_ACCESS_KEY_SECRET_FILE`: an existing readable regular file at startup —
+    whenever it is set, provider or not —, else a ConfigError naming the path; a group/other-readable mode only warns (`chmod 600`)."""
+    missing = tmp_path / "missing.key"
+    with pytest.raises(ConfigError, match=re.escape(str(missing))):
+        Settings.from_env({"WD_BAILIAN_API_KEY_FILE": str(missing)})
+    with pytest.raises(ConfigError, match="WD_BAILIAN_API_KEY_FILE"):
+        Settings.from_env({"WD_BAILIAN_API_KEY_FILE": str(tmp_path)})  # a directory
+    locked = tmp_path / "locked.key"
+    locked.write_text("sk-k\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        if os.geteuid() != 0:
+            with pytest.raises(ConfigError, match="not readable"):
+                Settings.from_env({"WD_BAILIAN_API_KEY_FILE": str(locked)})
+    finally:
+        locked.chmod(0o600)
+    loose = tmp_path / "loose.key"
+    loose.write_text("sk-k\n", encoding="utf-8")
+    loose.chmod(0o644)
+    with caplog.at_level(logging.WARNING, logger="wd.config"):
+        assert Settings.from_env({"WD_BAILIAN_API_KEY_FILE": str(loose)}).bailian_api_key_file == str(loose)
+    assert any("chmod 600" in r.getMessage() and str(loose) in r.getMessage() for r in caplog.records), caplog.text
+    assert "sk-k" not in caplog.text
+
+
+def test_bailian_region_url_override_model_and_voices(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    env = _bailian_env(tmp_path)
+    assert Settings.from_env({**env, "WD_BAILIAN_REGION": "ap-southeast-1"}).bailian_tts_url == "https://llm-ws1.ap-southeast-1.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+    with pytest.raises(ConfigError, match="WD_BAILIAN_REGION"):
+        Settings.from_env({**env, "WD_BAILIAN_REGION": "us-east-1"})
+    with pytest.raises(ConfigError, match="WD_BAILIAN_REGION"):
+        Settings.from_env({"WD_BAILIAN_REGION": "eu-central-1"})  # a choice, validated even while the provider is dark
+    # the endpoint override: the WD_AI_FALLBACK_BASE_URL rule (http(s) + host; http:// to a non-loopback host warns), trailing / stripped
+    override = Settings.from_env({**env, "WD_BAILIAN_TTS_URL": "https://tts.example.com/v1/tts/"})
+    assert override.bailian_tts_url == "https://tts.example.com/v1/tts"
+    assert {e["key"]: e["source"] for e in override.entries()}["WD_BAILIAN_TTS_URL"] == "env"
+    for bad in ("tts.example.com/v1", "ftp://x/y", "https://", "http:///tts"):
+        with pytest.raises(ConfigError, match="WD_BAILIAN_TTS_URL"):
+            Settings.from_env({**env, "WD_BAILIAN_TTS_URL": bad})
+    with caplog.at_level(logging.WARNING, logger="wd.config"):
+        Settings.from_env({**env, "WD_BAILIAN_TTS_URL": "http://10.0.0.5:8080/tts"})
+        Settings.from_env({**env, "WD_BAILIAN_TTS_URL": "http://127.0.0.1:8080/tts"})
+    warnings = [r.getMessage() for r in caplog.records if "WD_BAILIAN_TTS_URL" in r.getMessage()]
+    assert len(warnings) == 1 and "10.0.0.5" in warnings[0] and "cleartext" in warnings[0]
+    # the model is free text (the provider validates it), stripped; the voices have the WD_AUDIO_CACHE_VOICES shape and the error names
+    # the right variable; both accents only under bailian
+    assert Settings.from_env({**env, "WD_BAILIAN_TTS_MODEL": " qwen-audio-3.1-tts-flash "}).bailian_tts_model == "qwen-audio-3.1-tts-flash"
+    custom = Settings.from_env({**env, "WD_BAILIAN_TTS_VOICES": "en-GB=loongeric_v3; en-US=loongandy_v3"})
+    assert custom.bailian_voice_map == {"en-US": "loongandy_v3", "en-GB": "loongeric_v3"}
+    with pytest.raises(ConfigError, match="both accents"):
+        Settings.from_env({**env, "WD_BAILIAN_TTS_VOICES": "en-US=loongabby_v3"})
+    for bad in ("en-US:loongabby_v3", "fr-FR=x;en-GB=y", "en-US=;en-GB=y", "en-US=a;en-US=b"):
+        with pytest.raises(ConfigError, match="WD_BAILIAN_TTS_VOICES") as e:
+            Settings.from_env({"WD_BAILIAN_TTS_VOICES": bad})
+        assert "WD_AUDIO_CACHE_VOICES" not in str(e.value)
+    assert Settings.from_env({"WD_BAILIAN_TTS_VOICES": "en-US=loongabby_v3"}).bailian_voice_map == {"en-US": "loongabby_v3"}  # only bailian needs both
+    assert Settings.from_env({"WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium)"}).audio_cache_voice_map == {"en-US": "Ava (Premium)"}  # the cache rule is untouched

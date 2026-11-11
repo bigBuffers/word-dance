@@ -1,7 +1,8 @@
 """wd.audio (API.md 76): the text rule, voice choice from a localised `say -v ?` listing (tiers, the resolution probe), the
-content-addressed cache and its size cap, the `say` and `youdao` providers against fakes, the synthesis slots and waiters, the
-allow-listed child environment, the `auto` provider resolution, the startup warm-up, the periodic re-count of the cache and
-the `wd audio-prewarm` / `wd audio-voices` commands (DEPLOY §9)."""
+content-addressed cache and its size cap, the `say`, `youdao` and `bailian` (阿里云百炼 cloud TTS, through an httpx.MockTransport in
+front of both of its clients) providers against fakes, the synthesis slots and waiters, the allow-listed child environment, the
+`auto` provider resolution, the startup warm-up, the periodic re-count of the cache and the `wd audio-prewarm` / `wd audio-voices` /
+`wd audio-probe` commands (DEPLOY §9)."""
 
 from __future__ import annotations
 
@@ -815,3 +816,303 @@ def test_cli_audio_texts_and_prewarm_from_a_file_feed_a_read_only_cache(test_env
     assert cli.main(["audio-prewarm", "--dry-run"]) == 2
     assert "serves clips another host synthesised" in capsys.readouterr().err
     assert cli.main(["audio-texts"]) == 0 and len(capsys.readouterr().out.splitlines()) == 5
+
+
+# ------------------------------------------------------------------------------------- bailian provider
+BAILIAN_URL = "https://llm-ws1.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+OSS_URL = "http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/1d/2026-11-11/clip.mp3?Expires=1766113409&OSSAccessKeyId=LTAI5tXYZ&Signature=abc%2Fdef%3D"
+MP3 = b"\xff\xfb" + b"\x00" * 1500
+BAILIAN_KEY = "sk-bailian-test-key"
+
+
+def bailian_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    """A 0600 key file, the workspace id and the provider — what `bailian` needs to start (DEPLOY §4)."""
+    key = tmp_path / "bailian.key"
+    key.write_text(BAILIAN_KEY + "\n", encoding="utf-8")
+    key.chmod(0o600)
+    return {"WD_AUDIO_PROVIDER": "bailian", "WD_BAILIAN_API_KEY_FILE": str(key), "WD_BAILIAN_WORKSPACE_ID": "llm-ws1", **extra}
+
+
+def tts_answer(url: str = OSS_URL, characters: int = 23) -> dict:
+    """The documented non-streaming SpeechSynthesizer answer: the clip as a pre-signed OSS URL (plain http in the docs), never inline."""
+    return {"request_id": "5c63c65c-0000", "output": {"finish_reason": "stop", "audio": {"data": "", "url": url, "id": "audio_5c63c65c", "expires_at": 1766113409}}, "usage": {"characters": characters}}
+
+
+def mp3_download(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, content=MP3, headers={"content-type": "audio/mpeg"})
+
+
+def patch_bailian(monkeypatch: pytest.MonkeyPatch, synth, download=mp3_download) -> list[httpx.Request]:
+    """One MockTransport in front of both 百炼 clients — the synthesis POST and the anonymous OSS GET —, so a test sees the headers each
+    request really carries; the pacing is off unless a test turns it on."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return synth(request) if request.method == "POST" else download(request)
+
+    monkeypatch.setattr(audio, "BAILIAN_TRANSPORT", httpx.MockTransport(handler))
+    monkeypatch.setattr(audio, "BAILIAN_PACE_S", 0.0)
+    return seen
+
+
+def test_bailian_posts_the_synthesis_and_fetches_the_clip_over_https_without_the_key(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer()))
+    assert audio.lookup(cfg, "en-GB", "The cat sat on the mat.") is None
+    clip = audio.synthesize(cfg, "en-GB", "The cat sat on the mat.")
+    assert clip.media_type == "audio/mpeg" and clip.path.suffix == ".mp3" and clip.path.read_bytes() == MP3
+    assert stat.S_IMODE(clip.path.stat().st_mode) == 0o600 and clip.path.parent.parent == cfg.audio_dir
+    assert clip.path.name == hashlib.sha256(b"bailian\nloongemily_v3\nen-GB\nThe cat sat on the mat.").hexdigest() + ".mp3"
+    post, get = seen
+    assert post.method == "POST" and str(post.url) == BAILIAN_URL
+    assert post.headers["authorization"] == f"Bearer {BAILIAN_KEY}" and post.headers["content-type"] == "application/json" and post.headers["user-agent"] == f"word-Dance/{__version__}"
+    assert json.loads(post.content) == {"model": "cosyvoice-v3-flash", "input": {"text": "The cat sat on the mat.", "voice": "loongemily_v3", "format": "mp3", "sample_rate": 24000}}
+    assert get.method == "GET" and get.url.scheme == "https" and get.url.host == "dashscope-result-bj.oss-cn-beijing.aliyuncs.com"  # the documented http:// URL is fetched over https
+    assert get.url.path == "/1d/2026-11-11/clip.mp3" and get.url.params["Signature"] == "abc/def=" and get.url.params["Expires"] == "1766113409"
+    assert "authorization" not in get.headers and get.headers["user-agent"] == f"word-Dance/{__version__}"  # anonymous: the key never reaches OSS
+    assert audio.synthesize(cfg, "en-GB", "The cat sat on the mat.") == clip and audio.lookup(cfg, "en-GB", "The cat sat on the mat.") == clip
+    assert len(seen) == 2  # a cache hit asks nobody
+    other = audio.synthesize(cfg, "en-US", "The cat sat on the mat.")
+    assert other.path != clip.path and json.loads(seen[2].content)["input"]["voice"] == "loongabby_v3"
+    assert not list(cfg.audio_dir.rglob("*.tmp"))
+
+
+def test_bailian_accepts_an_octet_stream_download_and_an_https_url_as_is(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer(url="https://dashscope-result-sh.oss-cn-shanghai.aliyuncs.com/x.mp3?sig=1")), lambda r: httpx.Response(200, content=MP3, headers={"content-type": "application/octet-stream"}))
+    assert audio.synthesize(cfg, "en-US", "farmer").path.read_bytes() == MP3
+    assert str(seen[1].url) == "https://dashscope-result-sh.oss-cn-shanghai.aliyuncs.com/x.mp3?sig=1"
+
+
+def test_bailian_downloads_only_from_aliyuncs_hosts(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The anonymous download client follows the provider's answer; an answer pointing anywhere else is refused before any request."""
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer(url="https://oss.example.com/x.mp3?sig=1")), lambda r: httpx.Response(200, content=MP3, headers={"content-type": "audio/mpeg"}))
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, "en-US", "farmer")
+    assert e.value.reason == "failed" and "aliyuncs.com" in str(e.value) and len(seen) == 1  # the POST happened, no GET
+    assert not list(cfg.audio_dir.rglob("*.mp3"))
+
+
+def test_bailian_clients_carry_the_key_only_towards_the_api_and_ignore_proxy_variables(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path, WD_PUBLIC_URL="https://words.example.com", WD_CONTACT_EMAIL="owner@example.com"))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    with audio._bailian_client(cfg, "sk-x") as client:
+        assert client.headers["authorization"] == "Bearer sk-x" and client.headers["content-type"] == "application/json"
+        assert client.headers["user-agent"] == f"word-Dance/{__version__}" and "example.com" not in client.headers["user-agent"]
+        assert client.trust_env is False and client.timeout.read == audio.BAILIAN_TIMEOUT_S
+    with audio._bailian_download_client(cfg) as client:
+        assert "authorization" not in client.headers and client.trust_env is False and client.timeout.read == audio.BAILIAN_DOWNLOAD_TIMEOUT_S
+
+
+def test_bailian_key_is_read_at_call_time_and_an_unreadable_file_fails_without_its_contents(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    env = bailian_env(tmp_path)
+    cfg = make_settings(test_env, **env)
+    assert audio.read_key(cfg) == BAILIAN_KEY
+    key = Path(env["WD_BAILIAN_API_KEY_FILE"])
+    key.write_text("﻿sk-rotated \nsecond line\n", encoding="utf-8")
+    assert audio.read_key(cfg) == "sk-rotated"  # no cache: a rotated key is used by the next clip; a BOM and the trailing space are stripped
+    key.chmod(0o644)
+    monkeypatch.setattr(audio, "_key_mode_warned", False)
+    with caplog.at_level(logging.WARNING, logger="wd.audio"):
+        audio.read_key(cfg)
+        audio.read_key(cfg)
+    warned = [r.getMessage() for r in caplog.records if getattr(r, "event", "") == "audio_key_file_mode"]
+    assert len(warned) == 1 and "chmod 600" in warned[0] and "sk-rotated" not in caplog.text  # once per process, never the key
+    key.write_text("\n", encoding="utf-8")
+    with pytest.raises(audio.AudioError) as e:
+        audio.read_key(cfg)
+    assert e.value.reason == "failed" and "API key file unreadable" in e.value.detail
+    key.unlink()
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, "en-US", "farmer")
+    assert e.value.reason == "failed" and "API key file unreadable" in e.value.detail and str(key) not in e.value.detail
+    assert audio.lookup(cfg, "en-US", "farmer") is None and not list(cfg.audio_dir.rglob("*.tmp"))
+    with pytest.raises(audio.AudioError) as e:  # a Settings without the variable (from_env refuses that under bailian; a hand-built one gets this)
+        audio.read_key(make_settings(test_env))
+    assert "WD_BAILIAN_API_KEY_FILE" in e.value.detail
+
+
+@pytest.mark.parametrize(
+    "status, body, reason, needle",
+    [
+        (401, {"code": "InvalidApiKey", "message": "Invalid API-key provided.", "request_id": "r"}, "failed", "bailian InvalidApiKey: Invalid API-key provided."),
+        (401, {"code": "InvalidApiKey", "message": f"Incorrect API key provided: {BAILIAN_KEY}"}, "failed", "Incorrect API key provided: ***"),
+        (400, {"code": "InvalidParameter", "message": "The requested voice 'loongabby_v3' is not supported." + " x" * 60}, "failed", "InvalidParameter: The requested voice 'loongabby_v3' is not supported."),
+        (403, {"code": "Arrearage", "message": "Access denied, please make sure your account is in good standing."}, "failed", "bailian Arrearage: Access denied"),
+        (404, {"code": "ModelNotFound", "message": "The model cosyvoice-v9 does not exist"}, "failed", "bailian ModelNotFound"),
+        (429, {"code": "Throttling.RateQuota", "message": "Requests rate limit exceeded, please try again later."}, "busy", "bailian answered 429 Throttling.RateQuota: Requests rate limit exceeded"),
+        (503, {"code": "ServiceUnavailable", "message": "Service unavailable"}, "busy", "bailian answered 503 ServiceUnavailable"),
+        (500, "<html>bad gateway</html>", "busy", "bailian answered 500: retry later"),
+        (200, {"code": "DataInspectionFailed", "message": "Input or output data may contain inappropriate content.", "request_id": "r"}, "failed", "bailian DataInspectionFailed"),
+        (200, {"request_id": "r", "output": {"finish_reason": "stop", "audio": {"data": "", "url": ""}}}, "failed", "without output.audio.url"),
+        (200, {"request_id": "r", "output": {"finish_reason": "stop", "audio": {"data": "", "url": "ftp://oss/x.mp3"}}}, "failed", "not an https URL"),
+        (200, "<html>a captive portal</html>", "failed", "without output.audio.url"),
+    ],
+)
+def test_bailian_answers_become_busy_or_failed_without_the_key(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, body, reason: str, needle: str):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(status, text=body) if isinstance(body, str) else httpx.Response(status, json=body))
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, "en-US", "farmer")
+    assert e.value.reason == reason and needle in e.value.detail, e.value.detail
+    assert BAILIAN_KEY not in e.value.detail and "Signature" not in e.value.detail and len(e.value.detail) <= 120  # the message is cut at 80 chars
+    assert len(seen) == 1  # nothing was downloaded
+    assert audio.lookup(cfg, "en-US", "farmer") is None and not list(cfg.audio_dir.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "download, needle",
+    [
+        (lambda r: httpx.Response(200, content=b"<html>expired</html>" * 40, headers={"content-type": "text/html"}), "answered 200 text/html"),
+        (lambda r: httpx.Response(403, content=b"<Error/>", headers={"content-type": "application/xml"}), "answered 403 application/xml"),
+        (lambda r: httpx.Response(200, content=b"\xff\xfb", headers={"content-type": "audio/mpeg"}), "clip of 2 bytes"),
+        (lambda r: httpx.Response(200, content=b"\xff" * (audio.BAILIAN_MAX_BYTES + 1), headers={"content-type": "audio/mpeg"}), "larger than"),
+        (lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=r)), "bailian: ReadTimeout"),
+    ],
+)
+def test_bailian_downloads_that_are_not_a_clip_fail_cleanly(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, download, needle: str):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer()), download)
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, "en-US", "farmer")
+    assert e.value.reason == "failed" and needle in e.value.detail, e.value.detail
+    assert len(seen) == 2 and "authorization" not in seen[1].headers
+    assert audio.lookup(cfg, "en-US", "farmer") is None and not list(cfg.audio_dir.rglob("*.tmp"))
+
+
+def test_bailian_transport_errors_are_failed_with_the_exception_class(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    patch_bailian(monkeypatch, lambda r: (_ for _ in ()).throw(httpx.ConnectError("boom", request=r)))
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, "en-US", "farmer")
+    assert e.value.reason == "failed" and e.value.detail == "bailian: ConnectError"
+
+
+def test_bailian_qwen_audio_model_adds_the_language_hint(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path, WD_BAILIAN_TTS_MODEL="qwen-audio-3.1-tts-flash", WD_BAILIAN_TTS_VOICES="en-US=Abby_v3.1;en-GB=Emily_v3.1", WD_BAILIAN_REGION="ap-southeast-1"))
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer()))
+    audio.synthesize(cfg, "en-US", "farmer")
+    assert str(seen[0].url) == "https://llm-ws1.ap-southeast-1.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+    assert json.loads(seen[0].content) == {"model": "qwen-audio-3.1-tts-flash", "input": {"text": "farmer", "voice": "Abby_v3.1", "format": "mp3", "sample_rate": 24000, "language_hints": ["en"]}}
+
+
+def test_bailian_locate_and_voice_key_carry_the_voices_and_the_model(test_env: dict[str, str], tmp_path: Path):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    clip, provider, voice = audio.locate(cfg, "en-US", "farmer")
+    assert (provider, voice, clip.media_type, clip.path.suffix) == ("bailian", "loongabby_v3", "audio/mpeg", ".mp3")
+    assert clip.path.name == hashlib.sha256(b"bailian\nloongabby_v3\nen-US\nfarmer").hexdigest() + ".mp3"
+    assert audio.locate(cfg, "en-GB", "farmer")[2] == "loongemily_v3" and audio.locate(cfg, "en-GB", "farmer")[0].path != clip.path
+    assert audio.voice_key(cfg) == hashlib.sha256(b"bailian\ncosyvoice-v3-flash\nloongabby_v3\nloongemily_v3").hexdigest()[:8]
+    other_voice = make_settings(test_env, **bailian_env(tmp_path, WD_BAILIAN_TTS_VOICES="en-US=loongandy_v3;en-GB=loongemily_v3"))
+    assert audio.locate(other_voice, "en-US", "farmer")[0].path != clip.path  # a new voice = new clips (the old ones age out under the cap)
+    assert audio.locate(other_voice, "en-GB", "farmer")[0].path == audio.locate(cfg, "en-GB", "farmer")[0].path  # the unchanged accent keeps its clips
+    assert audio.voice_key(other_voice) != audio.voice_key(cfg)
+    other_model = make_settings(test_env, **bailian_env(tmp_path, WD_BAILIAN_TTS_MODEL="cosyvoice-v3-plus"))
+    assert audio.voice_key(other_model) not in (audio.voice_key(cfg), audio.voice_key(other_voice))  # the browser's clip URLs change with the model too
+    assert len({audio.voice_key(cfg), audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="youdao"))}) == 2
+    assert audio.warm_up_async(cfg) is None  # no `say` probes to run
+
+
+def test_prewarm_with_bailian_uses_two_paced_workers_and_stops_after_five_failures(test_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    workers: list[int | None] = []
+    real_pool = audio.ThreadPoolExecutor
+
+    class RecordingPool(real_pool):  # type: ignore[misc, valid-type]
+        def __init__(self, max_workers=None, **kwargs):
+            workers.append(max_workers)
+            super().__init__(max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(audio, "ThreadPoolExecutor", RecordingPool)
+    stamps: list[float] = []
+
+    def synth(request: httpx.Request) -> httpx.Response:
+        stamps.append(time.monotonic())
+        return httpx.Response(200, json=tts_answer())
+
+    patch_bailian(monkeypatch, synth)
+    monkeypatch.setattr(audio, "BAILIAN_PACE_S", 0.12)
+    monkeypatch.setattr(audio, "_bailian_last_post", 0.0)
+    texts = [f"text {i}" for i in range(6)]
+    report = audio.prewarm(cfg, texts, ("en-US",))
+    assert (report.clips, report.made, report.failed, report.aborted) == (6, 6, 0, False) and workers == [2]
+    gaps = [b - a for a, b in zip(sorted(stamps), sorted(stamps)[1:])]
+    assert len(gaps) == 5 and all(gap >= 0.12 - 0.02 for gap in gaps), gaps  # ≥ BAILIAN_PACE_S between two consecutive POSTs, across both workers
+    assert report.seconds >= 5 * 0.1
+    # the provider refuses every request (a wrong key): the streak rule stops the run, the detail names the code without the key
+    patch_bailian(monkeypatch, lambda r: httpx.Response(401, json={"code": "InvalidApiKey", "message": "Invalid API-key provided."}))
+    report = audio.prewarm(cfg, [f"other {i}" for i in range(20)], ("en-US",))
+    assert report.aborted and report.made == 0 and report.failed >= audio.PREWARM_ABORT_AFTER and report.done < report.todo
+    assert all("failed: bailian InvalidApiKey" in detail and BAILIAN_KEY not in detail for detail in report.errors) and workers == [2, 2]
+    patch_bailian(monkeypatch, lambda r: httpx.Response(429, json={"code": "Throttling.RateQuota", "message": "Requests rate limit exceeded, please try again later."}))
+    report = audio.prewarm(cfg, [f"later {i}" for i in range(20)], ("en-US",))
+    assert report.aborted and all(detail.startswith("en-US, a ") and "busy: bailian answered 429" in detail for detail in report.errors)
+
+
+def test_bailian_price_line_estimates_the_characters_at_the_list_price(test_env: dict[str, str], tmp_path: Path):
+    cfg = make_settings(test_env, **bailian_env(tmp_path))
+    assert audio.bailian_price_line(cfg, 1_130_000) == "≈ 1130000 characters to send to 百炼 (model cosyvoice-v3-flash): ≈ ¥113.00 at ¥1 per 10 000 characters (an estimate at the 北京 list price; the console bill decides)"
+    plus = make_settings(test_env, **bailian_env(tmp_path, WD_BAILIAN_TTS_MODEL="cosyvoice-v3-plus"))
+    assert "≈ ¥2.00 at ¥2 per 10 000 characters" in audio.bailian_price_line(plus, 10_000)
+    per_token = make_settings(test_env, **bailian_env(tmp_path, WD_BAILIAN_TTS_MODEL="qwen-audio-3.1-tts-flash"))
+    assert audio.bailian_price_line(per_token, 500) == "≈ 500 characters to send to 百炼 (model qwen-audio-3.1-tts-flash): price per 10 000 characters unknown for this model — see the 百炼 model-pricing page"
+
+
+def test_cli_audio_voices_probe_and_prewarm_with_bailian(test_env: dict[str, str], fakes: dict[str, Path], tmp_path: Path, conn: sqlite3.Connection, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch):
+    """DEPLOY §9: `wd audio-voices` names the model and both voices, `wd audio-probe` is the day-0 check of the key (any provider), and
+    `wd audio-prewarm` prices the characters of the run and makes the clips through the cloud."""
+    from wd import cli
+
+    seed_tappable(conn)
+    for key, value in bailian_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer()))
+    assert cli.main(["audio-voices"]) == 0
+    out = capsys.readouterr().out
+    assert "provider: bailian (WD_AUDIO_PROVIDER=bailian, model cosyvoice-v3-flash, region cn-beijing); cache: 0.0 MB of 256 MB" in out
+    assert "en-US → loongabby_v3 (WD_BAILIAN_TTS_VOICES)" in out and "en-GB → loongemily_v3 (WD_BAILIAN_TTS_VOICES)" in out
+    assert "Ava" not in out and "WD_AUDIO_SAY_VOICE" not in out and "no `say` voices to list" in out
+
+    assert cli.main(["audio-probe"]) == 0
+    out = capsys.readouterr().out
+    assert "audio-probe: provider bailian (model cosyvoice-v3-flash), en-US → loongabby_v3, 23 chars → 1502 bytes audio/mpeg in " in out
+    assert len(seen) == 2 and json.loads(seen[0].content)["input"] == {"text": "The cat sat on the mat.", "voice": "loongabby_v3", "format": "mp3", "sample_rate": 24000}
+    cfg = Settings.from_env()
+    assert str(audio.locate(cfg, "en-US", "The cat sat on the mat.")[0].path) in out and "already cached" not in out
+    assert cli.main(["audio-probe", "--accent", "en-GB", "Hello, world!"]) == 0
+    assert "en-GB → loongemily_v3, 13 chars → 1502 bytes" in capsys.readouterr().out and json.loads(seen[2].content)["input"]["voice"] == "loongemily_v3"
+    assert cli.main(["audio-probe"]) == 0 and len(seen) == 4  # the default text is cached now: served, flagged, nothing asked
+    assert "already cached — pass another TEXT" in capsys.readouterr().out
+    assert cli.main(["audio-probe", "你好"]) == 2
+    assert "text rule refuses" in capsys.readouterr().err
+    patch_bailian(monkeypatch, lambda r: httpx.Response(401, json={"code": "InvalidApiKey", "message": "Invalid API-key provided."}))
+    assert cli.main(["audio-probe", "A brand new sentence."]) == 1
+    err = capsys.readouterr().err
+    assert "wd audio-probe: bailian failed — failed: bailian InvalidApiKey: Invalid API-key provided." in err and BAILIAN_KEY not in err
+    patch_bailian(monkeypatch, lambda r: httpx.Response(429, json={"code": "Throttling.RateQuota", "message": "Requests rate limit exceeded, please try again later."}))
+    assert cli.main(["audio-probe", "A brand new sentence."]) == 1
+    err = capsys.readouterr().err
+    assert "busy: bailian answered 429 Throttling.RateQuota" in err and "within a minute" in err
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "off")
+    assert cli.main(["audio-probe"]) == 2
+    assert "resolves to off" in capsys.readouterr().err
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "say")  # any provider: the Mac's say through the fakes
+    assert cli.main(["audio-probe"]) == 0
+    assert "audio-probe: provider say, en-US → Ava (Premium), 23 chars → " in capsys.readouterr().out and calls(fakes) == ["Ava (Premium)|The cat sat on the mat."]
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "bailian")
+
+    seen = patch_bailian(monkeypatch, lambda r: httpx.Response(200, json=tts_answer()))
+    assert cli.main(["audio-prewarm", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "5 text(s) a learner can tap (headwords with content or in a bank and their example sentences; learning order); en-US → loongabby_v3, en-GB → loongemily_v3" in out
+    assert "10 clip(s) planned: 0 cached, 10 to synthesise" in out
+    assert "≈ 136 characters to send to 百炼 (model cosyvoice-v3-flash): ≈ ¥0.01 at ¥1 per 10 000 characters (an estimate" in out and seen == []
+    assert cli.main(["audio-prewarm", "--accent", "en-US", "--limit", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "≈ 9 characters to send to 百炼" in out  # hop + farmer: the two clips of this run, not the whole plan
+    assert "audio-prewarm: 2 clip(s) made" in out and len(seen) == 4 and [json.loads(r.content)["input"]["text"] for r in seen[::2]] == ["hop", "farmer"]
+    assert cli.main(["audio-prewarm"]) == 0
+    out = capsys.readouterr().out
+    assert "10 clip(s) planned: 2 cached, 8 to synthesise" in out and "≈ 127 characters to send" in out and "audio-prewarm: 8 clip(s) made" in out and len(seen) == 20

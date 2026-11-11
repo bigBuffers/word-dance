@@ -351,3 +351,25 @@ def test_wd_check_db_exit_code_follows_the_invariants(settings, seeded, capsys):
     assert cli.main(["check", "db"]) == 1
     out = capsys.readouterr().out
     assert "invariant learn_rank_present: " in out and "violation(s) (stage words without learn_rank" in out
+
+
+# ------------------------------------------------------------------------------------- providers: pronunciation (API.md 76)
+def test_check_providers_names_the_pronunciation_provider_and_the_bailian_key_file(settings, test_env, tmp_path: Path, capsys):
+    """`wd check providers` prints `audio: <provider>` and, under `bailian`, the model, region, both voices and whether the key FILE
+    is readable — never the key; a key file that vanished after the start flips the check (every tap would answer 503 failed)."""
+    result = diag.check_providers(settings, None)
+    assert result.ok and "audio: off (WD_AUDIO_PROVIDER=off)" in result.lines and not any(line.startswith("bailian:") for line in result.lines)
+    assert cli.main(["check", "providers"]) == 0
+    assert "\n    audio: off (WD_AUDIO_PROVIDER=off)" in capsys.readouterr().out
+    key = tmp_path / "bailian.key"
+    key.write_text("sk-test-key\n", encoding="utf-8")
+    key.chmod(0o600)
+    cfg = Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "bailian", "WD_BAILIAN_API_KEY_FILE": str(key), "WD_BAILIAN_WORKSPACE_ID": "llm-ws1"})
+    result = diag.check_providers(cfg, None)
+    assert result.ok and "audio: bailian (WD_AUDIO_PROVIDER=bailian)" in result.lines
+    assert f"bailian: model cosyvoice-v3-flash, region cn-beijing, en-US → loongabby_v3, en-GB → loongemily_v3, key file ok ({key})" in result.lines
+    assert "sk-test-key" not in result.render()
+    key.unlink()
+    result = diag.check_providers(cfg, None)
+    assert not result.ok and any("key file missing" in line for line in result.lines) and any("wd audio-probe" in line for line in result.lines)
+    assert "sk-test-key" not in result.render()

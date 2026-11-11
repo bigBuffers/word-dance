@@ -7,10 +7,17 @@ through python-dotenv for manual runs; monkeypatched env in tests).
 Validation rules:
 * paths are resolved to absolute ``Path`` objects (directories are *not* created here —
   see :func:`ensure_dirs`);
-* ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``cache`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a host with
-  ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``); ``cache`` serves the ``say`` clips another host
-  synthesised and needs ``WD_AUDIO_CACHE_VOICES`` naming both accents' voices (``en-US=Ava (Premium);en-GB=Serena (Premium)``);
-  ``WD_AUDIO_CACHE_MB`` bounds the clip cache;
+* ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``bailian`` / ``cache`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a
+  host with ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``; ``bailian`` is never chosen by ``auto``);
+  ``cache`` serves the ``say`` clips another host synthesised and needs ``WD_AUDIO_CACHE_VOICES`` naming both accents' voices
+  (``en-US=Ava (Premium);en-GB=Serena (Premium)``); ``WD_AUDIO_CACHE_MB`` bounds the clip cache; ``bailian`` (阿里云百炼 CosyVoice /
+  Qwen-Audio TTS over its synchronous HTTP API, slice server-audio-2) refuses to start without ``WD_BAILIAN_API_KEY_FILE`` (the
+  ``WD_ALIYUN_ACCESS_KEY_SECRET_FILE`` rule: an existing readable regular file, group/other-readable warns, the first line is read at
+  call time) and ``WD_BAILIAN_WORKSPACE_ID`` (the 业务空间 id the endpoint host is built from), ``WD_BAILIAN_REGION`` is ``cn-beijing``
+  / ``ap-southeast-1``, ``WD_BAILIAN_TTS_URL`` (an optional full endpoint override) must be an http(s) URL naming a host, and
+  ``WD_BAILIAN_TTS_VOICES`` has the ``WD_AUDIO_CACHE_VOICES`` shape and must name both accents under ``bailian``;
+  ``Settings.bailian_tts_url`` holds the endpoint in force (the override, else
+  ``https://{WorkspaceId}.{region}.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer``, empty without a workspace id);
 * ``WD_TZ`` must be a known IANA zone;
 * numeric ranges raise :class:`ConfigError`, except ``WD_AI_BATCH_SIZE`` (clamped to 1–12
   because ``content_v1.json`` has ``items.maxItems: 12``), ``WD_AI_FALLBACK_BATCH_SIZE`` (the same
@@ -89,9 +96,14 @@ FALLBACK_JSON_MODES = ("auto", "json_object", "json_schema")
 FALLBACK_THINKING_MODES = ("off", "on", "default")
 FALLBACK_TASK_KINDS = ("content", "lookup", "consolidate")  # `svg`, `dance` and `probe` are never routed by WD_AI_FALLBACK_KINDS
 FALLBACK_PRICE_KEYS = frozenset({"input", "output", "cache_read"})  # WD_AI_FALLBACK_PRICE_JSON names (CNY per million tokens)
-AUDIO_PROVIDERS = ("auto", "say", "youdao", "cache", "off")  # WD_AUDIO_PROVIDER (wd/audio.py): auto = say when SAY_BIN exists, else off; cache = another host's say clips, read-only
+AUDIO_PROVIDERS = ("auto", "say", "youdao", "bailian", "cache", "off")  # WD_AUDIO_PROVIDER (wd/audio.py): auto = say when SAY_BIN exists, else off (never bailian); cache = another host's say clips, read-only
 AUDIO_ACCENTS = ("en-US", "en-GB")  # mirrors wd.audio.ACCENTS (which imports this module)
 SAY_BIN = "/usr/bin/say"  # macOS text-to-speech; its presence decides the `auto` audio provider
+# 阿里云百炼 cloud TTS (wd/audio.py `bailian`, slice server-audio-2): keys and models are per region; the TTS host is the 业务空间's own
+BAILIAN_REGIONS = ("cn-beijing", "ap-southeast-1")  # WD_BAILIAN_REGION — 华北2（北京）/ 新加坡, the two regions with the TTS models
+BAILIAN_TTS_PATH = "/api/v1/services/audio/tts/SpeechSynthesizer"  # the synchronous CosyVoice / Qwen-Audio-TTS endpoint path
+DEFAULT_BAILIAN_TTS_MODEL = "cosyvoice-v3-flash"  # 1 元 / 万字符 (北京); qwen-audio-3.1-tts-flash is the documented alternative on the same endpoint
+DEFAULT_BAILIAN_TTS_VOICES = "en-US=loongabby_v3;en-GB=loongemily_v3"  # CosyVoice v3 system voices: 美式英文女 / 英式英文女
 
 # values masked as "***" by GET /api/admin/config (API.md 73) and never logged
 SECRET_KEYS = frozenset(
@@ -113,20 +125,28 @@ class ConfigError(ValueError):
 
 
 
-def parse_cache_voices(raw: str) -> dict[str, str]:
+def parse_cache_voices(raw: str, name: str = "WD_AUDIO_CACHE_VOICES") -> dict[str, str]:
     """``WD_AUDIO_CACHE_VOICES`` — ``en-US=Ava (Premium);en-GB=Serena (Premium)`` → ``{accent: voice}`` (the names exactly as
-    ``say -v '?'`` prints them on the host that synthesises); :class:`ConfigError` on a malformed pair, an unknown accent or a repeat."""
+    ``say -v '?'`` prints them on the host that synthesises); :class:`ConfigError` on a malformed pair, an unknown accent or a repeat.
+    ``WD_BAILIAN_TTS_VOICES`` (``en-US=loongabby_v3;en-GB=loongemily_v3``) has the same shape — ``name`` is the variable the error names."""
     out: dict[str, str] = {}
     for part in (p.strip() for p in raw.split(";")):
         if not part:
             continue
         accent, sep, voice = (x.strip() for x in part.partition("="))
         if not sep or accent not in AUDIO_ACCENTS or not voice:
-            raise ConfigError(f"WD_AUDIO_CACHE_VOICES must be `en-US=<say voice>;en-GB=<say voice>` (as `say -v '?'` lists them on the host that synthesises), got {part!r}")
+            hint = "(as `say -v '?'` lists them on the host that synthesises)" if name == "WD_AUDIO_CACHE_VOICES" else "(a 百炼 voice id of the model, e.g. loongabby_v3)"
+            raise ConfigError(f"{name} must be `en-US=<voice>;en-GB=<voice>` {hint}, got {part!r}")
         if accent in out:
-            raise ConfigError(f"WD_AUDIO_CACHE_VOICES names {accent} twice")
+            raise ConfigError(f"{name} names {accent} twice")
         out[accent] = voice
     return out
+
+
+def bailian_endpoint(workspace_id: str, region: str) -> str:
+    """The 百炼 TTS endpoint of a 业务空间 in a region: ``https://{WorkspaceId}.{region}.maas.aliyuncs.com`` + :data:`BAILIAN_TTS_PATH`
+    (the production host form the Base-URL page recommends; ``dashscope.aliyuncs.com`` is the legacy one)."""
+    return f"https://{workspace_id}.{region}.maas.aliyuncs.com{BAILIAN_TTS_PATH}"
 
 @dataclass(frozen=True)
 class Settings:
@@ -221,10 +241,17 @@ class Settings:
     pixabay_key: str = ""
     pexels_key: str = ""
     # --- pronunciation audio (wd/audio.py, API.md 76) ----------------------------------
-    audio_provider: str = "auto"  # auto | say | youdao | cache | off — server-side clips for clients without an English voice
+    audio_provider: str = "auto"  # auto | say | youdao | bailian | cache | off — server-side clips for clients without an English voice
     audio_say_voice: str = ""  # macOS `say -v` voice for both accents; empty = the best installed one of audio.PREFERRED_VOICES
     audio_cache_voices: str = ""  # provider cache: "en-US=Ava (Premium);en-GB=Serena (Premium)" — the voices the mirrored say clips were made with
     audio_cache_mb: int = 256  # cap of the clip cache under audio/; the least recently played clips are removed beyond it
+    # --- pronunciation: 百炼 cloud TTS (provider bailian, slice server-audio-2; dark until WD_AUDIO_PROVIDER=bailian) -----------
+    bailian_api_key_file: str = ""  # 0600 file whose first line is the 百炼 API key (sk-…), read at call time; required with bailian
+    bailian_workspace_id: str = ""  # the 业务空间 id — the TTS host is {WorkspaceId}.{region}.maas.aliyuncs.com; required with bailian
+    bailian_region: str = "cn-beijing"  # cn-beijing | ap-southeast-1 (keys and models are per region)
+    bailian_tts_url: str = ""  # the endpoint in force: WD_BAILIAN_TTS_URL when set, else derived from the workspace id + region (empty without one)
+    bailian_tts_model: str = DEFAULT_BAILIAN_TTS_MODEL  # the `model` field: cosyvoice-v3-flash (1 元/万字符) or qwen-audio-3.1-tts-flash
+    bailian_tts_voices: str = DEFAULT_BAILIAN_TTS_VOICES  # one voice per accent in the WD_AUDIO_CACHE_VOICES shape; both accents required with bailian
     # --- e-mail ---------------------------------------------------------------------
     mail_provider: str = "smtp"  # smtp | aliyun_dm — aliyun_dm sends through DirectMail with the WD_ALIYUN_* key; WD_SMTP_FROM stays the sender
     smtp_host: str = ""
@@ -368,6 +395,11 @@ class Settings:
     def audio_cache_voice_map(self) -> dict[str, str]:
         """``accent → say voice`` of ``WD_AUDIO_CACHE_VOICES`` (validated by :func:`parse_cache_voices` in ``from_env``)."""
         return parse_cache_voices(self.audio_cache_voices)
+
+    @property
+    def bailian_voice_map(self) -> dict[str, str]:
+        """``accent → 百炼 voice`` of ``WD_BAILIAN_TTS_VOICES`` (validated in ``from_env``; both accents present under ``bailian``)."""
+        return parse_cache_voices(self.bailian_tts_voices, name="WD_BAILIAN_TTS_VOICES")
 
     def runtime_dirs(self) -> tuple[Path, ...]:
         """Directories that must exist under the data dir (DEPLOY §1)."""
@@ -681,6 +713,35 @@ class Settings:
                 raise ConfigError(f"{name} must start with https:// (http:// is accepted only with WD_DEV=1), got {url!r}")
             return url
 
+        # 百炼 cloud TTS (wd/audio.py `bailian`, slice server-audio-2): the same startup-time preconditions as the SMS provider — a
+        # missing key file or workspace id would otherwise surface as 503 `failed` at the first tap. Everything stays dark unless
+        # WD_AUDIO_PROVIDER=bailian; the key FILE path is not a secret (the key itself is read at call time, audio.read_key)
+        bailian_key_file = secret_file("WD_BAILIAN_API_KEY_FILE")
+        bailian_workspace_id = text("WD_BAILIAN_WORKSPACE_ID", "")
+        bailian_region = choice("WD_BAILIAN_REGION", "cn-beijing", BAILIAN_REGIONS)
+        bailian_tts_url = text("WD_BAILIAN_TTS_URL", "").rstrip("/")
+        if bailian_tts_url:
+            # the WD_AI_FALLBACK_BASE_URL rule: a scheme-less value would fail every synthesis as a soft `failed`; plain http:// to a
+            # host other than loopback (a local mock) would send the bearer key in cleartext
+            if not bailian_tts_url.lower().startswith(("http://", "https://")) or origin_of(bailian_tts_url) is None:
+                raise ConfigError(f"WD_BAILIAN_TTS_URL must start with http:// or https:// and name a host, got {bailian_tts_url!r}")
+            if bailian_tts_url.lower().startswith("http://") and not is_loopback_url(bailian_tts_url):
+                log.warning("WD_BAILIAN_TTS_URL=%s uses plain http:// to a non-loopback host; the API key travels in cleartext", bailian_tts_url)
+        elif bailian_workspace_id:
+            bailian_tts_url = bailian_endpoint(bailian_workspace_id, bailian_region)
+        bailian_tts_voices = text("WD_BAILIAN_TTS_VOICES", DEFAULT_BAILIAN_TTS_VOICES)
+        bailian_voices = parse_cache_voices(bailian_tts_voices, name="WD_BAILIAN_TTS_VOICES")
+        if audio_provider == "bailian":
+            if not bailian_key_file:
+                raise ConfigError("WD_AUDIO_PROVIDER=bailian needs WD_BAILIAN_API_KEY_FILE (a 0600 file whose first line is the 百炼 API key, sk-…)")
+            if not bailian_workspace_id:
+                raise ConfigError("WD_AUDIO_PROVIDER=bailian needs WD_BAILIAN_WORKSPACE_ID (the 业务空间 id the TTS host is built from — 百炼控制台 → 业务空间管理)")
+            if set(bailian_voices) != set(AUDIO_ACCENTS):
+                raise ConfigError(
+                    "WD_AUDIO_PROVIDER=bailian needs WD_BAILIAN_TTS_VOICES naming both accents, e.g. `en-US=loongabby_v3;en-GB=loongemily_v3` "
+                    "(voices of the model in WD_BAILIAN_TTS_MODEL — the 百炼 音色列表 page)"
+                )
+
         wechat_appid = text("WD_WECHAT_APPID", "")
         wechat_secret_file = secret_file("WD_WECHAT_SECRET_FILE")
         if wechat_appid and not wechat_secret_file:
@@ -788,6 +849,12 @@ class Settings:
             audio_say_voice=text("WD_AUDIO_SAY_VOICE", ""),
             audio_cache_voices=audio_cache_voices,
             audio_cache_mb=integer("WD_AUDIO_CACHE_MB", 256, 16, 1_000_000),
+            bailian_api_key_file=bailian_key_file,
+            bailian_workspace_id=bailian_workspace_id,
+            bailian_region=bailian_region,
+            bailian_tts_url=bailian_tts_url,
+            bailian_tts_model=text("WD_BAILIAN_TTS_MODEL", DEFAULT_BAILIAN_TTS_MODEL),
+            bailian_tts_voices=bailian_tts_voices,
             mail_provider=mail_provider,
             smtp_host=text("WD_SMTP_HOST", ""),
             smtp_port=integer("WD_SMTP_PORT", 587, 1, 65535),

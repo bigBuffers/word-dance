@@ -262,15 +262,35 @@ def third_party_state(cfg: Settings, configured: bool) -> str:
     return "fake" if cfg.auth_fake_providers else "off"
 
 
+def audio_lines(cfg: Settings) -> tuple[list[str], bool]:
+    """The pronunciation provider in force (``WD_AUDIO_PROVIDER`` with ``auto`` resolved, API.md 76) and, for ``bailian``, the model,
+    the region, both voices and whether the API key FILE is readable (``ok`` / ``missing`` — never the key itself); a missing key file
+    under ``bailian`` is a failure (every tap would answer 503 ``failed``)."""
+    provider = cfg.audio_provider_effective
+    lines = [f"audio: {provider} (WD_AUDIO_PROVIDER={cfg.audio_provider})"]
+    if provider != "bailian":
+        return lines, True
+    path = Path(cfg.bailian_api_key_file).expanduser() if cfg.bailian_api_key_file else None
+    readable = path is not None and path.is_file() and os.access(path, os.R_OK)
+    voices = cfg.bailian_voice_map
+    lines.append(f"bailian: model {cfg.bailian_tts_model}, region {cfg.bailian_region}, en-US → {voices.get('en-US', '?')}, en-GB → {voices.get('en-GB', '?')}, key file {'ok' if readable else 'missing'}" + (f" ({path})" if path is not None else " (WD_BAILIAN_API_KEY_FILE unset)"))
+    if not readable:
+        lines.append("hint: put the 百炼 API key (sk-…) on the first line of a 0600 file named by WD_BAILIAN_API_KEY_FILE, then `wd audio-probe`")
+    return lines, readable
+
+
 def check_providers(cfg: Settings, conn: sqlite3.Connection | None) -> CheckResult:
+    audio, audio_ok = audio_lines(cfg)
     lines = [
         f"images: {'enabled' if cfg.images_enabled else 'disabled'}",
         f"chain: {', '.join(cfg.image_providers) or '-'}",
         f"svg via claude: {'1' if cfg.svg_via_claude else '0'} (sub-cap ${cfg.ai_svg_daily_budget_usd:.2f}/day)",
         # third-party sign-in (API.md §3.3, DEPLOY §4 WD_WECHAT_* / WD_QQ_* / WD_APPLE_*): what the login page offers; `on` needs the variables set
         f"third-party sign-in: wechat {third_party_state(cfg, cfg.wechat_configured)}, qq {third_party_state(cfg, cfg.qq_configured)}, apple {third_party_state(cfg, cfg.apple_configured)}",
+        # pronunciation clips (API.md 76, DEPLOY §4 WD_AUDIO_PROVIDER / WD_BAILIAN_*): the provider in force; bailian's model, voices and key file
+        *audio,
     ]
-    ok = True
+    ok = audio_ok
     if conn is not None:
         for provider in cfg.image_providers:
             row = conn.execute("SELECT cooldown_until, last_ok_at, last_error, consecutive_errors FROM provider_state WHERE provider = ?", (provider,)).fetchone()
@@ -417,6 +437,7 @@ __all__ = [
     "STAGE_INVARIANTS",
     "STAGE_INVARIANTS_FROM_VERSION",
     "CheckResult",
+    "audio_lines",
     "check_claude",
     "check_db",
     "check_providers",

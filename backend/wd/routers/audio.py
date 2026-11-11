@@ -5,7 +5,7 @@ Query ``text`` (≤ 300 chars: Latin letters, digits, the punctuation of an Engl
 ``accent`` (``en-US`` default | ``en-GB``). Session cookie required — any logged-in user, the 推荐词 of the welcome screening
 speak too. A cache hit costs nothing; a miss counts against ``audio:user:<id>`` (``SYNTH_PER_MINUTE``) and synthesises through
 the configured provider — except under the read-only ``cache`` provider, where a miss is 503 ``missing`` at once (event
-``audio_clip_missing`` at INFO, nothing to protect). Answers ``audio/mp4`` (``say``) or ``audio/mpeg`` (``youdao``) with ``Cache-Control: private,
+``audio_clip_missing`` at INFO, nothing to protect). Answers ``audio/mp4`` (``say``) or ``audio/mpeg`` (``youdao``, ``bailian``) with ``Cache-Control: private,
 max-age=604800`` (the clip for a text changes only when the operator switches provider or voice; a week bounds how long a
 browser keeps the old one), ``Accept-Ranges`` (the client plays the URL in an ``<audio>`` element) and ``nosniff``; 400
 ``validation_error`` (``details.fields.text`` / ``.accent``); 503 ``audio_unavailable`` ``{reason: "off" | "busy" | "failed" | "missing"}``

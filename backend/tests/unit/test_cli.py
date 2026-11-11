@@ -227,11 +227,20 @@ def test_learn_order_report_is_refused_without_a_recompute(settings, seeded, cap
 
 
 def test_audio_commands_are_owned_and_registered_by_the_audio_module(settings):
-    """DEPLOY §9: `wd audio-voices` and `wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--texts FILE] [--db PATH]` and `wd audio-texts [--stage S …] [--db PATH]` under wd.audio."""
+    """DEPLOY §9: `wd audio-voices`, `wd audio-probe [--accent A] [TEXT]`, `wd audio-prewarm [--accent A …] [--stage S …] [--limit N] [--dry-run] [--purge-others] [--texts FILE] [--db PATH]` and `wd audio-texts [--stage S …] [--db PATH]` under wd.audio."""
     from wd import audio
 
-    assert cli.COMMAND_OWNERS["wd.audio"] == ("audio-voices", "audio-prewarm", "audio-texts") and "wd.audio" in cli.CLI_MODULES
+    assert cli.COMMAND_OWNERS["wd.audio"] == ("audio-voices", "audio-probe", "audio-prewarm", "audio-texts") and "wd.audio" in cli.CLI_MODULES
     parser = cli.build_parser()
+    probe = parser.parse_args(["audio-probe", "--accent", "en-GB", "Hello there"])
+    assert probe.func is audio.cmd_audio_probe and (probe.accent, probe.text) == ("en-GB", "Hello there")
+    bare = parser.parse_args(["audio-probe"])
+    assert (bare.accent, bare.text) == ("en-US", None)
+    sub = parser._subparsers._group_actions[0].choices["audio-probe"]  # type: ignore[union-attr]
+    assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--accent"}
+    with pytest.raises(SystemExit) as e:
+        parser.parse_args(["audio-probe", "--accent", "fr-FR"])
+    assert e.value.code == 2
     args = parser.parse_args(["audio-prewarm", "--accent", "en-GB", "--accent", "en-US", "--stage", "xs", "--stage", "zk", "--limit", "7", "--dry-run", "--purge-others", "--texts", "t.txt", "--db", "x.db"])
     assert args.func is audio.cmd_audio_prewarm
     assert (args.accent, args.stage, args.limit, args.dry_run, args.purge_others, args.texts, args.db) == (["en-GB", "en-US"], ["xs", "zk"], 7, True, True, "t.txt", "x.db")

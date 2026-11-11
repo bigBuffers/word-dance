@@ -17,6 +17,14 @@ Providers (``WD_AUDIO_PROVIDER``, DEPLOY §4):
   and cached — a misspelt override is a 503 ``failed`` with the reason in the log, never clips in another voice.
 * ``youdao`` — ``https://dict.youdao.com/dictvoice?audio=<text>&type=2|1`` (US / UK), the unofficial endpoint Chinese dictionary
   apps have used for years; opt-in because its terms are not published and every uncached text is sent to it. mp3.
+* ``bailian`` — 阿里云百炼 CosyVoice / Qwen-Audio TTS over its synchronous HTTP API (slice server-audio-2): ``POST`` the text to
+  ``WD_BAILIAN_TTS_URL`` (``https://{WorkspaceId}.{region}.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer``) with the
+  model ``WD_BAILIAN_TTS_MODEL`` and the accent's voice from ``WD_BAILIAN_TTS_VOICES``, then fetch the pre-signed OSS URL the answer
+  names — over https, with a separate anonymous client, so the API key (the first line of the 0600 ``WD_BAILIAN_API_KEY_FILE``, read
+  at call time) never reaches OSS. mp3 24 kHz. Why it exists: the macOS SLA keeps the ``say`` voices personal and non-commercial, so a
+  public deployment (or any Linux server) needs a licensed cloud voice; 1 元 per 10 000 characters with ``cosyvoice-v3-flash``. 429 /
+  5xx answers are ``busy`` (the client retries later), 4xx and malformed answers ``failed``; consecutive POSTs are paced
+  :data:`BAILIAN_PACE_S` apart (≤ 150 RPM under the documented 180). The owner opts in explicitly — ``auto`` never picks it.
 * ``off`` — the endpoint answers 503 ``audio_unavailable`` ``{reason: "off"}`` and the clients keep whatever voice they have.
 * ``cache`` — read-only: serves the ``say`` clips another host synthesised (the same content-addressed names, that host's voices
   named in ``WD_AUDIO_CACHE_VOICES``); a text without a clip is 503 ``{reason: "missing"}`` and the client falls back to the
@@ -31,7 +39,8 @@ is ``AudioError('busy')``, a provider error ``AudioError('failed')``.
 Two things keep the first tap fast: :func:`warm_up_async` (startup) resolves the voices — the listing and the probes, 1–3 s —
 before anyone asks, and ``wd audio-prewarm`` (:func:`register_cli`) synthesises the clips of the study path (headwords with
 content or in a bank and their example sentences, in learning order) ahead of time — anything else is made at the tap; ``wd audio-voices`` shows what ``say`` lists, what resolves
-and what each accent gets. Another process adding or removing clips (that CLI next to the live service) is harmless: a clip
+and what each accent gets; ``wd audio-probe`` synthesises one clip through the provider in force (the day-0 check of a 百炼 key).
+Another process adding or removing clips (that CLI next to the live service) is harmless: a clip
 appears atomically under its content-addressed name, and the running total behind the cap is re-counted from disk every
 :data:`SCAN_INTERVAL_S` when a clip is added.
 """
@@ -50,6 +59,7 @@ import stat
 import subprocess
 import sys
 import threading
+from urllib.parse import urlsplit
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -80,6 +90,24 @@ YOUDAO_URL = "https://dict.youdao.com/dictvoice"
 YOUDAO_TIMEOUT_S = 10.0
 YOUDAO_TYPE = {"en-US": "2", "en-GB": "1"}
 YOUDAO_MAX_BYTES = 2 * 1024 * 1024  # a sentence is ≈ 100 KB of mp3; anything bigger is not a clip
+# 阿里云百炼 cloud TTS (provider `bailian`): the synchronous SpeechSynthesizer POST answers a pre-signed OSS URL (24 h) of the clip
+BAILIAN_TIMEOUT_S = 15.0  # the synthesis POST (a sentence synthesises in well under a second; the budget covers a slow peak)
+BAILIAN_DOWNLOAD_TIMEOUT_S = 15.0  # the OSS download of the clip
+BAILIAN_DOWNLOAD_HOST_SUFFIX = ".aliyuncs.com"  # the pre-signed clip URLs live on 阿里云 OSS (dashscope-result-*.oss-*.aliyuncs.com); anything else is refused
+BAILIAN_MAX_BYTES = 4 * 1024 * 1024  # a 300-char sentence is ≈ 200 KB of mp3 at 24 kHz; anything bigger is not a clip
+BAILIAN_FORMAT = "mp3"
+BAILIAN_SAMPLE_RATE = 24000
+BAILIAN_RPM = 180  # the documented limit per model and account (cosyvoice-v3-flash, qwen-audio-3.1-tts-*)
+BAILIAN_PACE_S = 0.4  # consecutive POSTs ≥ this apart across this process (wd audio-prewarm's two workers) → ≤ 150 RPM, under BAILIAN_RPM
+BAILIAN_PRICE_CNY_PER_10K_CHARS = {  # 北京 list prices (元 / 万字符) for the `wd audio-prewarm --dry-run` estimate; qwen-audio-3.1-tts-flash is billed per token and is absent
+    "cosyvoice-v3-flash": 1.0,
+    "cosyvoice-v3-plus": 2.0,
+    "cosyvoice-v2": 2.0,
+    "qwen-audio-3.1-tts-plus": 1.4,
+    "qwen-audio-3.0-tts-flash": 1.0,
+    "qwen-audio-3.0-tts-plus": 1.4,
+}
+BAILIAN_MESSAGE_CHARS = 80  # of the provider's `message` in an AudioError detail (never the key, never the OSS URL)
 MIN_CLIP_BYTES = 256  # anything shorter is an error page or an empty file, not audio
 SLOTS = 2
 SLOT_WAIT_S = 8.0
@@ -101,7 +129,7 @@ PREFERRED_VOICES: dict[str, tuple[str, ...]] = {
     "en-GB": ("Serena", "Kate", "Stephanie", "Jamie", "Oliver", "Daniel"),
 }
 VOICE_LANG = {"en-US": "en_US", "en-GB": "en_GB"}
-MEDIA = {"say": ("m4a", "audio/mp4"), "youdao": ("mp3", "audio/mpeg"), "cache": ("m4a", "audio/mp4")}  # cache mirrors say clips
+MEDIA = {"say": ("m4a", "audio/mp4"), "youdao": ("mp3", "audio/mpeg"), "bailian": ("mp3", "audio/mpeg"), "cache": ("m4a", "audio/mp4")}  # cache mirrors say clips
 CLIP_SUFFIXES = (".m4a", ".mp3")
 MB = 1024 * 1024
 _PREMIUM_RE = re.compile(r"premium|高级", re.IGNORECASE)
@@ -150,7 +178,7 @@ def normalize_text(text: str) -> str | None:
 
 
 def provider_for(cfg: Settings) -> str:
-    """``say`` / ``youdao`` / ``cache`` / ``off`` (``auto`` resolved, ``Settings.audio_provider_effective``)."""
+    """``say`` / ``youdao`` / ``bailian`` / ``cache`` / ``off`` (``auto`` resolved, ``Settings.audio_provider_effective``)."""
     return cfg.audio_provider_effective
 
 
@@ -347,10 +375,10 @@ def join_warm_up(timeout: float = WARM_UP_JOIN_S) -> None:
 
 def voice_key(cfg: Settings) -> str:
     """A short fingerprint of what makes the clips — the provider, ``WD_AUDIO_SAY_VOICE`` and the voice of each accent as resolved so
-    far — for ``ServerFlags.audio_key`` (API.md §9): the client appends it to every clip URL, so a switched provider or voice is a new
-    URL and no browser keeps playing last week's voice from its HTTP cache. Empty without a provider. Never blocks: a voice not
-    resolved yet reads as a placeholder unique to this process (never the key of an earlier run) and the next ``/me`` after the
-    warm-up settles it."""
+    far (``bailian``: the model and the two configured voices) — for ``ServerFlags.audio_key`` (API.md §9): the client appends it to
+    every clip URL, so a switched provider, model or voice is a new URL and no browser keeps playing last week's voice from its HTTP
+    cache. Empty without a provider. Never blocks: a voice not resolved yet reads as a placeholder unique to this process (never the
+    key of an earlier run) and the next ``/me`` after the warm-up settles it."""
     provider = provider_for(cfg)
     if provider == "off":
         return ""
@@ -361,6 +389,10 @@ def voice_key(cfg: Settings) -> str:
             parts.extend(_choices.get(f"{cfg.audio_say_voice}\n{accent}", _UNRESOLVED) for accent in ACCENTS)
     elif provider == "cache":
         voices = cfg.audio_cache_voice_map
+        parts.extend(voices.get(accent, "?") for accent in ACCENTS)
+    elif provider == "bailian":
+        voices = cfg.bailian_voice_map
+        parts.append(cfg.bailian_tts_model)
         parts.extend(voices.get(accent, "?") for accent in ACCENTS)
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:8]
 
@@ -376,6 +408,8 @@ def locate(cfg: Settings, accent: str, text: str) -> tuple[Clip, str, str]:
         raise AudioError("off")
     if provider == "cache":  # the clips another host made with `say`: the same key, that host's voices
         key_provider, voice = "say", cfg.audio_cache_voice_map[accent]
+    elif provider == "bailian":  # the voice is part of the key: a new voice is new clips, the old ones age out under the cap
+        key_provider, voice = "bailian", cfg.bailian_voice_map[accent]
     else:
         key_provider, voice = provider, (say_voice_for(cfg, accent) if provider == "say" else "")
     ext, media_type = MEDIA[provider]
@@ -422,8 +456,12 @@ def synthesize(cfg: Settings, accent: str, text: str) -> Clip:
         try:
             if provider == "say":
                 _say(text, voice, tmp)
-            else:
+            elif provider == "youdao":
                 _youdao(cfg, text, accent, tmp)
+            elif provider == "bailian":
+                _bailian(cfg, text, accent, tmp)
+            else:  # pragma: no cover — provider_for() never returns anything else
+                raise AudioError("failed", f"no synthesis for provider {provider!r}")
             size = tmp.stat().st_size if tmp.is_file() else 0
             if size < MIN_CLIP_BYTES:
                 raise AudioError("failed", f"{provider} produced no audio ({size} bytes for a {len(text)}-char text)")
@@ -610,6 +648,160 @@ def _youdao(cfg: Settings, text: str, accent: str, out: Path) -> None:
         raise AudioError("failed", f"youdao answered {size} bytes")
 
 
+# ---------------------------------------------------------------------------------- bailian (阿里云百炼 TTS)
+#: test hook: the transport both 百炼 clients use (None = the real network); an ``httpx.MockTransport`` sees the synthesis POST with
+#: its headers and the anonymous OSS GET alike, so a test can check what each request carries
+BAILIAN_TRANSPORT: httpx.BaseTransport | None = None
+_key_mode_lock = threading.Lock()
+_key_mode_warned = False  # the group/other-readable warning of read_key(): once per process (config.py warns once more at startup)
+_bailian_pace_lock = threading.Lock()
+_bailian_last_post = 0.0  # time.monotonic() of the last synthesis POST this process sent (under _bailian_pace_lock)
+
+
+def read_key(cfg: Settings) -> str:
+    """The first line of ``WD_BAILIAN_API_KEY_FILE`` (``utf-8-sig``, stripped), read at call time — never cached on the module, never
+    in a log line. ``AudioError('failed', 'bailian: API key file unreadable')`` when the variable is unset, the file cannot be read or its
+    first line is not a printable ASCII token; the detail never carries the file's contents. A group/other-readable mode warns once
+    per process (chmod 600 it), like ``delivery/aliyun.read_secret``."""
+    global _key_mode_warned
+    path_text = (cfg.bailian_api_key_file or "").strip()
+    if not path_text:
+        raise AudioError("failed", "bailian: API key file unreadable (WD_BAILIAN_API_KEY_FILE is not set)")
+    path = Path(path_text).expanduser()
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        with path.open(encoding="utf-8-sig") as f:
+            key = f.readline().strip()
+    except OSError as e:
+        raise AudioError("failed", f"bailian: API key file unreadable ({e.__class__.__name__})") from e
+    if mode & 0o077:
+        with _key_mode_lock:
+            warn = not _key_mode_warned
+            _key_mode_warned = True
+        if warn:
+            log.warning("WD_BAILIAN_API_KEY_FILE is readable by group/others (mode %o); chmod 600 it", mode, extra={"event": "audio_key_file_mode"})
+    if not key or not key.isascii() or not key.isprintable():
+        raise AudioError("failed", "bailian: API key file unreadable (no printable ASCII key on its first line)")
+    return key
+
+
+def _bailian_client(cfg: Settings, key: str) -> httpx.Client:  # noqa: ARG001 — the signature is what tests may patch
+    """The synthesis client: the bearer key, JSON, a neutral User-Agent (no operator e-mail or URL), no proxy from the environment."""
+    return httpx.Client(
+        timeout=BAILIAN_TIMEOUT_S,
+        follow_redirects=False,
+        trust_env=False,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": f"word-Dance/{__version__}"},
+        transport=BAILIAN_TRANSPORT,
+    )
+
+
+def _bailian_download_client(cfg: Settings) -> httpx.Client:  # noqa: ARG001
+    """The OSS download client: SEPARATE and anonymous — the clip URL is pre-signed, the API key must never travel to OSS."""
+    return httpx.Client(
+        timeout=BAILIAN_DOWNLOAD_TIMEOUT_S,
+        follow_redirects=False,
+        trust_env=False,
+        headers={"Accept": "audio/mpeg, audio/*;q=0.9, application/octet-stream;q=0.8", "User-Agent": f"word-Dance/{__version__}"},
+        transport=BAILIAN_TRANSPORT,
+    )
+
+
+def _pace_bailian() -> None:
+    """Sleeps so that two consecutive synthesis POSTs of this process are ≥ :data:`BAILIAN_PACE_S` apart — across the two
+    synthesis slots and ``wd audio-prewarm``'s two workers alike — which keeps the process under 150 RPM against the documented
+    :data:`BAILIAN_RPM`. The lock is held while sleeping on purpose: the next caller queues behind this one."""
+    global _bailian_last_post
+    with _bailian_pace_lock:
+        wait = _bailian_last_post + BAILIAN_PACE_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _bailian_last_post = time.monotonic()
+
+
+def _scrub(message: str, key: str) -> str:
+    """The provider's ``message`` fit for an error detail: the key (should it ever be echoed) replaced, cut to :data:`BAILIAN_MESSAGE_CHARS`."""
+    return " ".join(message.replace(key, "***").split())[:BAILIAN_MESSAGE_CHARS]
+
+
+def _bailian(cfg: Settings, text: str, accent: str, out: Path) -> None:
+    """One clip through 百炼: ``POST`` the synthesis request, then ``GET`` the pre-signed OSS URL of the answer into ``out``.
+
+    429 and 5xx (the documented ``Throttling*`` / ``InternalError`` / ``ServiceUnavailable`` answers) are ``AudioError('busy')`` — the
+    route answers 503 ``{reason:"busy"}`` and the client retries later; 400 / 401 / 403 / 404 (``InvalidParameter`` — a voice the model
+    does not know —, ``InvalidApiKey``, ``Arrearage`` / ``AccessDenied``, ``ModelNotFound``), an answer without ``output.audio.url`` and a
+    download that is not audio are ``AudioError('failed')`` whose detail carries the provider's ``code`` and the first
+    :data:`BAILIAN_MESSAGE_CHARS` of its ``message`` — never the key, never the signed URL; a transport failure is
+    ``failed`` with the exception's class name. The text is logged at DEBUG only, its length at INFO.
+    """
+    key = read_key(cfg)
+    voice = cfg.bailian_voice_map[accent]
+    model = cfg.bailian_tts_model
+    inputs: dict[str, object] = {"text": text, "voice": voice, "format": BAILIAN_FORMAT, "sample_rate": BAILIAN_SAMPLE_RATE}
+    if model.startswith("qwen-audio"):
+        inputs["language_hints"] = ["en"]  # the Qwen-Audio-TTS models take the hint; CosyVoice's English voices need none
+    payload = {"model": model, "input": inputs}
+    log.debug("bailian synthesis of %r (%s, %s)", text, accent, voice)
+    _pace_bailian()
+    try:
+        with _bailian_client(cfg, key) as client:
+            r = client.post(cfg.bailian_tts_url, json=payload)
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        raise AudioError("failed", f"bailian: {e.__class__.__name__}") from e
+    try:
+        data = r.json()
+    except ValueError:
+        data = None
+    body = data if isinstance(data, dict) else {}
+    code = str(body.get("code") or "")
+    message = _scrub(str(body.get("message") or ""), key)
+    if r.status_code == 429 or r.status_code >= 500:
+        raise AudioError("busy", f"bailian answered {r.status_code}{' ' + code if code else ''}: {message or 'retry later'}")
+    if r.status_code != 200 or code:
+        raise AudioError("failed", f"bailian {code or f'HTTP {r.status_code}'}: {message or 'no message'}")
+    output = body.get("output") if isinstance(body.get("output"), dict) else {}
+    audio_part = output.get("audio") if isinstance(output.get("audio"), dict) else {}
+    url = audio_part.get("url")
+    if not isinstance(url, str) or not url:
+        raise AudioError("failed", "bailian: answer without output.audio.url")
+    if url.startswith("http://"):  # the documented example is plain http; OSS serves https on the same path — never download audio in clear
+        url = "https://" + url[len("http://") :]
+    if not url.startswith("https://"):
+        raise AudioError("failed", "bailian: output.audio.url is not an https URL")
+    host = urlsplit(url).hostname or ""
+    if not (host == BAILIAN_DOWNLOAD_HOST_SUFFIX.lstrip(".") or host.endswith(BAILIAN_DOWNLOAD_HOST_SUFFIX)):
+        raise AudioError("failed", "bailian: output.audio.url is not on aliyuncs.com")  # the anonymous download client fetches nothing the provider's answer could point elsewhere
+    size = 0
+    try:
+        with _bailian_download_client(cfg) as client, client.stream("GET", url) as dl:
+            ctype = dl.headers.get("content-type", "").lower()
+            if dl.status_code != 200 or not (ctype.startswith("audio/") or ctype.startswith("application/octet-stream")):
+                raise AudioError("failed", f"bailian clip download answered {dl.status_code} {ctype.split(';')[0] or 'without content-type'}")
+            with out.open("wb") as fh:
+                for chunk in dl.iter_bytes():
+                    size += len(chunk)
+                    if size > BAILIAN_MAX_BYTES:
+                        raise AudioError("failed", f"bailian clip larger than {BAILIAN_MAX_BYTES} bytes")
+                    fh.write(chunk)
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        raise AudioError("failed", f"bailian: {e.__class__.__name__}") from e
+    if size < MIN_CLIP_BYTES:
+        raise AudioError("failed", f"bailian clip of {size} bytes")
+    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    log.info("bailian clip made: %d chars, %d bytes, %s %s, billed characters %s", len(text), size, accent, voice, usage.get("characters", "-"), extra={"event": "audio_bailian_clip"})
+
+
+def bailian_price_line(cfg: Settings, characters: int) -> str:
+    """The ``wd audio-prewarm`` estimate: the characters to send (an English letter, digit, space or punctuation mark counts 1) and,
+    for a model in :data:`BAILIAN_PRICE_CNY_PER_10K_CHARS`, ``characters / 10000 × price`` 元 — an estimate at the 北京 list price;
+    the console bill decides."""
+    price = BAILIAN_PRICE_CNY_PER_10K_CHARS.get(cfg.bailian_tts_model)
+    head = f"≈ {characters} characters to send to 百炼 (model {cfg.bailian_tts_model})"
+    if price is None:
+        return head + ": price per 10 000 characters unknown for this model — see the 百炼 model-pricing page"
+    return head + f": ≈ ¥{characters / 10000 * price:.2f} at ¥{price:g} per 10 000 characters (an estimate at the 北京 list price; the console bill decides)"
+
+
 # ------------------------------------------------------------------------------------------ prewarm (CLI)
 PREWARM_FROM_VERSION = 14  # words.learn_rank (0014) orders the work: what a 小学 learner meets first is made first
 PREWARM_ABORT_AFTER = 5  # consecutive failed attempts: the provider is down (no voice, say wedged …) — stop, do not log thousands of errors
@@ -709,7 +901,8 @@ class PrewarmReport:
 def prewarm(cfg: Settings, texts: list[str], accents: tuple[str, ...], *, limit: int = 0, progress: Callable[[PrewarmReport], None] | None = None) -> PrewarmReport:
     """Synthesises the missing clips of ``texts`` for each of ``accents`` (accent by accent, the texts in their order): with `say`
     through the usual :data:`SLOTS` of this process — two `say` processes at a time next to whatever the live service runs —, with
-    `youdao` one request at a time with :data:`YOUDAO_PAUSE_S` between two (an unofficial endpoint). A clip already cached is
+    `youdao` one request at a time with :data:`YOUDAO_PAUSE_S` between two (an unofficial endpoint), with `bailian` two workers whose
+    POSTs :func:`_pace_bailian` keeps :data:`BAILIAN_PACE_S` apart (under the documented RPM). A clip already cached is
     counted, not touched (its place in the pruning order is the learner's); ``limit`` bounds the clips to make, not the pairs.
     Stops after :data:`PREWARM_ABORT_AFTER` failures in a row (the provider went down) and on Ctrl-C, both reported, never raised;
     only a provider that cannot even locate the clips (no voice resolves, `off`) raises ``AudioError`` up front. ``progress`` runs
@@ -750,7 +943,7 @@ def prewarm(cfg: Settings, texts: list[str], accents: tuple[str, ...], *, limit:
         if progress and (report.done % PREWARM_PROGRESS_EVERY == 0 or report.done == report.todo):
             progress(report)
 
-    with ThreadPoolExecutor(max_workers=SLOTS if provider == "say" else 1, thread_name_prefix="audio-prewarm") as pool:
+    with ThreadPoolExecutor(max_workers=SLOTS if provider in ("say", "bailian") else 1, thread_name_prefix="audio-prewarm") as pool:
         futures = [pool.submit(one, job) for job in jobs]
         try:
             for i, future in enumerate(futures):
@@ -831,6 +1024,12 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
         for accent in ACCENTS:
             print(f"{accent} → {cfg.audio_cache_voice_map.get(accent, '?')} (WD_AUDIO_CACHE_VOICES)")
         return 0
+    if provider == "bailian":
+        print(f"provider: bailian (WD_AUDIO_PROVIDER=bailian, model {cfg.bailian_tts_model}, region {cfg.bailian_region}); cache: {cache_bytes(cfg) / MB:.1f} MB of {cfg.audio_cache_mb} MB")
+        for accent in ACCENTS:
+            print(f"{accent} → {cfg.bailian_voice_map.get(accent, '?')} (WD_BAILIAN_TTS_VOICES)")
+        print("no `say` voices to list: bailian synthesises in the cloud with the voices above (`wd audio-probe` makes one clip with them)")
+        return 0
     print(
         f"provider: {provider} (WD_AUDIO_PROVIDER={cfg.audio_provider}); WD_AUDIO_SAY_VOICE: {cfg.audio_say_voice or '(unset — the best installed preferred voice)'}; "
         f"cache: {cache_bytes(cfg) / MB:.1f} MB of {cfg.audio_cache_mb} MB"
@@ -890,7 +1089,7 @@ def cmd_audio_prewarm(args: argparse.Namespace) -> int:
         return 2
     provider = provider_for(cfg)
     if provider == "off":
-        print("wd audio-prewarm: WD_AUDIO_PROVIDER resolves to off — nothing can synthesise (say on a Mac, or youdao, in .env)", file=sys.stderr)
+        print("wd audio-prewarm: WD_AUDIO_PROVIDER resolves to off — nothing can synthesise (say on a Mac, bailian or youdao, in .env)", file=sys.stderr)
         return 2
     if provider == "cache":
         print("wd audio-prewarm: WD_AUDIO_PROVIDER=cache serves clips another host synthesised — `wd audio-texts > texts.txt` here, `wd audio-prewarm --texts texts.txt` on the host with say, then sync audio/ back (DEPLOY §9)", file=sys.stderr)
@@ -928,7 +1127,7 @@ def cmd_audio_prewarm(args: argparse.Namespace) -> int:
             conn.close()
     ensure_dirs(cfg)
     try:
-        voices = {accent: (say_voice_for(cfg, accent) if provider == "say" else provider) for accent in keep_accents}
+        voices = {accent: (say_voice_for(cfg, accent) if provider == "say" else cfg.bailian_voice_map[accent] if provider == "bailian" else provider) for accent in keep_accents}
     except AudioError as e:
         print(f"wd audio-prewarm: no voice — {e.detail}", file=sys.stderr)
         return 1
@@ -952,6 +1151,11 @@ def cmd_audio_prewarm(args: argparse.Namespace) -> int:
     cap = cfg.audio_cache_mb * MB
     after = cache_bytes(cfg) + todo * _clip_estimate(cfg)
     print(f"{len(paths)} clip(s) planned: {len(paths) - missing} cached, {missing} to synthesise" + (f", {todo} in this run (--limit {args.limit})" if args.limit else "") + f"; ≈ {after / MB:.0f} MB in the cache afterwards, cap WD_AUDIO_CACHE_MB={cfg.audio_cache_mb}")
+    if provider == "bailian":  # every clip of this run is one paid request: the characters it will bill, at the model's list price
+        jobs = [(accent, text) for accent in accents for text in chosen.texts if not locate(cfg, accent, text)[0].path.is_file()]
+        if args.limit:
+            jobs = jobs[: args.limit]
+        print(bailian_price_line(cfg, sum(len(text) for _accent, text in jobs)))
     if after > cap * 9 // 10:
         needed = -(-after * 10 // (9 * MB))  # the smallest cap the 90 % rule accepts
         print(f"wd audio-prewarm: the cache would hold ≈ {after / MB:.0f} MB, more than 90 % of WD_AUDIO_CACHE_MB={cfg.audio_cache_mb} — set it to at least {needed} (or narrow the set); otherwise the run would prune its own clips", file=sys.stderr)
@@ -1017,6 +1221,45 @@ def cmd_audio_texts(args: argparse.Namespace) -> int:
     return 0
 
 
+PROBE_DEFAULT_TEXT = "The cat sat on the mat."  # what `wd audio-probe` speaks when no TEXT is given
+
+
+def cmd_audio_probe(args: argparse.Namespace) -> int:
+    """``wd audio-probe [--accent en-US|en-GB] [TEXT]`` — synthesise ONE clip through the provider in force (any provider) and print the
+    provider, the voice, the bytes, the media type and the path: the day-0 check of a 百炼 key, workspace and voice, like `wd sms-probe`.
+    A clip already cached is served from the cache and says so (pass another TEXT to reach the provider). Exit 0 made, 1 on
+    ``AudioError`` (its kind and message — `busy` = 429 / 5xx, retry in a minute), 2 on a configuration error, a text the rule refuses
+    or a provider that resolves to `off`."""
+    _cli_logging()
+    try:
+        cfg = Settings.from_env()
+        ensure_dirs(cfg)  # the clip lands under audio/
+    except ConfigError as e:
+        print(f"wd audio-probe: configuration error: {e}", file=sys.stderr)
+        return 2
+    provider = provider_for(cfg)
+    if provider == "off":
+        print("wd audio-probe: WD_AUDIO_PROVIDER resolves to off — nothing can synthesise (say on a Mac, bailian or youdao, in .env)", file=sys.stderr)
+        return 2
+    accent = args.accent or "en-US"
+    spoken = normalize_text(args.text or PROBE_DEFAULT_TEXT)
+    if spoken is None:
+        print(f"wd audio-probe: the text rule refuses that text (1–{MAX_TEXT_CHARS} Latin letters, digits, spaces and the punctuation of an English sentence)", file=sys.stderr)
+        return 2
+    started = time.monotonic()
+    try:
+        clip, _provider, voice = locate(cfg, accent, spoken)
+        cached = clip.path.is_file()
+        clip = synthesize(cfg, accent, spoken)
+    except AudioError as e:
+        print(f"wd audio-probe: {provider} failed — {e.reason}: {e.detail or '-'}" + (" (429 / 5xx: the provider is throttling or down, usually over within a minute)" if e.reason == "busy" else ""), file=sys.stderr)
+        return 1
+    size = clip.path.stat().st_size
+    print(f"audio-probe: provider {provider}" + (f" (model {cfg.bailian_tts_model})" if provider == "bailian" else "") + f", {accent} → {voice or '(fixed)'}, {len(spoken)} chars → {size} bytes {clip.media_type} in {time.monotonic() - started:.2f} s")
+    print(f"  {clip.path}" + ("  (already cached — pass another TEXT to exercise the provider)" if cached else ""))
+    return 0
+
+
 def _non_negative(value: str) -> int:
     n = int(value)
     if n < 0:
@@ -1029,6 +1272,10 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("audio-voices", help="the pronunciation provider in force, the installed `say` voices of the preference lists (tier, resolution) and the voice each accent gets")
     p.set_defaults(func=cmd_audio_voices)
+    p = sub.add_parser("audio-probe", help="synthesise ONE clip through the configured provider and print provider, voice, bytes, media type and path — the day-0 check of a 百炼 key (exit 1 with the kind and message on failure)")
+    p.add_argument("--accent", choices=list(ACCENTS), default="en-US", metavar="ACCENT", help="en-US (default) or en-GB")
+    p.add_argument("text", nargs="?", default=None, metavar="TEXT", help=f"the text to speak (default: {PROBE_DEFAULT_TEXT!r})")
+    p.set_defaults(func=cmd_audio_probe)
     p = sub.add_parser("audio-prewarm", help="synthesise the clips of the study path — headwords with content or in a bank and their example sentences, in learning order (--stage adds a stage's headwords); anything else is made at the tap — so those taps never wait; safe next to the live service")
     p.add_argument("--accent", action="append", choices=list(ACCENTS), metavar="ACCENT", help="en-US or en-GB (repeatable); default: en-US plus every accent a learner chose")
     p.add_argument("--stage", action="append", choices=list(STAGE_ORDER), metavar="STAGE", help="also the headwords of every public valid word of this stage (repeatable; what the welcome screening and 词库 browsing can tap)")
@@ -1057,9 +1304,11 @@ __all__ = [
     "voice_key",
     "Voice",
     "accents_in_use",
+    "bailian_price_line",
     "cache_bytes",
     "choose_voice",
     "cmd_audio_prewarm",
+    "cmd_audio_probe",
     "cmd_audio_texts",
     "cmd_audio_voices",
     "expected_paths",
@@ -1072,6 +1321,7 @@ __all__ = [
     "provider_for",
     "prune",
     "purge_others",
+    "read_key",
     "register_cli",
     "reset_cache_accounting",
     "reset_voice_cache",
