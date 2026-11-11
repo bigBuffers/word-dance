@@ -9,6 +9,10 @@ Formats (payload shapes): ``generic`` ``{type, date, title, body, counts, words:
 (WP2's settings router) and answers ``{ok, http_status, error, reason}``: ``error`` is the English transport diagnostic
 kept for the admin job ledger, ``reason`` the closed set of API.md 17 (:data:`REASONS`, classified from the exception
 type by :func:`classify_error`) that the UI maps to zh copy.
+
+A 2xx is not yet a delivery: 企业微信, 飞书, Server酱 and Bark answer ``200`` with an error body (``errcode`` / ``code`` ≠ 0, Bark
+``code`` ≠ 200) when the key is wrong or the message is refused — :func:`provider_error` reads that body for the format, so the
+ledger, the batch status and the settings test say ``HTTP 200 but wecom errcode 93000: …`` instead of a false success.
 """
 
 from __future__ import annotations
@@ -221,13 +225,15 @@ def classify_error(exc: BaseException) -> str:
     return "connect_failed"
 
 
-def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOUT_S, client: httpx.Client | None = None) -> PostResult:
+def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOUT_S, client: httpx.Client | None = None, fmt: str = "generic") -> PostResult:
     """POST ``payload`` as JSON under the SSRF rules; returns :class:`PostResult` ``(http_status, error, reason)`` and
     never raises.
 
     ``error`` and ``reason`` are None on a 2xx response. An :class:`SsrfError` is reported with ``http_status None``
     and the ``rejected: …`` diagnostic, a transport failure as ``request failed: <Exception>: …``, a non-2xx answer as
-    ``HTTP <code>`` with ``reason`` ``http_error``; :func:`classify_error` names the other reasons.
+    ``HTTP <code>`` with ``reason`` ``http_error``; :func:`classify_error` names the other reasons. ``fmt`` names the payload
+    format so a 2xx whose body carries the provider's own error (:func:`provider_error`) is reported as ``HTTP <code> but …``
+    with ``reason`` ``http_error`` instead of a success.
     """
     try:
         host, pinned = pin(url)
@@ -250,8 +256,64 @@ def safe_post(url: str, payload: Mapping[str, Any], *, timeout_s: float = TIMEOU
         if own:
             c.close()
     if 200 <= response.status_code < 300:
+        problem = provider_error(fmt, response)
+        if problem is not None:
+            return PostResult(response.status_code, f"HTTP {response.status_code} but {problem}", "http_error")
         return PostResult(response.status_code, None, None)
     return PostResult(response.status_code, f"HTTP {response.status_code}", "http_error")
+
+
+PROVIDER_MESSAGE_MAX = 80
+
+
+def provider_error(fmt: str, response: httpx.Response) -> str | None:
+    """The provider's own refusal inside a 2xx answer, or None: 企业微信 ``{errcode, errmsg}`` (0 = ok), 飞书 ``{code, msg}`` (new) /
+    ``{StatusCode, StatusMessage}`` (legacy) (0 = ok), Server酱 Turbo / ³ ``{code, message}`` (0 = ok), Bark ``{code, message}``
+    (200 = ok). ``generic`` and any non-JSON or unexpected body pass — the operator's own endpoint owes nothing but a 2xx."""
+    if fmt == "generic":
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+
+    def code_of(*keys: str) -> tuple[str, int] | None:
+        for key in keys:
+            value = body.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return key, value
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                return key, int(value.strip())
+        return None
+
+    def text_of(*keys: str) -> str:
+        for key in keys:
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:PROVIDER_MESSAGE_MAX]
+        return ""
+
+    if fmt == "wecom":
+        found = code_of("errcode")
+        if found is not None and found[1] != 0:
+            return f"wecom errcode {found[1]}: {text_of('errmsg')}".rstrip(": ")
+    elif fmt == "feishu":
+        found = code_of("code", "StatusCode")
+        if found is not None and found[1] != 0:
+            return f"feishu {found[0]} {found[1]}: {text_of('msg', 'StatusMessage', 'message')}".rstrip(": ")
+    elif fmt == "serverchan":
+        found = code_of("code")
+        if found is not None and found[1] != 0:
+            return f"serverchan code {found[1]}: {text_of('message', 'info')}".rstrip(": ")
+    elif fmt == "bark":
+        found = code_of("code")
+        if found is not None and found[1] != 200:
+            return f"bark code {found[1]}: {text_of('message')}".rstrip(": ")
+    return None
 
 
 # ------------------------------------------------------------------------------------------ formats
@@ -329,7 +391,7 @@ def send_batch_webhook(conn: sqlite3.Connection, cfg: Any, batch_id: int, now: s
         return {"skipped": "channel_disabled"}
     fmt = str(s["webhook_format"] or "generic")
     payload = digest_payload(fmt, email_mod.build_digest(conn, cfg, batch))
-    status, error, _reason = safe_post(str(s["webhook_url"]), payload)  # the ledger keeps the diagnostic text only
+    status, error, _reason = safe_post(str(s["webhook_url"]), payload, fmt=fmt)  # the ledger keeps the diagnostic text only
     if error is None:
         _set_webhook_status(conn, batch_id, "sent")
         log.info("webhook sent", extra={"event": "webhook_sent", "user_id": int(batch["user_id"]), "status": status})
@@ -349,7 +411,7 @@ def send_test_webhook(settings_row: Mapping[str, Any]) -> dict[str, Any]:
     from datetime import datetime, timezone
 
     payload = build_payload(fmt, TEST_TITLE_ZH, TEST_BODY_ZH, url=None, date=datetime.now(timezone.utc).date().isoformat(), type_="test")
-    result = safe_post(url, payload)
+    result = safe_post(url, payload, fmt=fmt)
     return {"ok": result.error is None, "http_status": result.http_status, "error": result.error, "reason": result.reason}
 
 

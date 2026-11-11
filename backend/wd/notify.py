@@ -78,7 +78,7 @@ def notify_admins(conn: sqlite3.Connection, cfg: Settings, kind: str, title_zh: 
             payload = webhook_mod.build_payload(fmt, title_zh, body_zh, url=None, date=now_s[:10], type_=kind)
             client = WEBHOOK_CLIENT_FACTORY() if WEBHOOK_CLIENT_FACTORY is not None else None
             try:
-                status, error, _reason = webhook_mod.safe_post(url, payload, client=client)
+                status, error, _reason = webhook_mod.safe_post(url, payload, client=client, fmt=fmt)
             finally:
                 if client is not None:
                     client.close()
