@@ -17,13 +17,13 @@ const unauthorized = () => json(401, { error: { code: 'unauthorized', message: '
 const health = (over: Record<string, unknown>) => () =>
   json(200, { status: 'ok', version: '0.1.0', registration_mode: 'invite', needs_setup: false, sms_enabled: false, email_enabled: false, captcha: false, time: ISO, ...over });
 
-const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: '138****8000', needs_profile: true, age_band: null };
+const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: '138****8000', needs_profile: true, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: true, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
-const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 } });
+const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
 const word = (id: number, lemma: string): WordBrief => ({
   id, lemma, display: lemma, kind: 'word', phonetic: null, translation_short: `zh-${lemma}`, stages: ['xs'], stage_min: 1, cet6_star: false, frq: null, collins: null, oxford: null, difficulty: null,
   is_public: true, is_valid_english: true, my_state: null, content_state: 'ready', image_state: 'none',

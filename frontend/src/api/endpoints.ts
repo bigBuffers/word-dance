@@ -1,10 +1,11 @@
-// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–93; 76 `GET /media/audio`
+// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–111; 76 `GET /media/audio`
 // builds its URLs in audio/serverAudio.ts and has no wrapper). FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded
 // by `// #N METHOD /path` so coverage is checked mechanically by endpoints.test.ts (52 / 53 / 78 are URL builders for
 // `<img>`). DTOs come from ./types (API.md §9); request bodies and query shapes that API.md defines only in prose are
 // declared here. GET wrappers accept an optional `AbortSignal` as their last argument so `useApi` can cancel stale requests.
 import { api, requestText } from './client';
 import type {
+  AccountKind,
   AddResponse,
   AddResult,
   AdminHealth,
@@ -15,6 +16,9 @@ import type {
   AiProvider,
   BankResponse,
   CaptchaChallenge,
+  ChildLoginCode,
+  ChildrenResponse,
+  ChildResponse,
   CodeChannel,
   CodeLoginResponse,
   CodeSendResponse,
@@ -24,6 +28,7 @@ import type {
   DayStats,
   DemoResponse,
   DisputedIdentity,
+  GateResponse,
   Grade,
   GradeResponse,
   ImageMeta,
@@ -39,6 +44,7 @@ import type {
   ScreenVerdict,
   ScreenWord,
   ServerFlags,
+  SessionInfo,
   SessionSummary,
   Settings,
   Stage,
@@ -91,11 +97,13 @@ export interface AuthResponse {
   user: User;
   settings: Settings;
 }
+/** Endpoint 5. `session` (slice 1-B): the guardian who switched this device into a child account, and a guardian's own gate stamp. */
 export interface MeResponse {
   user: User;
   settings: Settings;
   server: ServerFlags;
   counters: Counters;
+  session: SessionInfo;
 }
 export interface AccountUpdateBody {
   display_name?: string | null;
@@ -107,10 +115,15 @@ export interface PasswordChangeBody {
   code?: string;
   new_password: string;
 }
-/** Endpoint 8 — the same one-of dispatch as endpoint 7. */
+/**
+ * Endpoint 8 — the same one-of dispatch as endpoint 7. `delete_children` (slice 1-B): a guardian with children gets 409
+ * `has_children` (`details.children: {id, display_name}[]`) until it is true — then a child with its own phone is set free
+ * and the others are deleted with the guardian.
+ */
 export interface AccountDeleteBody {
   password?: string;
   code?: string;
+  delete_children?: boolean;
 }
 /** Endpoint 79's challenge handed back with the digits the learner read (endpoints 80, 90). */
 export interface CaptchaToken {
@@ -167,10 +180,15 @@ export interface PhoneRebindBody {
   target_new: string;
   code_new: string;
 }
-/** Endpoint 89 — the first-time setup of a code-created account (`User.needs_profile`); `u14` is refused by the server. */
+/**
+ * Endpoint 89 — the first-time setup of a code-created account (`User.needs_profile`); `u14` is refused by the server.
+ * `account_kind` (slice 1-B, default `learner`): `guardian` requires `age_band: 'adult'` and — unless the account has a
+ * verified e-mail — a `password` (400 `validation_error` on `fields.age_band` / `fields.password`).
+ */
 export interface ProfileBody {
   display_name: string;
   age_band: Exclude<AgeBand, 'u14'>;
+  account_kind?: AccountKind;
   username?: string;
   password?: string;
 }
@@ -182,6 +200,63 @@ export interface ResetPasswordBody {
   identifier: string;
   code: string;
   new_password: string;
+}
+// ---- guardian and child accounts (slice 1-B, API.md §3.2, docs/AUTH_SIGNUP_DESIGN.md §5.2) ----
+/** Endpoint 95. `pin` is required (6 digits) while the guardian has no PIN and refused once one exists; `username` / `password` both or neither. */
+export interface ChildCreateBody {
+  display_name: string;
+  pin?: string;
+  username?: string;
+  password?: string;
+}
+/** Endpoint 96 — at least one key; a `password` needs a non-placeholder username (the current one or the one in this body). */
+export interface ChildUpdateBody {
+  display_name?: string;
+  username?: string;
+  password?: string;
+}
+/** Endpoint 100: the phone the child will own (E.164), the `bind_phone` code goes there. */
+export interface ChildPhoneCodeBody {
+  target: string;
+}
+/** Endpoint 101: the code of endpoint 100 + the child's new password → the child is set free (irreversible). */
+export interface ChildEmancipateBody {
+  target: string;
+  code: string;
+  password: string;
+}
+/** Endpoints 102 / 105 — exactly one of `pin` (6 digits) / `password` / `code` (a `reauth` code of endpoint 85 or 106). */
+export interface GateBody {
+  pin?: string;
+  password?: string;
+  code?: string;
+}
+/** Endpoint 103: the 6-digit guardian PIN (no repeats, no straight runs). */
+export interface PinBody {
+  pin: string;
+}
+/** Endpoint 106: where the `reauth` code for endpoint 105 goes — the guardian's phone or verified e-mail. */
+export interface SwitchCodeBody {
+  channel: CodeChannel;
+}
+/** Endpoint 107: the 8-digit one-time login code of endpoint 99. */
+export interface ChildLoginBody {
+  code: string;
+}
+/** Endpoint 108: the guardian's phone (E.164) — the claim code goes there. */
+export interface GuardianClaimCodeBody {
+  target: string;
+}
+/** Endpoint 109: the claim code + the claimant's age band (a child is `u14` or `14plus`). */
+export interface GuardianClaimBody {
+  target: string;
+  code: string;
+  age_band: Exclude<AgeBand, 'adult'>;
+}
+/** Endpoint 110: the legacy profile-prompt declaration — `guardian` requires `adult`. */
+export interface DeclareBody {
+  account_kind: AccountKind;
+  age_band: Exclude<AgeBand, 'u14'>;
 }
 export type ExportFormat = 'csv' | 'json';
 export interface OnboardingBody {
@@ -520,6 +595,48 @@ export const saveProfile = (body: ProfileBody) => api.post<{ user: User }>('/api
 export const forgotPassword = (body: ForgotPasswordBody) => api.post<CodeSendResponse>('/api/auth/password/forgot', body);
 // #91 POST /api/auth/password/reset
 export const resetPassword = (body: ResetPasswordBody) => api.post<void>('/api/auth/password/reset', body);
+
+// ---------------------------------------------------------------------------------------------------
+// §3.2 Guardian and child accounts (slice 1-B, docs/AUTH_SIGNUP_DESIGN.md §5.1 / §5.2) — `G` = a guardian in its own
+// session, `G+gate` = with the 10-minute guardian-gate stamp of endpoint 102 (403 `guardian_gate_required` otherwise)
+// ---------------------------------------------------------------------------------------------------
+
+// #94 GET /api/guardian/children
+export const getChildren = (signal?: AbortSignal) => api.get<ChildrenResponse>('/api/guardian/children', undefined, signal);
+// #95 POST /api/guardian/children
+export const createChild = (body: ChildCreateBody) => api.post<ChildResponse>('/api/guardian/children', body);
+// #96 PATCH /api/guardian/children/{id}
+export const updateChild = (childId: number, body: ChildUpdateBody) => api.patch<ChildResponse>(`/api/guardian/children/${seg(childId)}`, body);
+// #97 DELETE /api/guardian/children/{id}
+export const deleteChild = (childId: number) => api.delete<void>(`/api/guardian/children/${seg(childId)}`);
+// #98 POST /api/guardian/children/{id}/sessions/revoke
+export const revokeChildSessions = (childId: number) => api.post<void>(`/api/guardian/children/${seg(childId)}/sessions/revoke`);
+// #99 POST /api/guardian/children/{id}/login-code
+export const issueChildLoginCode = (childId: number) => api.post<ChildLoginCode>(`/api/guardian/children/${seg(childId)}/login-code`);
+// #100 POST /api/guardian/children/{id}/code
+export const requestChildPhoneCode = (childId: number, body: ChildPhoneCodeBody) => api.post<CodeSendResponse>(`/api/guardian/children/${seg(childId)}/code`, body);
+// #101 POST /api/guardian/children/{id}/emancipate
+export const emancipateChild = (childId: number, body: ChildEmancipateBody) => api.post<ChildResponse>(`/api/guardian/children/${seg(childId)}/emancipate`, body);
+// #102 POST /api/guardian/gate
+export const passGate = (body: GateBody) => api.post<GateResponse>('/api/guardian/gate', body);
+// #103 PUT /api/guardian/pin
+export const setGuardianPin = (body: PinBody) => api.put<void>('/api/guardian/pin', body);
+// #104 POST /api/auth/switch/{child_id} — the child's AuthResponse + cookie (this device's guardian session is replaced)
+export const switchToChild = (childId: number) => api.post<AuthResponse>(`/api/auth/switch/${seg(childId)}`);
+// #105 POST /api/auth/switch/back — the guardian's AuthResponse + cookie (the guardian gate passed on the way)
+export const switchBack = (body: GateBody) => api.post<AuthResponse>('/api/auth/switch/back', body);
+// #106 POST /api/auth/switch/code
+export const requestSwitchCode = (body: SwitchCodeBody) => api.post<CodeSendResponse>('/api/auth/switch/code', body);
+// #107 POST /api/auth/child-login
+export const childLogin = (body: ChildLoginBody) => api.post<AuthResponse>('/api/auth/child-login', body);
+// #108 POST /api/account/guardian/code
+export const requestGuardianClaimCode = (body: GuardianClaimCodeBody) => api.post<CodeSendResponse>('/api/account/guardian/code', body);
+// #109 POST /api/account/guardian
+export const claimGuardian = (body: GuardianClaimBody) => api.post<{ user: User }>('/api/account/guardian', body);
+// #110 POST /api/account/declare
+export const declareAccount = (body: DeclareBody) => api.post<{ user: User }>('/api/account/declare', body);
+// #111 POST /api/account/declare/skip
+export const skipDeclare = () => api.post<void>('/api/account/declare/skip');
 
 // ---------------------------------------------------------------------------------------------------
 // §4 Settings

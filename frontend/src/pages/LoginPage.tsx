@@ -6,6 +6,8 @@
 // register link (hidden when registration is closed unless `needs_setup`), `?next` propagation. New: forgot password → /forgot,
 // the legal links, the password-reset notice after /forgot (`?reset=1`), and the read-only demo (D9, `zh.auth.demoTitle`) below the form —
 // `GET /api/demo` through `useApi`, hidden on any error or an empty list so a server without the endpoint shows nothing.
+// Slice 1-B: under the form the link `zh.auth.haveChildCode` → /child-login (a child's device signs in with the guardian's
+// 8-digit code, API.md 107), hidden while `needs_setup`.
 // A successful sign-in sets the session in AuthContext and <RequireGuest/> redirects to `?next=` (or /today).
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
@@ -176,6 +178,11 @@ export default function LoginPage() {
       {!needsSetup && registrationVisible && (
         <p className="auth__hint muted">
           {zh.auth.noAccount} <Link to={registerTo}>{zh.auth.register}</Link>
+        </p>
+      )}
+      {!needsSetup && (
+        <p className="auth__hint muted">
+          <Link to={routePaths.childLogin}>{zh.auth.haveChildCode}</Link>
         </p>
       )}
       <LoginDemo />

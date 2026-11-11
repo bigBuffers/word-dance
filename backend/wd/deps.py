@@ -2,9 +2,16 @@
 
 * :func:`get_db` — one connection per request (closed afterwards).
 * :func:`current_user` — the session cookie ``wd_session`` → ``sessions`` row (``token_hash = sha256(cookie)``),
-  401 ``unauthorized`` / 403 ``account_disabled``; slides the expiry at most once per day; on a non-GET request
-  also counts DESIGN §10's per-user mutation throttle (``security.throttle_mutation``, 300/min → 429 ``rate_limited``).
-* :func:`require_onboarded` (409 ``onboarding_required``), :func:`require_admin` (403 ``forbidden``).
+  401 ``unauthorized`` / 403 ``account_disabled``; slides the expiry at most once per day and never SHORTENS it
+  (``expires_at = max(current, now + WD_SESSION_DAYS)`` — the 90-day child-device session of API.md 107 keeps its horizon, slice 1-B;
+  the middleware re-sends the cookie with the seconds left, ``request.state.reissue_session_max_age_s``); on a non-GET request
+  also counts DESIGN §10's per-user mutation throttle (``security.throttle_mutation``, 300/min → 429 ``rate_limited``). The user dict
+  carries the session's ``actor_user_id`` (``session_actor_user_id``: the guardian who switched this device into a child account,
+  API.md 104) and its 家长门 stamp (``session_gate_at``, API.md 102 / 105) next to ``session_token_hash``.
+* :func:`require_onboarded` (409 ``onboarding_required``), :func:`require_admin` (403 ``forbidden``); slice 1-B (API.md §1):
+  :func:`require_not_child` (403 ``guardian_required`` for a child account on the restriction list), :func:`require_guardian`
+  (the ``G`` column: a guardian in its own session, else 403 ``forbidden``) and :func:`require_gate` (``G+gate``: the session's
+  家长门 stamp younger than 10 minutes, else 403 ``guardian_gate_required``).
 * :func:`csrf_guard` — API.md §1: every non-GET ``/api/*`` request carries ``X-WD-Request: 1`` and, when an
   ``Origin`` header is present, it equals the request's own Host-derived origin or the origin of
   ``WD_PUBLIC_URL`` (plus ``http://localhost:5173`` under ``WD_DEV=1``). The same check runs globally in
@@ -25,7 +32,7 @@ from typing import Any, Iterator, Mapping
 from fastapi import Depends, Request
 
 from . import db
-from .clock import Clock, to_iso
+from .clock import Clock, parse_iso, to_iso
 from .config import Settings
 from .errors import ApiError
 
@@ -53,6 +60,8 @@ USER_COLUMNS = (
     "guardian_user_id",
     "age_band",
     "age_declared_at",
+    "guardian_consent_at",  # 1-B
+    "profile_prompted_at",  # 0019 (1-B): the legacy prompt's snooze — User.needs_profile_prompt
 )
 
 
@@ -155,7 +164,8 @@ def current_user(request: Request, conn: sqlite3.Connection = Depends(get_db)) -
     now_dt = clock.now_utc()
     now = to_iso(now_dt)
     row = conn.execute(
-        "SELECT u.*, s.expires_at AS session_expires_at, s.last_seen_at AS session_last_seen_at "
+        "SELECT u.*, s.expires_at AS session_expires_at, s.last_seen_at AS session_last_seen_at, "
+        "s.actor_user_id AS session_actor_user_id, s.guardian_gate_at AS session_gate_at "
         "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         (token_hash,),
     ).fetchone()
@@ -168,16 +178,19 @@ def current_user(request: Request, conn: sqlite3.Connection = Depends(get_db)) -
     if not int(row["is_active"]):
         raise ApiError("account_disabled")
     if str(row["session_last_seen_at"]) < to_iso(now_dt - timedelta(days=1)):  # sliding expiry, once per day
+        # never shortened: a 90-day child-device session (API.md 107) keeps its horizon until the slide would pass it; a 30-day
+        # session slides exactly as before
+        expires = max(parse_iso(str(row["session_expires_at"])), now_dt + timedelta(days=cfg.session_days))
         with db.maybe_tx(conn):
-            conn.execute(
-                "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
-                (now, to_iso(now_dt + timedelta(days=cfg.session_days)), token_hash),
-            )
+            conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?", (now, to_iso(expires), token_hash))
         # the browser drops the cookie Max-Age seconds after the Set-Cookie it last saw, whatever the row says: have the
-        # middleware re-send it with a fresh Max-Age (main.WdMiddleware reads scope["state"], the dict behind request.state)
+        # middleware re-send it with the seconds left on the row (main.WdMiddleware reads scope["state"], the dict behind request.state)
         request.state.reissue_session_token = token
+        request.state.reissue_session_max_age_s = max(1, int((expires - now_dt).total_seconds()))
     user = {k: row[k] for k in USER_COLUMNS}
     user["session_token_hash"] = token_hash
+    user["session_actor_user_id"] = row["session_actor_user_id"]
+    user["session_gate_at"] = row["session_gate_at"]
     request.state.user_id = user["id"]
     if request.method.upper() not in SAFE_METHODS:  # DESIGN §10 "mutations 300/min per user" — one place for every authenticated route
         from . import security  # security imports this module (SESSION_COOKIE, hash_token), so resolve the cycle at call time
@@ -195,6 +208,32 @@ def require_onboarded(user: dict[str, Any] = Depends(current_user)) -> dict[str,
 def require_admin(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if user["role"] != "admin":
         raise ApiError("forbidden")
+    return user
+
+
+def require_not_child(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """The child restriction list (API.md §1, slice 1-B): a child account (``guardian_user_id`` set) gets 403 ``guardian_required`` on the
+    account / identity endpoints whatever the session type — its guardian does these things in 「我的孩子」."""
+    if user.get("guardian_user_id") is not None:
+        raise ApiError("guardian_required")
+    return user
+
+
+def require_guardian(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """The ``G`` auth column (API.md §1): an account with ``account_kind='guardian'`` acting in its OWN session (``actor_user_id`` NULL) —
+    a switched child session and every non-guardian get 403 ``forbidden``."""
+    if user.get("account_kind") != "guardian" or user.get("session_actor_user_id") is not None:
+        raise ApiError("forbidden")
+    return user
+
+
+def require_gate(request: Request, user: dict[str, Any] = Depends(require_guardian)) -> dict[str, Any]:
+    """``G+gate``: the session's 家长门 stamp (``sessions.guardian_gate_at``, endpoints 102 / 105) not older than 10 minutes, else 403
+    ``guardian_gate_required`` (the SPA opens the gate dialog and retries)."""
+    from . import family  # family imports security, which imports this module: resolve the cycle at call time
+
+    if family.gate_until(user, request.app.state.clock.now_utc()) is None:
+        raise ApiError("guardian_gate_required")
     return user
 
 

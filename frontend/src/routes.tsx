@@ -2,6 +2,8 @@
 // splitting); the guards come from auth/AuthContext. `RequireOnboarded` wraps ONLY `/`, `/today`,
 // `/study`, `/history` and `/history/:batchId`; vocab / bank / screen / word detail / settings are
 // browsable before onboarding (DESIGN §6.2). `<AppLayout/>` (components/layout, WP7) is the shell of every authenticated page.
+// Slice 1-B: `/children` (the guardian's children page, under the shell, no onboarding guard — the page itself sends non-guardians to
+// /settings) and the guest page `/child-login` (a child's device signs in with the 8-digit code of endpoint 99 → 107).
 import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { RequireAdmin, RequireAuth, RequireGuest, RequireNotOnboarded, RequireOnboarded } from '@/auth/AuthContext';
@@ -24,6 +26,8 @@ const SuggestionsPage = lazy(() => import('@/pages/SuggestionsPage'));
 const HistoryPage = lazy(() => import('@/pages/HistoryPage'));
 const BatchPage = lazy(() => import('@/pages/BatchPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+const ChildrenPage = lazy(() => import('@/pages/ChildrenPage'));
+const ChildLoginPage = lazy(() => import('@/pages/ChildLoginPage'));
 const AdminPage = lazy(() => import('@/pages/AdminPage'));
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 
@@ -32,6 +36,7 @@ export const routePaths = {
   login: '/login',
   register: '/register',
   forgot: '/forgot',
+  childLogin: '/child-login',
   welcome: '/welcome',
   home: '/',
   today: '/today',
@@ -48,6 +53,7 @@ export const routePaths = {
   history: '/history',
   batch: (batchId: number) => `/history/${batchId}`,
   settings: '/settings',
+  children: '/children',
   admin: '/admin',
 } as const;
 
@@ -77,6 +83,7 @@ export function AppRoutes() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/forgot" element={<ForgotPasswordPage />} />
+          <Route path="/child-login" element={<ChildLoginPage />} />
         </Route>
 
         <Route element={<RequireAuth />}>
@@ -101,6 +108,7 @@ export function AppRoutes() {
             <Route path="/bank/add" element={<AddWordsPage />} />
             <Route path="/bank/suggestions" element={<SuggestionsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/children" element={<ChildrenPage />} />
 
             <Route element={<RequireAdmin />}>
               <Route path="/admin" element={<AdminPage />} />

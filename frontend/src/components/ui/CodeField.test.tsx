@@ -1,6 +1,7 @@
 // CodeField (FRONTEND §4): the send button turns into the 60-s countdown only once `onSend` resolved and offers the resend (`zh.auth.resend`) after it;
 // a rejected send leaves the button usable — except a 429 `rate_limited`, which counts the server's `retry_after_s` down (the
-// send already counted against the per-target window); `canSend=false` blocks the send; the input keeps six digits only.
+// send already counted against the per-target window); `canSend=false` blocks the send; the input keeps six digits only — or
+// `length` digits (eight for the child login code of endpoint 107, slice 1-B).
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -109,5 +110,21 @@ describe('CodeField', () => {
     expect(input().value).toBe('123456');
     expect(input().getAttribute('autocomplete')).toBe('one-time-code');
     expect(input().getAttribute('inputmode')).toBe('numeric');
+  });
+});
+
+describe('CodeField length', () => {
+  it('accepts `length` digits (8 for the child login code) and cuts the rest', () => {
+    function Eight() {
+      const [code, setCode] = useState('');
+      return <CodeField value={code} onChange={setCode} length={8} />;
+    }
+    render(<Eight />);
+    const field = screen.getByLabelText(new RegExp(`^${zh.auth.code}`)) as HTMLInputElement;
+    expect(field.maxLength).toBe(8);
+    expect(field.getAttribute('pattern')).toBe('[0-9]{8}');
+    fireEvent.change(field, { target: { value: '1234-5678-90' } });
+    expect(field.value).toBe('12345678');
+    expect(screen.queryByRole('button')).toBeNull(); // no onSend: no send button
   });
 });

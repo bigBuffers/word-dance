@@ -8,7 +8,9 @@
   identity, else the verified e-mail), IP throttle 20/10 min counting **failures only** (``security.throttle_check`` before the
   password, ``throttle_hit`` on the failure path), persistent lockout per identifier **and** client IP (423), constant-time
   verify, ``account_disabled`` only after a correct password, a brand-new session every time (no fixation). Admins sign in here only.
-* ``POST /api/auth/logout`` (204) and ``GET /api/auth/me`` (user, settings, server flags, badge counters).
+* ``POST /api/auth/logout`` (204) and ``GET /api/auth/me`` (user, settings, server flags, badge counters, and — slice 1-B — the
+  ``session`` block: the guardian behind a switched child session, ``sessions.actor_user_id`` of API.md 104, and a guardian's own
+  家长门 stamp as ``gate_until``, API.md 102 / 105). Every ``User`` DTO here passes ``now`` so ``needs_profile_prompt`` is computed.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from .. import __version__, audio, db, security
+from .. import __version__, audio, db, family, security
 from ..clock import to_iso
 from ..config import Settings
 from ..deps import client_ip, current_user, get_db
@@ -45,11 +47,26 @@ def _issue_session(request: Request, response: Response, conn: sqlite3.Connectio
     security.set_session_cookie(response, token, cfg, secure=security.cookie_secure(request, cfg))
 
 
-def _auth_payload(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
+def _auth_payload(conn: sqlite3.Connection, user_id: int, *, now) -> dict[str, Any]:
+    """API.md §9 ``AuthResponse`` for ``user_id`` (``needs_profile_prompt`` computed against ``now``)."""
     user = security.load_user(conn, user_id)
     if user is None:  # pragma: no cover - the row was just written/read
         raise ApiError("internal_error")
-    return {"user": security.user_dto_for(conn, user), "settings": security.settings_dto(conn, user_id)}
+    return {"user": security.user_dto_for(conn, user, now=now), "settings": security.settings_dto(conn, user_id)}
+
+
+def session_info(conn: sqlite3.Connection, user: dict[str, Any], now) -> dict[str, Any]:
+    """API.md §9 ``SessionInfo`` (slice 1-B) for the user dict of ``deps.current_user``: ``guardian`` = ``{id, display_name}`` of the
+    guardian who switched this device into the child's account (``sessions.actor_user_id``, endpoint 104 — the SPA shows 「切回家长」),
+    else None; ``gate_until`` = the session's 家长门 stamp + 10 minutes while the caller is a guardian in its own session and the stamp
+    is still valid (``family.gate_until``), else None."""
+    guardian = None
+    actor = user.get("session_actor_user_id")
+    if actor is not None:
+        row = security.load_user(conn, int(actor))
+        if row is not None:  # a guardian row that vanished leaves the device a plain child session
+            guardian = {"id": int(row["id"]), "display_name": row["display_name"] or row["username"]}
+    return {"guardian": guardian, "gate_until": family.gate_until(user, now)}
 
 
 def resolve_identifier(conn: sqlite3.Connection, identifier: str) -> dict[str, Any] | None:
@@ -147,7 +164,7 @@ def register(body: RegisterRequest, request: Request, response: Response, conn: 
             raise ApiError("email_taken" if "email" in str(e).lower() else "username_taken") from e
         _issue_session(request, response, conn, user_id, now)
     log.info("user registered", extra={"event": "register", "user_id": user_id, "role": role, "bootstrap": bootstrap})
-    return _auth_payload(conn, user_id)
+    return _auth_payload(conn, user_id, now=now)
 
 
 @router.post("/api/auth/login", response_model=AuthResponse)
@@ -176,7 +193,7 @@ def login(body: LoginRequest, request: Request, response: Response, conn: sqlite
         conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (to_iso(now), user["id"]))
         _issue_session(request, response, conn, int(user["id"]), now)
     log.info("login", extra={"event": "login", "user_id": user["id"]})
-    return _auth_payload(conn, int(user["id"]))
+    return _auth_payload(conn, int(user["id"]), now=now)
 
 
 @router.post("/api/auth/logout", status_code=204)
@@ -191,9 +208,11 @@ def logout(request: Request, user: dict[str, Any] = Depends(current_user), conn:
 @router.get("/api/auth/me", response_model=MeResponse)
 def me(request: Request, user: dict[str, Any] = Depends(current_user), conn: sqlite3.Connection = Depends(get_db)):
     cfg: Settings = request.app.state.settings
+    now = request.app.state.clock.now_utc()
     return {
-        "user": security.user_dto_for(conn, user),
+        "user": security.user_dto_for(conn, user, now=now),
         "settings": security.settings_dto(conn, int(user["id"])),
         "server": server_flags(conn, cfg, sms_sender=getattr(request.app.state, "sms", None)),
-        "counters": counters(conn, int(user["id"]), to_iso(request.app.state.clock.now_utc())),
+        "counters": counters(conn, int(user["id"]), to_iso(now)),
+        "session": session_info(conn, user, now),
     }

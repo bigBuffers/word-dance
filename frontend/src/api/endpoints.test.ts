@@ -8,9 +8,9 @@ describe('endpoints.ts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('declares a numbered wrapper for every catalogue entry 1–93 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders)', () => {
+  it('declares a numbered wrapper for every catalogue entry 1–111 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders)', () => {
     const numbers = [...source.matchAll(/^\/\/ #(\d+) (GET|POST|PUT|PATCH|DELETE) (\/\S+)/gm)].map((m) => Number(m[1]));
-    const expected = Array.from({ length: 93 }, (_, i) => i + 1).filter((n) => n !== 76);
+    const expected = Array.from({ length: 111 }, (_, i) => i + 1).filter((n) => n !== 76);
     expect([...numbers].sort((a, b) => a - b)).toEqual(expected);
     expect(new Set(numbers).size).toBe(numbers.length);
   });
@@ -44,6 +44,26 @@ describe('endpoints.ts', () => {
     await endpoints.forgotPassword({ identifier: 'alice' });
     await endpoints.adminDisputedIdentities(2);
     await endpoints.adminRestoreIdentity(9);
+    // guardian and child accounts (slice 1-B, API.md §3.2)
+    await endpoints.getChildren();
+    await endpoints.createChild({ display_name: 'Tao', pin: '274913' });
+    await endpoints.updateChild(4, { display_name: 'Tao Tao' });
+    await endpoints.deleteChild(4);
+    await endpoints.revokeChildSessions(4);
+    await endpoints.issueChildLoginCode(4);
+    await endpoints.requestChildPhoneCode(4, { target: '+8613900139000' });
+    await endpoints.emancipateChild(4, { target: '+8613900139000', code: '123456', password: 'Str0ng-Passphrase!' });
+    await endpoints.passGate({ pin: '274913' });
+    await endpoints.setGuardianPin({ pin: '274913' });
+    await endpoints.switchToChild(4);
+    await endpoints.switchBack({ code: '123456' });
+    await endpoints.requestSwitchCode({ channel: 'phone' });
+    await endpoints.childLogin({ code: '12345678' });
+    await endpoints.requestGuardianClaimCode({ target: '+8613800138000' });
+    await endpoints.claimGuardian({ target: '+8613800138000', code: '123456', age_band: 'u14' });
+    await endpoints.declareAccount({ account_kind: 'guardian', age_band: 'adult' });
+    await endpoints.skipDeclare();
+    await endpoints.deleteAccount({ code: '123456', delete_children: true });
 
     const probeBodies = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/admin/ai/probe')).map(([, init]) => init?.body);
     expect(probeBodies).toEqual([JSON.stringify({ provider: 'claude' }), JSON.stringify({ provider: 'fallback' })]);
@@ -74,10 +94,32 @@ describe('endpoints.ts', () => {
       'POST /api/auth/password/forgot',
       'GET /api/admin/identities/disputed?page=2',
       'POST /api/admin/identities/9/restore',
+      'GET /api/guardian/children',
+      'POST /api/guardian/children',
+      'PATCH /api/guardian/children/4',
+      'DELETE /api/guardian/children/4',
+      'POST /api/guardian/children/4/sessions/revoke',
+      'POST /api/guardian/children/4/login-code',
+      'POST /api/guardian/children/4/code',
+      'POST /api/guardian/children/4/emancipate',
+      'POST /api/guardian/gate',
+      'PUT /api/guardian/pin',
+      'POST /api/auth/switch/4',
+      'POST /api/auth/switch/back',
+      'POST /api/auth/switch/code',
+      'POST /api/auth/child-login',
+      'POST /api/account/guardian/code',
+      'POST /api/account/guardian',
+      'POST /api/account/declare',
+      'POST /api/account/declare/skip',
+      'DELETE /api/account',
     ]);
     expect(fetchMock.mock.calls[13]?.[1]?.body).toBe(JSON.stringify({ paused: true }));
     expect(fetchMock.mock.calls[11]?.[1]?.body).toBe(JSON.stringify({ password: 'pw' }));
     expect(fetchMock.mock.calls[20]?.[1]?.body).toBe(JSON.stringify({ code: '123456' }));
+    expect(fetchMock.mock.calls[35]?.[1]?.body).toBeUndefined(); // #104 has no body
+    expect(fetchMock.mock.calls[36]?.[1]?.body).toBe(JSON.stringify({ code: '123456' })); // #105 carries the gate factor
+    expect(fetchMock.mock.calls[43]?.[1]?.body).toBe(JSON.stringify({ code: '123456', delete_children: true })); // #8 with delete_children
   });
 
   it('builds media and export URLs', () => {

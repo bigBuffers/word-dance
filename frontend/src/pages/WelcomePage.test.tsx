@@ -3,11 +3,13 @@
 // known toast / progress line use the shared screening copy. Step 1 (PLAN §6 S4): five roles whose presets keep
 // the main stage inside the target stages, and the K-12 default that mirrors the server before any pick. Step 0
 // (API.md 89): nickname + age band → the profile; a 409 `invalid_transition` (saved in another tab) refreshes the
-// session and moves on; a 400 `validation_error` shows the server's field message.
+// session and moves on; a 400 `validation_error` shows the server's field message; while the server has SMS off a note under
+// the declarations says a guardian account needs it. Finish (endpoint 20) lands a learner on /today and a guardian on /children.
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
+import * as endpoints from '@/api/endpoints';
 import { ToastProvider } from '@/components/ui/Toast';
 import { STAGE_ORDER } from '@/components/word/StageChips';
 import { TAP_LOCK_MS } from '@/hooks/useTapLock';
@@ -37,7 +39,7 @@ const h = vi.hoisted(() => {
     },
     phonetic: null,
   });
-  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z', has_password: true, phone_masked: null as string | null, needs_profile: false, age_band: null as string | null };
+  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null as string | null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z', has_password: true, phone_masked: null as string | null, needs_profile: false, age_band: null as string | null, account_kind: 'learner' as string, is_child: false, needs_profile_prompt: false };
   const screenSettings = {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -62,13 +64,14 @@ const h = vi.hoisted(() => {
   return {
     cards: [1, 2, 3, 4, 5, 6, 7, 8].map(card),
     verdicts: [] as { word_id: number; verdict: string }[],
-    profiles: [] as { display_name: string; age_band: string; username?: string; password?: string }[],
+    profiles: [] as { display_name: string; age_band: string; account_kind?: string; username?: string; password?: string }[],
     profileError: null as unknown, // thrown once by the next saveProfile
     refreshes: 0,
     screenUser,
     screenSettings,
     // what the mocked useAuth() returns; the step-1 tests swap in a `pending` user without settings
     auth: { user: screenUser, settings: screenSettings as typeof screenSettings | null },
+    server: null as { sms_enabled: boolean } | null,
   };
 });
 
@@ -84,7 +87,7 @@ vi.mock('@/api/endpoints', async (importOriginal) => {
     }),
     markWord: vi.fn(),
     completeOnboarding: vi.fn(),
-    saveProfile: vi.fn(async (body: { display_name: string; age_band: string; username?: string; password?: string }) => {
+    saveProfile: vi.fn(async (body: { display_name: string; age_band: string; account_kind?: string; username?: string; password?: string }) => {
       if (h.profileError) {
         const err = h.profileError;
         h.profileError = null;
@@ -100,7 +103,7 @@ vi.mock('@/auth/AuthContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/auth/AuthContext')>();
   const value = () => ({
     ...h.auth,
-    server: null,
+    server: h.server,
     counters: null,
     health: null,
     loading: false,
@@ -264,7 +267,7 @@ describe('WelcomePage step 0 (first setup of a code-created account, API.md 89)'
     fireEvent.click(screen.getByLabelText(zh.welcome.age14plus));
     fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.optionalPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
     fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
-    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Xiao Ming', age_band: '14plus', password: 'Str0ng-Passphrase!' }]));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Xiao Ming', age_band: '14plus', account_kind: 'learner', password: 'Str0ng-Passphrase!' }]));
     expect(await screen.findByRole('group', { name: zh.welcome.whoAreYou })).toBeTruthy(); // step 1
     expect(screen.queryByRole('heading', { name: zh.welcome.step0 })).toBeNull();
     expect(h.refreshes).toBe(0);
@@ -302,6 +305,100 @@ describe('WelcomePage step 0 (first setup of a code-created account, API.md 89)'
     expect(screen.getByRole('heading', { name: zh.welcome.step0 })).toBeTruthy();
     expect(screen.queryByRole('group', { name: zh.welcome.whoAreYou })).toBeNull();
     expect(h.refreshes).toBe(0);
+  });
+
+  it('the guardian declaration requires a password while the e-mail is not verified, and posts account_kind guardian / adult', async () => {
+    renderStep0();
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Mom' } });
+    expect(screen.getByText(zh.welcome.under14)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText(zh.welcome.ageGuardian));
+    expect(screen.getByLabelText(new RegExp(`^${zh.welcome.guardianPassword}`))).toBeTruthy(); // the label switches to the required wording
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', zh.auth.passwordHint);
+    expect(h.profiles).toEqual([]);
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.guardianPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Mom', account_kind: 'guardian', age_band: 'adult', password: 'Str0ng-Passphrase!' }]));
+  });
+
+  it('a guardian with a verified e-mail may leave the password empty; a learner never needs one', async () => {
+    h.auth = { user: { ...h.auth.user!, email: 'mom@example.com', email_verified: true }, settings: null };
+    renderStep0();
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Mom' } });
+    fireEvent.click(screen.getByLabelText(zh.welcome.ageGuardian));
+    expect(screen.getByLabelText(new RegExp(`^${zh.welcome.optionalPassword}`))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Mom', account_kind: 'guardian', age_band: 'adult' }]));
+  });
+
+  it('a claim-created guardian arrives with the guardian declaration pre-selected and locked', async () => {
+    h.auth = { user: { ...h.auth.user!, account_kind: 'guardian' }, settings: null };
+    renderStep0();
+    expect((screen.getByLabelText(zh.welcome.ageGuardian) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText(zh.welcome.ageAdult) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText(zh.welcome.age14plus) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Mom' } });
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.guardianPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Mom', account_kind: 'guardian', age_band: 'adult', password: 'Str0ng-Passphrase!' }]));
+  });
+
+  it('while the server has SMS off (or the flags are unknown) a note says a guardian account needs it; the guardian choice stays available', () => {
+    renderStep0(); // server flags null
+    expect(screen.getByRole('note').textContent).toBe(zh.welcome.guardianSmsOff);
+    expect((screen.getByLabelText(zh.welcome.ageGuardian) as HTMLInputElement).disabled).toBe(false);
+    fireEvent.click(screen.getByLabelText(zh.welcome.ageGuardian));
+    expect((screen.getByLabelText(zh.welcome.ageGuardian) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('with SMS on the server the note is absent', () => {
+    h.server = { sms_enabled: true };
+    try {
+      renderStep0();
+      expect(screen.queryByText(zh.welcome.guardianSmsOff)).toBeNull();
+      expect(screen.getByText(zh.welcome.under14)).toBeTruthy();
+    } finally {
+      h.server = null;
+    }
+  });
+});
+
+describe('WelcomePage finish (POST /api/onboarding/complete)', () => {
+  const renderWithRoutes = () =>
+    render(
+      <MemoryRouter initialEntries={['/welcome']}>
+        <ToastProvider>
+          <Routes>
+            <Route path="/welcome" element={<WelcomePage />} />
+            <Route path="/today" element={<div>today-page</div>} />
+            <Route path="/children" element={<div>children-page</div>} />
+          </Routes>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  beforeEach(() => {
+    vi.mocked(endpoints.completeOnboarding).mockResolvedValue({ onboarding_state: 'done' });
+  });
+  afterEach(() => {
+    vi.mocked(endpoints.completeOnboarding).mockReset();
+    h.auth = { user: h.screenUser, settings: h.screenSettings };
+  });
+
+  it('a learner lands on /today', async () => {
+    renderWithRoutes();
+    await screen.findByText('word1');
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.finish }));
+    expect(await screen.findByText('today-page')).toBeTruthy();
+    expect(endpoints.completeOnboarding).toHaveBeenCalledTimes(1);
+  });
+
+  it('a guardian lands on /children, where the children are managed', async () => {
+    h.auth = { user: { ...h.screenUser, account_kind: 'guardian' }, settings: h.screenSettings };
+    renderWithRoutes();
+    await screen.findByText('word1');
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.skip }));
+    expect(await screen.findByText('children-page')).toBeTruthy();
+    expect(endpoints.completeOnboarding).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,11 +1,15 @@
 // WelcomePage — `/welcome` (FRONTEND §2, DESIGN §6.2). Step 0 (first setup) only while `user.needs_profile` (an account a
-// verification code created, API.md 81 / 89): required nickname, the age band (adult / guardian or student aged 14+; under-14 learners
-// are pointed to the coming guardian accounts), an optional one-time username and an optional password (strength meter)
-// → POST /api/account/profile → `applySession({user})` → step 1. Step 1: who am I… quick picks pre-select target stages
+// verification code created, API.md 81 / 89): required nickname, three declarations — guardian (`account_kind: 'guardian'`, `adult`),
+// adult learner (`learner`, `adult`), student aged 14+ (`learner`, `14plus`); under-14 learners get their account from a guardian on
+// the children page —, an optional one-time username and a password (strength meter; REQUIRED for a guardian without a verified
+// e-mail — the two-factor rule of docs/AUTH_SIGNUP_DESIGN.md §5.1; a claim-created guardian, `user.account_kind === 'guardian'` on
+// arrival, has the guardian declaration pre-selected and locked) → POST /api/account/profile → `applySession({user})` → step 1. Step 1: who am I… quick picks pre-select target stages
 // (primary pupil → xs · junior-high student → xs+zk · high-school student → zk+gk · university student → gk+cet4+cet6 · professional → cet4+cet6), main stage segmented, push time,
 // timezone (auto-detected) → POST /api/onboarding (state `screen`). Step 2: screening of up to 30 cards from
 // GET /api/screen/next?stage=auto&count=30 with known / unfamiliar / skip / peek, 5-s undo (server `restore`),
-// skip onboarding / finish → POST /api/onboarding/complete → /today. Keys 1 / 2 / S / Space go through the
+// skip onboarding / finish → POST /api/onboarding/complete → /today (a guardian → /children, the children page). While the server has SMS off,
+// step 0 carries a note under the declarations: a guardian account cannot manage children until SMS is on and a phone is bound.
+// Keys 1 / 2 / S / Space go through the
 // shared `useKeyboard` (drops auto-repeat, modifiers, form controls, open dialogs — FRONTEND §5.4) and the
 // verdict buttons through `useTapLock`, so one held key or one double tap judges exactly one card.
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
@@ -13,7 +17,7 @@ import { useNavigate } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { ProfileBody } from '@/api/endpoints';
-import type { ScreenVerdict, ScreenWord, Stage } from '@/api/types';
+import type { AccountKind, ScreenVerdict, ScreenWord, Stage } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
@@ -71,12 +75,24 @@ function StepDots({ step, withProfile = false }: { step: 0 | 1 | 2; withProfile?
 }
 
 type AgeChoice = ProfileBody['age_band'];
+/** The step-0 radios: a guardian (adult), an adult learner or a student aged 14+ (API.md 89 `account_kind` + `age_band`). */
+export type Declaration = 'guardian' | 'adult' | '14plus';
+export const DECLARATION_BODY: Record<Declaration, { account_kind: AccountKind; age_band: AgeChoice }> = {
+  guardian: { account_kind: 'guardian', age_band: 'adult' },
+  adult: { account_kind: 'learner', age_band: 'adult' },
+  '14plus': { account_kind: 'learner', age_band: '14plus' },
+};
 
-/** Step 0 (first setup) of a code-created account (API.md 89): nickname + age band, optional username and password. */
+/**
+ * Step 0 (first setup) of a code-created account (API.md 89): nickname + the declaration, optional username and password — the
+ * password is required for a guardian whose e-mail is not verified (the server answers 400 `fields.password` otherwise).
+ */
 function ProfileStep({ onDone }: { onDone: () => void }) {
-  const { applySession, refresh } = useAuth();
+  const { user, server, applySession, refresh } = useAuth();
+  const lockedGuardian = user?.account_kind === 'guardian'; // created by a claim (endpoint 109): the kind is settled
+  const smsOff = server?.sms_enabled !== true; // a guardian needs a phone, bound only through SMS: say so before the choice, do not block it
   const [nickname, setNickname] = useState('');
-  const [ageBand, setAgeBand] = useState<AgeChoice | null>(null);
+  const [choice, setChoice] = useState<Declaration | null>(lockedGuardian ? 'guardian' : null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [touched, setTouched] = useState(false);
@@ -87,19 +103,20 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
   const trimmedUser = username.trim();
   const usernameOk = trimmedUser === '' || USERNAME_RE.test(trimmedUser);
   const strength = passwordStrength(password, trimmedUser);
-  const passwordOk = password === '' || strength >= 2;
-  const valid = trimmedName.length > 0 && trimmedName.length <= 32 && ageBand !== null && usernameOk && passwordOk;
+  const passwordRequired = choice === 'guardian' && user?.email_verified !== true;
+  const passwordOk = password === '' ? !passwordRequired : strength >= 2;
+  const valid = trimmedName.length > 0 && trimmedName.length <= 32 && choice !== null && usernameOk && passwordOk;
   const nameError = touched && !trimmedName ? zh.welcome.nicknameHint : null;
   const usernameError = touched && !usernameOk ? zh.auth.usernameHint : null;
-  const passwordError = touched && !passwordOk ? zh.errors.weakPassword : null;
+  const passwordError = touched && !passwordOk ? (password === '' ? zh.auth.passwordHint : zh.errors.weakPassword) : null;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setTouched(true);
-    if (!valid || saving || ageBand === null) return;
+    if (!valid || saving || choice === null) return;
     setSaving(true);
     setError(null);
-    const body: ProfileBody = { display_name: trimmedName, age_band: ageBand };
+    const body: ProfileBody = { display_name: trimmedName, ...DECLARATION_BODY[choice] };
     if (trimmedUser) body.username = trimmedUser;
     if (password) body.password = password;
     try {
@@ -134,20 +151,29 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
           </span>
           <div className="auth__radios" role="radiogroup" aria-labelledby="welcome-age">
             <label className="auth__radio">
-              <input type="radio" name="age_band" value="adult" checked={ageBand === 'adult'} onChange={() => setAgeBand('adult')} />
+              <input type="radio" name="declaration" value="guardian" checked={choice === 'guardian'} onChange={() => setChoice('guardian')} />
+              <span>{zh.welcome.ageGuardian}</span>
+            </label>
+            <label className="auth__radio">
+              <input type="radio" name="declaration" value="adult" checked={choice === 'adult'} disabled={lockedGuardian} onChange={() => setChoice('adult')} />
               <span>{zh.welcome.ageAdult}</span>
             </label>
             <label className="auth__radio">
-              <input type="radio" name="age_band" value="14plus" checked={ageBand === '14plus'} onChange={() => setAgeBand('14plus')} />
+              <input type="radio" name="declaration" value="14plus" checked={choice === '14plus'} disabled={lockedGuardian} onChange={() => setChoice('14plus')} />
               <span>{zh.welcome.age14plus}</span>
             </label>
           </div>
+          {smsOff && (
+            <p className="settings__hint muted" role="note">
+              {zh.welcome.guardianSmsOff}
+            </p>
+          )}
           <p className="settings__hint muted">{zh.welcome.under14}</p>
         </div>
         <Field label={zh.welcome.optionalUsername} hint={usernameError ? undefined : zh.auth.usernameHint} error={usernameError}>
           {(control) => <input {...control} type="text" autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck={false} maxLength={32} value={username} onChange={(e) => setUsername(e.target.value)} />}
         </Field>
-        <Field label={zh.welcome.optionalPassword} hint={passwordError ? undefined : zh.welcome.passwordWhy} error={passwordError}>
+        <Field label={passwordRequired ? zh.welcome.guardianPassword : zh.welcome.optionalPassword} required={passwordRequired} hint={passwordError ? undefined : zh.welcome.passwordWhy} error={passwordError}>
           {(control) => (
             <>
               <input {...control} type="password" autoComplete="new-password" maxLength={64} value={password} onChange={(e) => setPassword(e.target.value)} />
@@ -317,7 +343,7 @@ export default function WelcomePage() {
     try {
       const res = await endpoints.completeOnboarding();
       if (user) applySession({ user: { ...user, onboarding_state: res.onboarding_state } });
-      navigate(routePaths.today, { replace: true });
+      navigate(user?.account_kind === 'guardian' ? routePaths.children : routePaths.today, { replace: true }); // a guardian came to manage children
     } catch (err) {
       toast.error(errorMessage(err));
       if (isApiError(err) && err.code === 'invalid_transition') setStep(1);

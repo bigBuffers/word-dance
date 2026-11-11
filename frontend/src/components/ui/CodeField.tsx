@@ -5,7 +5,7 @@
 // (endpoint 80 / 82 / 85 / 90) and reports its own errors; the countdown starts when it resolves — or, after a 429
 // `rate_limited`, for the server's `retry_after_s` (the send already counted against the per-target window, so the button
 // waits it out); any other rejection (503, captcha) leaves the button usable. Without `onSend` the field is just the input
-// (the code was sent by an earlier step).
+// (the code was sent by an earlier step). `length` (default `CODE_LENGTH`) takes the 8-digit child login code of endpoint 107.
 import { useEffect, useState, type ReactNode } from 'react';
 import { isApiError } from '@/api/client';
 import { zh } from '@/i18n/zh';
@@ -31,9 +31,11 @@ export interface CodeFieldProps {
   autoFocus?: boolean;
   /** Stable control id (tests / labels); generated otherwise. */
   id?: string;
+  /** Digits accepted (default `CODE_LENGTH` = 6; the child login code of endpoint 107 has 8). */
+  length?: number;
 }
 
-export function CodeField({ value, onChange, onSend, canSend = true, label = zh.auth.code, hint, error, disabled = false, autoFocus = false, id }: CodeFieldProps) {
+export function CodeField({ value, onChange, onSend, canSend = true, label = zh.auth.code, hint, error, disabled = false, autoFocus = false, id, length = CODE_LENGTH }: CodeFieldProps) {
   const [sending, setSending] = useState(false);
   const [sentOnce, setSentOnce] = useState(false);
   const [remaining, setRemaining] = useState(0);
@@ -72,12 +74,12 @@ export function CodeField({ value, onChange, onSend, canSend = true, label = zh.
             type="text"
             inputMode="numeric"
             autoComplete="one-time-code"
-            pattern="[0-9]{6}"
-            maxLength={CODE_LENGTH}
+            pattern={`[0-9]{${length}}`}
+            maxLength={length}
             autoFocus={autoFocus}
             disabled={disabled}
             value={value}
-            onChange={(e) => onChange(e.target.value.replace(/\D/g, '').slice(0, CODE_LENGTH))}
+            onChange={(e) => onChange(e.target.value.replace(/\D/g, '').slice(0, length))}
           />
           {onSend && (
             <Button type="button" size="md" loading={sending} disabled={disabled || !canSend || remaining > 0} onClick={() => void send()}>

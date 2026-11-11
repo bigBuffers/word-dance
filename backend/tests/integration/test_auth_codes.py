@@ -132,6 +132,7 @@ def test_send_and_login_creates_a_placeholder_account_then_logs_it_in(client: Te
     assert body["created"] is True and body["challenge"] is None and body["settings"]["timezone"] == "Asia/Shanghai"
     assert PLACEHOLDER_RE.match(user["username"]) and user["display_name"] == user["username"]
     assert user["has_password"] is False and user["needs_profile"] is True and user["phone_masked"] == "138****8000" and user["age_band"] is None
+    assert (user["account_kind"], user["is_child"], user["needs_profile_prompt"]) == ("learner", False, False)  # slice 1-B: a placeholder account goes through 89, never the 「补充信息」 prompt
     assert user["email"] is None and user["email_verified"] is False and user["role"] == "user" and user["onboarding_state"] == "pending"
     cookie = r.headers["set-cookie"].lower()
     assert "wd_session=" in cookie and "httponly" in cookie

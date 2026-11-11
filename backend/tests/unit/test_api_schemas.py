@@ -21,8 +21,8 @@ def test_every_model_forbids_extra_fields():
 
 
 def test_endpoint_catalogue_covers_api_md_section_2():
-    # endpoint 4 (logout → 204), 52/53/76/78 (media files) have no JSON body; every other number 1..93 is present
-    expected = set(range(1, 94)) - {4, 52, 53, 76, 78}
+    # endpoint 4 (logout → 204), 52/53/76/78 (media files) have no JSON body; every other number 1..111 is present (94–111: slice 1-B)
+    expected = set(range(1, 112)) - {4, 52, 53, 76, 78}
     assert set(ENDPOINT_MODELS) == expected
     for num, (req, resp) in ENDPOINT_MODELS.items():
         assert resp is not None and issubclass(resp, BaseModel), num
@@ -229,7 +229,7 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.DanceSemantic.model_fields) == {"primitive", "params"} and set(schemas.DanceParams.model_fields) == {"n", "color"}
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}
     # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md; API.md §9)
-    assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band"}
+    assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band", "account_kind", "is_child", "needs_profile_prompt"}
     assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "sms_enabled"}
     assert set(schemas.HealthResponse.model_fields) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "time"}
     assert set(schemas.StaleChallenge.model_fields) == {"token", "display_name_masked", "since", "can_password", "can_email", "email_masked"}
@@ -273,3 +273,72 @@ def test_profile_request_age_band_refuses_u14_with_its_own_message():
         schemas.ProfileRequest(display_name="小明", age_band="grown")
     assert e.value.errors()[0]["type"] == "literal_error"
     assert schemas.AGE_BAND_U14_ZH == "未满 14 周岁的同学请由家长注册"
+
+
+def test_family_contract_models_follow_plan_1b():
+    """Slice 1-B (guardian + child accounts, API.md §9 / §2 rows 94–111): `AccountKind` in the §9 order, the three new `User` fields,
+    `MeResponse.session` and the three `User` fields required (the server always sends them, like the TS side), the 家长门 one-of-three (102 / 105),
+    the 8-digit child login code (107), the guardian → adult rule of 89 / 110 landing on `details.fields.age_band`, the child bodies and
+    the ENDPOINT_MODELS rows."""
+    assert list(typing.get_args(schemas.AccountKind)) == ["learner", "guardian"]
+    assert set(schemas.SessionInfo.model_fields) == {"guardian", "gate_until"} and set(schemas.SessionGuardian.model_fields) == {"id", "display_name"}
+    assert schemas.MeResponse.model_fields["session"].is_required() and all(schemas.User.model_fields[f].is_required() for f in ("account_kind", "is_child", "needs_profile_prompt"))  # the server always sends them
+    assert set(schemas.ChildAccount.model_fields) == {"id", "display_name", "username", "has_password", "phone_masked", "age_band", "onboarding_state", "created_at", "last_login_at", "bank_size", "streak_days", "sessions"}
+    assert set(schemas.ChildrenResponse.model_fields) == {"items", "pin_set", "ready", "missing", "gate_until"}
+    assert set(schemas.ChildResponse.model_fields) == {"child"} and set(schemas.ChildLoginCode.model_fields) == {"code", "expires_in_s"} and set(schemas.GateResponse.model_fields) == {"gate_until"}
+    assert set(schemas.AdminUser.model_fields) >= {"account_kind", "is_child", "needs_profile_prompt"}  # AdminUser extends User (56 / 57 show the badges)
+    # the 家长门 bodies: exactly one of pin / password / code
+    for model in (schemas.GateRequest, schemas.SwitchBackRequest):
+        assert model(pin="123456").password is None and model(password="p").code is None and model(code="654321").pin is None
+        for bad in ({}, {"pin": "123456", "password": "p"}, {"pin": "123456", "code": "654321"}, {"pin": "12345"}, {"code": "abcdef"}):
+            with pytest.raises(ValidationError):
+                model(**bad)
+    with pytest.raises(ValidationError, match="PIN、密码和验证码必须且只能提供一个"):
+        schemas.GateRequest(pin="123456", password="p", code="654321")
+    # code lengths: the child login code 8 digits (107), the PIN 6 (95 / 103), a claim code 6 with the child's band (109)
+    assert schemas.ChildLoginRequest(code="12345678").code == "12345678" and schemas.PinRequest(pin="123456").pin == "123456"
+    for model, bad in (
+        (schemas.ChildLoginRequest, {"code": "123456"}),
+        (schemas.PinRequest, {"pin": "12345678"}),
+        (schemas.GuardianClaimRequest, {"target": "13800138000", "code": "12345678", "age_band": "u14"}),
+        (schemas.GuardianClaimRequest, {"target": "13800138000", "code": "123456", "age_band": "adult"}),
+        (schemas.ChildPhoneCodeRequest, {"target": "   "}),
+        (schemas.ChildEmancipateRequest, {"target": "13800138000", "code": "123456", "password": "short"}),
+    ):
+        with pytest.raises(ValidationError):
+            model(**bad)
+    assert schemas.GuardianClaimRequest(target=" 13800138000 ", code="123456", age_band="u14").target == "13800138000"
+    assert schemas.GuardianClaimCodeRequest(target=" 13800138000 ").target == "13800138000" and schemas.ChildPhoneCodeRequest(target="13800138000").target == "13800138000"
+    assert schemas.ChildEmancipateRequest(target="13800138000", code="123456", password="Correct-Horse-7").password == "Correct-Horse-7"
+    assert schemas.SwitchCodeRequest(channel="email").channel == "email"
+    # child bodies: nickname 1–32 trimmed, the endpoint 2 username rule (never a phone number), at least one field on PATCH
+    child = schemas.ChildCreateRequest(display_name=" 小明 ", pin="123456", username=" ming_01 ", password="Correct-Horse-7")
+    assert (child.display_name, child.username) == ("小明", "ming_01") and schemas.ChildCreateRequest(display_name="x", username="").username is None
+    assert schemas.ChildUpdateRequest(display_name="小红").username is None and schemas.ChildUpdateRequest(password="Correct-Horse-7").display_name is None
+    for model, bad in (
+        (schemas.ChildCreateRequest, {"display_name": "   "}),
+        (schemas.ChildCreateRequest, {"display_name": "x", "username": "13800138000"}),
+        (schemas.ChildCreateRequest, {"display_name": "x", "password": "short"}),
+        (schemas.ChildUpdateRequest, {}),
+        (schemas.ChildUpdateRequest, {"username": ""}),
+        (schemas.ChildUpdateRequest, {"display_name": "x" * 33}),
+    ):
+        with pytest.raises(ValidationError):
+            model(**bad)
+    # a guardian is an adult (89 / 110): the error is attached to `age_band`, so the SPA shows it under the radios
+    for model, body in ((schemas.DeclareRequest, {"account_kind": "guardian", "age_band": "14plus"}), (schemas.ProfileRequest, {"display_name": "x", "account_kind": "guardian", "age_band": "14plus"})):
+        with pytest.raises(ValidationError) as e:
+            model(**body)
+        assert [tuple(err["loc"]) for err in e.value.errors()] == [("age_band",)] and schemas.GUARDIAN_ADULT_ZH in str(e.value)
+    assert schemas.DeclareRequest(account_kind="learner", age_band="14plus").age_band == "14plus" and schemas.DeclareRequest(account_kind="guardian", age_band="adult").account_kind == "guardian"
+    with pytest.raises(ValidationError):
+        schemas.DeclareRequest(account_kind="learner", age_band="u14")  # 110 never declares a child — that is the claim flow (109)
+    assert schemas.ProfileRequest(display_name="x", age_band="14plus").account_kind == "learner"  # the default kind
+    assert schemas.AccountDeleteRequest(password="p").delete_children is None and schemas.AccountDeleteRequest(code="123456", delete_children=True).delete_children is True
+    # the §2 rows 94–111
+    assert ENDPOINT_MODELS[94] == (None, schemas.ChildrenResponse) and ENDPOINT_MODELS[95] == (schemas.ChildCreateRequest, schemas.ChildResponse) and ENDPOINT_MODELS[96] == (schemas.ChildUpdateRequest, schemas.ChildResponse)
+    assert ENDPOINT_MODELS[97] == ENDPOINT_MODELS[98] == ENDPOINT_MODELS[111] == (None, schemas.EmptyResponse) and ENDPOINT_MODELS[103] == (schemas.PinRequest, schemas.EmptyResponse)
+    assert ENDPOINT_MODELS[99] == (None, schemas.ChildLoginCode) and ENDPOINT_MODELS[100] == (schemas.ChildPhoneCodeRequest, schemas.CodeSendResponse) and ENDPOINT_MODELS[101] == (schemas.ChildEmancipateRequest, schemas.ChildResponse)
+    assert ENDPOINT_MODELS[102] == (schemas.GateRequest, schemas.GateResponse) and ENDPOINT_MODELS[104] == (None, schemas.AuthResponse) and ENDPOINT_MODELS[105] == (schemas.SwitchBackRequest, schemas.AuthResponse)
+    assert ENDPOINT_MODELS[106] == (schemas.SwitchCodeRequest, schemas.CodeSendResponse) and ENDPOINT_MODELS[107] == (schemas.ChildLoginRequest, schemas.AuthResponse) and ENDPOINT_MODELS[108] == (schemas.GuardianClaimCodeRequest, schemas.CodeSendResponse)
+    assert ENDPOINT_MODELS[109] == (schemas.GuardianClaimRequest, schemas.UserResponse) and ENDPOINT_MODELS[110] == (schemas.DeclareRequest, schemas.UserResponse)

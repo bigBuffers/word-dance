@@ -493,8 +493,20 @@ def test_identities_and_user_dto_fields(conn: sqlite3.Connection):
     b = security.load_user(conn, bob)
     assert b["password_set_at"] == "2026-10-14T01:00:00Z" and security.user_dto(b)["has_password"] is True
     # a row without the 0018 columns (an older dict in a test) still renders
-    legacy = {k: v for k, v in dict(row).items() if k not in ("password_set_at", "age_band")}
+    legacy = {k: v for k, v in dict(row).items() if k not in ("password_set_at", "age_band", "account_kind", "guardian_user_id", "profile_prompted_at")}
     assert security.user_dto(legacy)["has_password"] is False and security.user_dto(legacy)["age_band"] is None
+    assert (security.user_dto(legacy)["account_kind"], security.user_dto(legacy)["is_child"], security.user_dto(legacy, now=NOW)["needs_profile_prompt"]) == ("learner", False, True)
+    # slice 1-B: the child columns join create_user's INSERT; a child is never prompted, a guardian's kind is carried
+    with db.tx(conn):
+        kid = security.create_user(conn, username="u_kidkidki", password_hash=security.unusable_password_hash(), now=NOW, password_set_at=None, guardian_user_id=alice, age_band="u14", age_declared_at=to_iso(NOW), age_declared_ip="1.2.3.4", guardian_consent_at=to_iso(NOW))
+        parent = security.create_user(conn, username="u_parentpa", password_hash=security.unusable_password_hash(), now=NOW, password_set_at=None, account_kind="guardian")
+    k = security.load_user(conn, kid)
+    assert (k["guardian_user_id"], k["age_band"], k["age_declared_ip"], k["guardian_consent_at"], k["account_kind"]) == (alice, "u14", "1.2.3.4", to_iso(NOW), "learner")
+    assert (security.user_dto(k, now=NOW)["is_child"], security.user_dto(k, now=NOW)["needs_profile_prompt"]) == (True, False)
+    g = security.user_dto(security.load_user(conn, parent), now=NOW)
+    assert (g["account_kind"], g["is_child"], g["needs_profile"], g["needs_profile_prompt"]) == ("guardian", False, True, False)  # the placeholder account goes through 89 first
+    with pytest.raises(ValueError):
+        security.create_user(conn, username="x", password_hash="h", now=NOW, password_set_at=None, account_kind="teacher")
 
 
 # ------------------------------------------------------------------------------- webhook host check
@@ -543,7 +555,14 @@ def test_create_user_writes_settings_with_next_push_at(conn: sqlite3.Connection)
     user = security.load_user(conn, uid)
     assert user["role"] == "user" and user["onboarding_state"] == "pending" and user["created_at"] == to_iso(NOW)
     dto = security.user_dto(user)
-    assert dto == {"id": uid, "username": "张三", "display_name": "张三", "email": None, "email_verified": False, "role": "user", "onboarding_state": "pending", "created_at": "2026-10-14T00:00:00Z", "has_password": True, "phone_masked": None, "needs_profile": False, "age_band": None}
+    assert dto == {"id": uid, "username": "张三", "display_name": "张三", "email": None, "email_verified": False, "role": "user", "onboarding_state": "pending", "created_at": "2026-10-14T00:00:00Z", "has_password": True, "phone_masked": None, "needs_profile": False, "age_band": None, "account_kind": "learner", "is_child": False, "needs_profile_prompt": False}
+    # the legacy 「补充信息」 prompt (API.md §9.1, slice 1-B): only with `now`, never for a declared / child / placeholder account, snoozed 30 days
+    assert security.user_dto(user, now=NOW)["needs_profile_prompt"] is True
+    conn.execute("UPDATE users SET profile_prompted_at = ? WHERE id = ?", (to_iso(NOW), uid))
+    assert security.user_dto(security.load_user(conn, uid), now=NOW + timedelta(days=29))["needs_profile_prompt"] is False
+    assert security.user_dto(security.load_user(conn, uid), now=NOW + timedelta(days=30))["needs_profile_prompt"] is True
+    conn.execute("UPDATE users SET age_band = 'adult' WHERE id = ?", (uid,))
+    assert security.user_dto(security.load_user(conn, uid), now=NOW + timedelta(days=31))["needs_profile_prompt"] is False
     assert user["password_set_at"] == to_iso(NOW)
     settings = security.settings_dto(conn, uid)
     assert settings["next_push_at"] == to_iso(compute_next_push(NOW, "Asia/Shanghai", "08:00")) == "2026-10-15T00:00:00Z"

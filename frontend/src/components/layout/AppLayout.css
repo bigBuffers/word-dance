@@ -30,6 +30,12 @@
   line-height: 1.4;
 }
 
+/* the switched-device bar (slice 1-B): the child's name + the switch-back button */
+.app-banner--switch {
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+}
+
 /* the shell's banner sits inside the page gutter on phones */
 @media (max-width: 767.98px) {
   .app-banner {

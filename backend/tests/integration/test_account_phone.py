@@ -257,6 +257,7 @@ def test_profile_first_time_setup(client: TestClient, app, settings, sms):
     saved = r.json()["user"]
     assert saved["display_name"] == "小明" and saved["username"] == "XiaoMing" and saved["age_band"] == "14plus"
     assert saved["has_password"] is True and saved["needs_profile"] is False and saved["phone_masked"] == "138****8000" and saved["id"] == user["id"]
+    assert (saved["account_kind"], saved["is_child"], saved["needs_profile_prompt"]) == ("learner", False, False)  # slice 1-B: the default kind; a declared band is never prompted
     row = rows(settings, "SELECT * FROM users WHERE id = ?", (user["id"],))[0]
     assert (row["age_band"], row["age_declared_at"], row["age_declared_ip"], row["password_set_at"]) == ("14plus", NOW_ISO, "testclient", NOW_ISO)
     assert learner.get("/api/auth/me").status_code == 200  # the session survives the password set

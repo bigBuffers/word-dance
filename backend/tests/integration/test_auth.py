@@ -80,6 +80,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert user["role"] == "admin" and user["onboarding_state"] == "pending" and user["display_name"] == "小张"
     assert user["email"] == "alice@example.com" and user["email_verified"] is False and user["created_at"] == NOW_ISO  # e-mails are normalised on write (API.md 2 / 6)
     assert user["has_password"] is True and user["phone_masked"] is None and user["needs_profile"] is False and user["age_band"] is None
+    assert (user["account_kind"], user["is_child"], user["needs_profile_prompt"]) == ("learner", False, True)  # slice 1-B: nothing declared yet → the 「补充信息」 prompt
     assert st["timezone"] == "Asia/Shanghai" and st["push_time"] == "08:00" and st["stages"] == ["xs", "zk"] and st["current_stage"] == "xs"  # K-12 DDL defaults
     assert st["next_push_at"] == "2026-10-15T00:00:00Z" == to_iso(compute_next_push(NOW, "Asia/Shanghai", "08:00"))
     assert st["email_verified"] is False and st["push_enabled"] is True and st["daily_new_count"] == 10 and st["webhook_url"] is None
@@ -93,6 +94,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert body["user"]["username"] == "alice" and body["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
     assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False, "audio_key": "", "sms_enabled": False}
     assert body["counters"] == {"suggestions_open": 0, "attention": 0}
+    assert set(body) == {"user", "settings", "server", "counters", "session"} and body["session"] == {"guardian": None, "gate_until": None}  # slice 1-B: a self session, no 家长门 stamp
     bob = register(client, "bob")
     assert bob["user"]["role"] == "user" and bob["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
     assert count(settings, "users") == 2 and count(settings, "user_settings", "next_push_at IS NOT NULL") == 2 and count(settings, "sessions") == 2
@@ -433,6 +435,7 @@ def test_me_requires_login_and_carries_counters(client: TestClient, settings):
         c.close()
     me = client.get("/api/auth/me").json()
     assert me["counters"] == {"suggestions_open": 1, "attention": 1}  # removed rows and resolved suggestions do not count
+    assert me["session"] == {"guardian": None, "gate_until": None} and me["user"]["is_child"] is False
 
 
 # ------------------------------------------------------------------------------------- account

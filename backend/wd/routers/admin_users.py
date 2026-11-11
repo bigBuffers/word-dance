@@ -59,7 +59,7 @@ def _admin_user(conn: sqlite3.Connection, row: dict[str, Any], now: datetime) ->
     tz_row = conn.execute("SELECT timezone FROM user_settings WHERE user_id = ?", (uid,)).fetchone()
     tz = str(tz_row[0]) if tz_row else security.DEFAULT_TIMEZONE
     identity = security.phone_identity(conn, uid)
-    return security.admin_user_dto(row, bank_size=bank_size, streak_days=streak_days(conn, uid, tz, now), phone=str(identity["subject"]) if identity else None)
+    return security.admin_user_dto(row, bank_size=bank_size, streak_days=streak_days(conn, uid, tz, now), phone=str(identity["subject"]) if identity else None, now=now)  # now: needs_profile_prompt (1-B)
 
 
 def _like(q: str) -> str:
@@ -118,6 +118,9 @@ def update_user(user_id: int, body: AdminUserUpdateRequest, request: Request, ad
             conn.execute(f"UPDATE users SET {sets} WHERE id = ?", [*assignments.values(), user_id])
         if deactivating:
             security.delete_sessions(conn, user_id)
+            # the devices this guardian switched into its children (API.md 104, sessions.actor_user_id) sign out with it, as the FK
+            # cascade does on delete — a deactivated guardian keeps no foothold in a child's account
+            conn.execute("DELETE FROM sessions WHERE actor_user_id = ?", (user_id,))
         updated = security.load_user(conn, user_id) or target
     log.info(
         "admin updated user",

@@ -1,7 +1,8 @@
 // AdminPage — `/admin` (FRONTEND 5.8, API.md endpoints 54-74, 92-93): tabs overview / users & invites / jobs /
 // AI / reports / events / config. Overview tiles show users, spend today/month vs caps, the SVG budget, the SMS
 // counters against the WD_SMS_* caps (`AdminOverview.sms`), the word image mix (photo / claude svg / card only),
-// queue, provider quotas, scheduler and health. The users tab marks accounts without a password (`zh.admin.noPassword`)
+// queue, provider quotas, scheduler and health. The users tab marks accounts without a password (`zh.admin.noPassword`),
+// guardians (`zh.admin.guardian`, `account_kind`) and children (`zh.admin.child`, `is_child` — slice 1-B) next to the role,
 // and lists the disputed phone bindings (`zh.admin.disputed`, endpoint 92) with a restore action (endpoint 93).
 // Admin copy may show error codes (FRONTEND §5.8) — job types, status tags, config keys; every heading, table
 // header, form label and tile caption comes from zh.admin / zh.admin.labels.
@@ -495,6 +496,8 @@ function UsersTab() {
                   <td>{u.phone_masked ?? ''}</td>
                   <td>
                     <StatusTag status={u.role} />
+                    {u.account_kind === 'guardian' && <span className="tag tag--brand admin__tag">{zh.admin.guardian}</span>}
+                    {u.is_child && <span className="tag admin__tag">{zh.admin.child}</span>}
                   </td>
                   <td>
                     <StatusTag status={u.is_active ? 'ok' : 'disabled'} />

@@ -59,8 +59,10 @@ from .routers import (
     audio as audio_router,
     auth,
     auth_codes,
+    auth_family,
     bank,
     demo,
+    guardian,
     health,
     history,
     media,
@@ -83,6 +85,8 @@ ROUTERS = (
     auth,
     auth_codes,
     account,
+    guardian,  # 1-B: /api/guardian/* (94–103)
+    auth_family,  # 1-B: /api/auth/switch/*, /api/auth/child-login (104–107)
     demo,
     onboarding,
     settings_router,
@@ -136,10 +140,11 @@ class BodyTooLarge(StarletteHTTPException):
         super().__init__(status_code=413, detail=ApiError("payload_too_large", details={"max_bytes": int(max_bytes)}).to_body())
 
 
-def session_cookie_header(scope: Scope, token: str, cfg: Settings) -> str:
-    """The exact ``Set-Cookie`` value login/register send (``security.set_session_cookie``), for the sliding re-issue."""
+def session_cookie_header(scope: Scope, token: str, cfg: Settings, *, max_age_s: int | None = None) -> str:
+    """The exact ``Set-Cookie`` value login/register send (``security.set_session_cookie``), for the sliding re-issue; ``max_age_s`` is the
+    seconds left on the session row (``deps.current_user`` never shortens a session, so a 90-day child-device cookie keeps its horizon)."""
     tmp = Response()
-    security.set_session_cookie(tmp, token, cfg, secure=security.cookie_secure(Request(scope), cfg))
+    security.set_session_cookie(tmp, token, cfg, secure=security.cookie_secure(Request(scope), cfg), max_age_s=max_age_s)
     return tmp.headers["set-cookie"]
 
 
@@ -184,8 +189,8 @@ class WdMiddleware:
                 if is_api:
                     h["Cache-Control"] = "no-store"
                 token = state.get("reissue_session_token")  # deps.current_user slid the expiry: re-send the cookie
-                if token and not _sets_session_cookie(message):  # unless the route itself set/cleared it (logout, delete)
-                    h.append("Set-Cookie", session_cookie_header(scope, str(token), cfg))
+                if token and not _sets_session_cookie(message):  # unless the route itself set/cleared it (logout, delete, a switch)
+                    h.append("Set-Cookie", session_cookie_header(scope, str(token), cfg, max_age_s=state.get("reissue_session_max_age_s")))
             await send(message)
 
         async def respond(response) -> None:

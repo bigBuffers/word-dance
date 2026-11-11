@@ -37,9 +37,13 @@ designed):
   file order, ``sessions.actor_user_id`` is last, ``identities`` / ``login_codes`` exist with their indexes (``ux_identities_live``,
   ``ux_identities_user_provider`` …), ``email_codes`` stays; when the file ran here ``password_set_at = created_at`` on every row,
   ``account_kind`` is ``learner`` everywhere and the two new tables are empty; the CHECK / FK / partial-unique probes are rejected;
+* 0019 (whenever ``schema_migrations`` holds 19; docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2, slice 1-B): ``users.profile_prompted_at`` and
+  ``sessions.guardian_gate_at`` are appended last (nullable TEXT, no default), ``family_codes`` exists with its three indexes, the
+  ``users`` / ``sessions`` row counts are unchanged; when the file ran here both columns are NULL everywhere and the table is empty;
+  the ``kind`` CHECK and the ``user_id`` FK probes are rejected;
 * the ``wd check db`` stage invariants hold on the migrated copy and, from 0014, the four learning-order lines
   (``learn_order.check_lines`` — the same code ``wd check db`` runs); a second run applies nothing; an empty database
-  migrates from 0001 to the same version with 28 tables and the ``v_bank`` view;
+  migrates from 0001 to the same version with 29 tables and the ``v_bank`` view;
 * informational: elapsed time, page / freelist counts and file size (PLAN §8 step 9 runs ``ANALYZE`` + ``VACUUM`` afterwards).
 
 The script is self-contained apart from the ``wd`` package (``.venv/bin/python -I`` keeps the script directory off
@@ -65,9 +69,10 @@ from wd.diag import LEARN_ORDER_INVARIANTS_FROM_VERSION, STAGE_INVARIANTS, STAGE
 from wd.schemas import STAGE_ORDER
 from wd.services import learn_order
 
-EXPECTED_TABLE_COUNT = 28  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26; 0018 adds identities + login_codes → 28
+EXPECTED_TABLE_COUNT = 29  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26; 0018 adds identities + login_codes → 28; 0019 adds family_codes → 29
 USERS_0018_COLUMNS = ("password_set_at", "account_kind", "guardian_user_id", "age_band", "age_declared_at", "age_declared_ip", "guardian_consent_at", "guardian_pin_hash")  # 0018, file order
 INDEXES_0018 = frozenset({"ux_identities_live", "ux_identities_user_provider", "ix_identities_user", "ix_login_codes_live", "ix_login_codes_user", "ix_login_codes_expires", "ix_sessions_actor"})
+INDEXES_0019 = frozenset({"ix_family_codes_hash", "ix_family_codes_user", "ix_family_codes_expires"})  # 0019
 BOOKKEEPING_TABLES = frozenset({"schema_migrations", "kv", "system_events"})  # the only tables a migration may grow/shrink
 STAGE_COLUMNS = tuple(f"stage_{code}" for code in STAGE_ORDER)  # the 0011 column order (seed.SEED_COLUMNS order)
 WORD_IMAGES_META_COLUMNS = ("prompt_version", "model", "text_free", "eval_json")  # 0012
@@ -380,12 +385,16 @@ def check_0018(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
     """identities / login_codes created, the eight account columns + sessions.actor_user_id appended, password_set_at backfilled with
     created_at (docs/AUTH_SIGNUP_DESIGN.md §5.1, docs/releases/2026-11-auth-signup-1a.md; mirrors backend/tests/unit/test_db_0018.py on
     the operator's copy)."""
+    # 0019 appends one more column to each table after these (profile_prompted_at / guardian_gate_at): the 0018 columns are then the
+    # block right before it, still in file order
     users_cols = [c["name"] for c in columns(conn, "users")]
-    rep.check("users: the eight 0018 columns appended last, in file order", users_cols[-8:] == list(USERS_0018_COLUMNS), str(users_cols[-8:]))
+    users_tail = [*USERS_0018_COLUMNS, *(["profile_prompted_at"] if has_column(conn, "users", "profile_prompted_at") else [])]
+    rep.check("users: the eight 0018 columns appended in file order (0019's profile_prompted_at after them)", users_cols[-len(users_tail) :] == users_tail, str(users_cols[-len(users_tail) :]))
     kind = next((c for c in columns(conn, "users") if c["name"] == "account_kind"), None)
     rep.check("users.account_kind TEXT NOT NULL DEFAULT 'learner'", kind is not None and kind["notnull"] == 1 and str(kind["dflt_value"]) == "'learner'", str(tuple(kind)) if kind else "missing")
     sessions_cols = [c["name"] for c in columns(conn, "sessions")]
-    rep.check("sessions.actor_user_id appended last", sessions_cols[-1] == "actor_user_id", str(sessions_cols[-2:]))
+    sessions_tail = ["actor_user_id", *(["guardian_gate_at"] if has_column(conn, "sessions", "guardian_gate_at") else [])]
+    rep.check("sessions.actor_user_id appended after the baseline columns (0019's guardian_gate_at after it)", sessions_cols[-len(sessions_tail) :] == sessions_tail, str(sessions_cols[-len(sessions_tail) :]))
     tables = set(db.table_names(conn))
     rep.check("identities + login_codes present, email_codes kept (stop-write only, no DROP)", {"identities", "login_codes", "email_codes"} <= tables)
     idx = index_names(conn, "identities") | index_names(conn, "login_codes") | index_names(conn, "sessions")
@@ -442,6 +451,38 @@ def check_0018(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
         rep.skip("0018 CHECK / unique probes", "no rows in users")
     ok, detail = rejected(conn, "INSERT INTO identities(user_id, provider, subject) VALUES (999999999, 'phone', '+8613800138001')")
     rep.check("identities.user_id FK (unknown user rejected)", ok, detail[:60])
+
+
+def check_0019(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """family_codes created, users.profile_prompted_at and sessions.guardian_gate_at appended (docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2,
+    docs/releases/2026-11-auth-signup-1b.md; mirrors backend/tests/unit/test_db_0019.py on the operator's copy)."""
+    users_cols = [c["name"] for c in columns(conn, "users")]
+    rep.check("users.profile_prompted_at appended last", users_cols[-1] == "profile_prompted_at", str(users_cols[-2:]))
+    col = next((c for c in columns(conn, "users") if c["name"] == "profile_prompted_at"), None)
+    rep.check("users.profile_prompted_at TEXT, nullable, no default", col is not None and col["type"] == "TEXT" and col["notnull"] == 0 and col["dflt_value"] is None, str(tuple(col)) if col else "missing")
+    sessions_cols = [c["name"] for c in columns(conn, "sessions")]
+    rep.check("sessions.guardian_gate_at appended last", sessions_cols[-1] == "guardian_gate_at", str(sessions_cols[-2:]))
+    col = next((c for c in columns(conn, "sessions") if c["name"] == "guardian_gate_at"), None)
+    rep.check("sessions.guardian_gate_at TEXT, nullable, no default", col is not None and col["type"] == "TEXT" and col["notnull"] == 0 and col["dflt_value"] is None, str(tuple(col)) if col else "missing")
+    rep.check("family_codes present", "family_codes" in db.table_names(conn))
+    idx = index_names(conn, "family_codes")
+    rep.check("0019 indexes present", INDEXES_0019 <= idx, ", ".join(sorted(INDEXES_0019 - idx)) or "all present")
+    n_users = int(scalar(conn, "SELECT COUNT(*) FROM users"))
+    rep.check("users row count unchanged (no rebuild)", n_users == before["counts"].get("users", n_users), f"{n_users} rows")
+    rep.check("sessions row count unchanged (no rebuild)", int(scalar(conn, "SELECT COUNT(*) FROM sessions")) == before["counts"].get("sessions", 0))
+    if ran_here:
+        rep.check("profile_prompted_at NULL everywhere (nobody snoozed the prompt yet)", int(scalar(conn, "SELECT COUNT(*) FROM users WHERE profile_prompted_at IS NOT NULL")) == 0, f"{n_users} rows")
+        rep.check("guardian_gate_at NULL everywhere (no 家长门 passed yet)", int(scalar(conn, "SELECT COUNT(*) FROM sessions WHERE guardian_gate_at IS NOT NULL")) == 0)
+        rep.check("family_codes empty right after the file", int(scalar(conn, "SELECT COUNT(*) FROM family_codes")) == 0)
+    if n_users:
+        ok, detail = rejected(conn, "INSERT INTO family_codes(kind, user_id, code_hash, expires_at) VALUES ('join', (SELECT MIN(id) FROM users), 'h', '2099-01-01T00:00:00Z')")
+        rep.check("family_codes.kind CHECK", ok, detail[:60])
+        ok, detail = accepted(conn, "INSERT INTO family_codes(kind, user_id, code_hash, expires_at) VALUES ('child_login', (SELECT MIN(id) FROM users), 'h', '2099-01-01T00:00:00Z')")
+        rep.check("a child_login row is storable (attempts defaults to 0)", ok, detail[:60])
+    else:
+        rep.skip("family_codes CHECK probe", "no rows in users")
+    ok, detail = rejected(conn, "INSERT INTO family_codes(kind, user_id, code_hash, expires_at) VALUES ('child_login', 999999999, 'h', '2099-01-01T00:00:00Z')")
+    rep.check("family_codes.user_id FK (unknown user rejected)", ok, detail[:60])
 
 
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
@@ -593,6 +634,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0018(rep, conn, before, ran_here=18 in applied_versions)
         else:
             rep.skip("0018 checks", "not recorded in schema_migrations")
+        if 19 in recorded:
+            check_0019(rep, conn, before, ran_here=19 in applied_versions)
+        else:
+            rep.skip("0019 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

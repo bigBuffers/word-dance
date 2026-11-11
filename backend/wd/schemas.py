@@ -18,7 +18,7 @@ import unicodedata
 import uuid
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .clock import PUSH_TIME_RE, is_valid_timezone
 
@@ -53,9 +53,12 @@ DancePrimitive = Literal["rise", "fall", "hop", "grow", "shrink", "dash", "creep
 DanceColor = Literal["red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey"]  # the only colours the `color` primitive may name
 # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md §5.1; the same order as API.md §9 — check_contract diffs the unions in order)
 AgeBand = Literal["u14", "14plus", "adult"]  # users.age_band — the learner's own declaration, never verified
-AGE_BAND_U14_ZH = "未满 14 周岁的同学请由家长注册"  # endpoint 89 refuses u14 until slice 1-B brings guardian accounts
+AGE_BAND_U14_ZH = "未满 14 周岁的同学请由家长注册"  # endpoint 89 keeps refusing u14: child accounts are created by a guardian (endpoint 95, slice 1-B)
 CodeChannel = Literal["phone", "email"]  # login_codes.channel (endpoints 80, 81, 85)
 IdentityProvider = Literal["phone", "wechat_mini", "qq", "apple"]  # identities.provider — only `phone` is issued in slice 1-A
+AccountKind = Literal["learner", "guardian"]  # users.account_kind (slice 1-B) — a guardian creates, switches into and manages child accounts (endpoints 94–105)
+GUARDIAN_ADULT_ZH = "家长请选择「我是成人」"  # endpoints 89 / 110: a guardian declares the `adult` band (details.fields.age_band)
+GATE_ONE_OF_ZH = "PIN、密码和验证码必须且只能提供一个"  # the 家长门 bodies of endpoints 102 / 105 (details.fields.body)
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
 # frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
@@ -169,6 +172,10 @@ class User(Model):
     phone_masked: str | None  # the live phone identity with its middle digits hidden (`138****8000`); null without one
     needs_profile: bool  # a code-created account that has not saved its nickname + age band yet (endpoint 89)
     age_band: AgeBand | None  # null = not declared
+    # guardian + child accounts (slice 1-B, docs/AUTH_SIGNUP_DESIGN.md §5.1); security.user_dto always emits the three
+    account_kind: AccountKind  # 'guardian' unlocks 我的孩子 (endpoints 94–104); chosen at /welcome step 0 (89), the legacy prompt (110) or by a claim (109)
+    is_child: bool  # users.guardian_user_id IS NOT NULL — account / identity changes only through the guardian (403 guardian_required, API.md §1)
+    needs_profile_prompt: bool  # a pre-1-A account that has not declared its kind / age band and was not snoozed in the last 30 days (111; API.md §9.1)
 
 
 class ServerFlags(Model):
@@ -187,6 +194,22 @@ class ServerFlags(Model):
 class Counters(Model):
     suggestions_open: int
     attention: int
+
+
+class SessionGuardian(Model):
+    """``SessionInfo.guardian``: the guardian who switched this device into a child account (``sessions.actor_user_id``, endpoint 104)."""
+
+    id: int
+    display_name: str
+
+
+class SessionInfo(Model):
+    """``GET /api/auth/me`` → ``session`` (API.md §9, slice 1-B): the guardian behind a switched child session (the SPA shows 「切回家长」
+    → endpoint 105), and for a guardian's own session until when the 家长门 is passed (``sessions.guardian_gate_at`` + 10 min, endpoints
+    102 / 105; ``null`` = not passed / not a guardian)."""
+
+    guardian: SessionGuardian | None
+    gate_until: str | None
 
 
 class Settings(Model):
@@ -297,6 +320,7 @@ class MeResponse(Model):
     settings: Settings
     server: ServerFlags
     counters: Counters
+    session: SessionInfo  # slice 1-B: the switched-in guardian (if any) and the 家长门 stamp of this session (routers/auth.session_info)
 
 
 class UserResponse(Model):
@@ -343,10 +367,13 @@ class PasswordChangeRequest(Model):
 
 
 class AccountDeleteRequest(Model):
-    """Endpoint 8: the same password-or-code dispatch as endpoint 7."""
+    """Endpoint 8: the same password-or-code dispatch as endpoint 7. A guardian with children must also say what happens to them:
+    ``delete_children: true`` (a child with its own phone is set free, the others are deleted), else 409 ``has_children`` with
+    ``details.children`` (slice 1-B)."""
 
     password: str | None = Field(default=None, min_length=1, max_length=64)
     code: str | None = Field(default=None, pattern=r"^\d{6}$")
+    delete_children: bool | None = None
 
     @model_validator(mode="after")
     def _one_factor(self) -> "AccountDeleteRequest":
@@ -534,10 +561,13 @@ class PhoneRebindRequest(Model):
 
 
 class ProfileRequest(Model):
-    """Endpoint 89: the first-time setup of a code-created account — nickname, age band (``u14`` is refused with its own message:
-    child accounts arrive in slice 1-B), an optional one-time username and an optional password."""
+    """Endpoint 89: the first-time setup of a code-created account — nickname, account kind (slice 1-B: ``guardian`` needs the ``adult``
+    band here, and a password unless the e-mail is verified — the router's rule), age band (``u14`` is refused with its own message:
+    child accounts are created by a guardian, endpoint 95), an optional one-time username and an optional password. ``account_kind`` is
+    declared before ``age_band`` so the band's validator can read it (``info.data``) and the error lands on ``details.fields.age_band``."""
 
     display_name: str
+    account_kind: AccountKind = "learner"
     age_band: AgeBand
     username: str | None = None
     password: str | None = Field(default=None, min_length=8, max_length=64)
@@ -552,9 +582,11 @@ class ProfileRequest(Model):
 
     @field_validator("age_band")
     @classmethod
-    def _age_band(cls, v: str) -> str:
+    def _age_band(cls, v: str, info: ValidationInfo) -> str:
         if v == "u14":
             raise ValueError(AGE_BAND_U14_ZH)  # API.md 89: 400 validation_error, details.fields.age_band carries this text
+        if info.data.get("account_kind") == "guardian" and v != "adult":
+            raise ValueError(GUARDIAN_ADULT_ZH)  # API.md 89: a guardian is an adult (the claim-created guardian's row is checked by the router)
         return v
 
     @field_validator("username")
@@ -595,6 +627,229 @@ class ResetPasswordRequest(Model):
         v = v.strip()
         if not v:
             raise ValueError("请输入用户名、手机号或邮箱")
+        return v
+
+
+# ------------------------------- guardian + child accounts (docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2; endpoints 94–111, slice 1-B)
+class ChildAccount(Model):
+    """API.md §9 ``ChildAccount`` — a child as its guardian sees it (endpoints 94–96, 101): ``username`` is ``null`` while the account
+    still carries its placeholder name, ``bank_size`` / ``streak_days`` are the ``AdminUser`` figures, ``sessions`` counts the child's
+    live sessions whatever their ``actor_user_id`` (endpoint 98 revokes them)."""
+
+    id: int
+    display_name: str
+    username: str | None
+    has_password: bool
+    phone_masked: str | None
+    age_band: AgeBand | None
+    onboarding_state: OnboardingState
+    created_at: str
+    last_login_at: str | None
+    bank_size: int
+    streak_days: int
+    sessions: int
+
+
+class ChildrenResponse(Model):
+    """Endpoint 94: my children by ``created_at``, whether the 家长 PIN is set, the two-factor readiness (``ready`` = a live phone AND a
+    password or a verified e-mail; ``missing`` names what is absent) and the session's gate state."""
+
+    items: list[ChildAccount]
+    pin_set: bool
+    ready: bool
+    missing: list[Literal["phone", "second_factor"]]
+    gate_until: str | None
+
+
+class ChildResponse(Model):
+    """Endpoints 95, 96, 101."""
+
+    child: ChildAccount
+
+
+class ChildLoginCode(Model):
+    """Endpoint 99: the 8-digit one-time code for the child's own device — shown once, never logged (10 minutes)."""
+
+    code: str
+    expires_in_s: int
+
+
+class GateResponse(Model):
+    """Endpoint 102: until when this session's 家长门 is passed (now + 10 min)."""
+
+    gate_until: str
+
+
+def _child_display_name(v: str) -> str:
+    v = v.strip()
+    if not 1 <= len(v) <= 32:
+        raise ValueError("昵称为 1–32 个字符")
+    return v
+
+
+def _optional_username(v: str | None) -> str | None:
+    """A simple login for a child (endpoints 95 / 96): the endpoint 2 rule when given, ``None`` for an empty value."""
+    if v is None or not v.strip():
+        return None
+    return validate_username(v)
+
+
+def _exactly_one_gate_factor(pin: Any, password: Any, code: Any) -> None:
+    """The 家长门 rule of endpoints 102 / 105: a PIN, the password or a ``reauth`` code — exactly one of the three."""
+    if sum(x is not None for x in (pin, password, code)) != 1:
+        raise ValueError(GATE_ONE_OF_ZH)
+
+
+class ChildCreateRequest(Model):
+    """Endpoint 95: a child account — nickname, the 6-digit 家长 PIN while the guardian has none (required then, refused once set — the
+    router decides), an optional simple login (``username`` and ``password`` both or neither — the router's rule)."""
+
+    display_name: str
+    pin: str | None = Field(default=None, pattern=r"^\d{6}$")
+    username: str | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def _display_name(cls, v: str) -> str:
+        return _child_display_name(v)
+
+    @field_validator("username")
+    @classmethod
+    def _username(cls, v: str | None) -> str | None:
+        return _optional_username(v)
+
+
+class ChildUpdateRequest(Model):
+    """Endpoint 96: rename a child and / or set or replace its simple login — at least one field (a password needs a non-placeholder
+    username, current or in this body: the router's rule)."""
+
+    display_name: str | None = None
+    username: str | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def _display_name(cls, v: str | None) -> str | None:
+        return None if v is None else _child_display_name(v)
+
+    @field_validator("username")
+    @classmethod
+    def _username(cls, v: str | None) -> str | None:
+        return _optional_username(v)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "ChildUpdateRequest":
+        if self.display_name is None and self.username is None and self.password is None:
+            raise ValueError("至少提供昵称、用户名或密码之一")
+        return self
+
+
+class ChildPhoneCodeRequest(Model):
+    """Endpoint 100: send a ``bind_phone`` code to the phone the child will own (the 独立 flow)."""
+
+    target: str = Field(min_length=1, max_length=254)
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class ChildEmancipateRequest(Model):
+    """Endpoint 101: 独立 — the child's own phone (its ``bind_phone`` code of 100) and a new password; irreversible."""
+
+    target: str = Field(min_length=1, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
+    password: str = Field(min_length=8, max_length=64)
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class GateRequest(Model):
+    """Endpoint 102: pass the 家长门 for this session with exactly one of the PIN, the password or a ``reauth`` code (endpoint 85)."""
+
+    pin: str | None = Field(default=None, pattern=r"^\d{6}$")
+    password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _one_factor(self) -> "GateRequest":
+        _exactly_one_gate_factor(self.pin, self.password, self.code)
+        return self
+
+
+class PinRequest(Model):
+    """Endpoint 103: set or change the 6-digit 家长 PIN (``family.pin_problem`` refuses straights and repeats in the router)."""
+
+    pin: str = Field(pattern=r"^\d{6}$")
+
+
+class SwitchBackRequest(Model):
+    """Endpoint 105: back to the guardian's session from a switched child session — the same one-of-three as :class:`GateRequest`
+    (the code is a ``reauth`` code of endpoint 106)."""
+
+    pin: str | None = Field(default=None, pattern=r"^\d{6}$")
+    password: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _one_factor(self) -> "SwitchBackRequest":
+        _exactly_one_gate_factor(self.pin, self.password, self.code)
+        return self
+
+
+class SwitchCodeRequest(Model):
+    """Endpoint 106: send a ``reauth`` code to the guardian's phone or verified e-mail from a switched child session."""
+
+    channel: CodeChannel
+
+
+class ChildLoginRequest(Model):
+    """Endpoint 107: sign a child's device in with the 8-digit code of endpoint 99."""
+
+    code: str = Field(pattern=r"^\d{8}$")
+
+
+class GuardianClaimCodeRequest(Model):
+    """Endpoint 108: 「这是孩子的账号」 — send a claim code to the guardian's phone."""
+
+    target: str = Field(min_length=1, max_length=254)
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class GuardianClaimRequest(Model):
+    """Endpoint 109: attach my account to the guardian who owns that phone (the claim code of 108) and declare the child's band."""
+
+    target: str = Field(min_length=1, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
+    age_band: Literal["u14", "14plus"]
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v: str) -> str:
+        return _clean_target("phone", v)
+
+
+class DeclareRequest(Model):
+    """Endpoint 110: the legacy 「补充信息」 prompt — 家长 / 成人学习者 / 学生（已满 14）; a guardian declares the ``adult`` band
+    (``account_kind`` is declared first so the band's validator can read it and the error lands on ``details.fields.age_band``)."""
+
+    account_kind: AccountKind
+    age_band: Literal["14plus", "adult"]
+
+    @field_validator("age_band")
+    @classmethod
+    def _guardian_is_adult(cls, v: str, info: ValidationInfo) -> str:
+        if info.data.get("account_kind") == "guardian" and v != "adult":
+            raise ValueError(GUARDIAN_ADULT_ZH)
         return v
 
 
@@ -1885,4 +2140,23 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     91: (ResetPasswordRequest, EmptyResponse),
     92: (PageQuery, Page[DisputedIdentity]),
     93: (None, DisputedIdentity),
+    # guardian + child accounts (docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2, slice 1-B)
+    94: (None, ChildrenResponse),
+    95: (ChildCreateRequest, ChildResponse),
+    96: (ChildUpdateRequest, ChildResponse),
+    97: (None, EmptyResponse),
+    98: (None, EmptyResponse),
+    99: (None, ChildLoginCode),
+    100: (ChildPhoneCodeRequest, CodeSendResponse),
+    101: (ChildEmancipateRequest, ChildResponse),
+    102: (GateRequest, GateResponse),
+    103: (PinRequest, EmptyResponse),
+    104: (None, AuthResponse),
+    105: (SwitchBackRequest, AuthResponse),
+    106: (SwitchCodeRequest, CodeSendResponse),
+    107: (ChildLoginRequest, AuthResponse),
+    108: (GuardianClaimCodeRequest, CodeSendResponse),
+    109: (GuardianClaimRequest, UserResponse),
+    110: (DeclareRequest, UserResponse),
+    111: (None, EmptyResponse),
 }

@@ -66,7 +66,7 @@ def test_run_backup_writes_archive_kv_and_mode(settings, conn, tmp_path):
     c = sqlite3.connect(copy)
     try:
         assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert len(db.table_names(c)) == 28
+        assert len(db.table_names(c)) == 29  # 0019 adds family_codes
         assert c.execute("SELECT value FROM kv WHERE key='marker'").fetchone()[0] == "before"
     finally:
         c.close()

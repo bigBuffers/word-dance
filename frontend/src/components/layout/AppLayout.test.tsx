@@ -1,17 +1,18 @@
-// Shell: TopNav + TabBar with the counters badge and the today dot (FRONTEND 2/4), bare on /study.
+// Shell: TopNav + TabBar with the counters badge and the today dot (FRONTEND 2/4), bare on /study; slice 1-B: the SwitchBar while
+// `session.guardian` is set (switch back → GateDialog → endpoint 105 → applyAuth → /children) and no password note for a child.
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MeResponse } from '@/api/endpoints';
-import type { TodayResponse } from '@/api/types';
+import type { SessionInfo, TodayResponse } from '@/api/types';
 import { AuthProvider } from '@/auth/AuthContext';
 import { zh } from '@/i18n/zh';
 import { AppLayout, PASSWORD_BANNER_PREF, hasUngradedItems, resetTodayBadge, setTodayUngraded, useTodayUngraded } from './AppLayout';
 
 const ISO = '2026-10-14T00:00:00Z';
 
-const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_open: 2, attention: 1 }): MeResponse => ({
-  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: null, ...over },
+const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_open: 2, attention: 1 }, session: SessionInfo = { guardian: null, gate_until: null }): MeResponse => ({
+  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, ...over },
   settings: {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -35,6 +36,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
   },
   server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false },
   counters,
+  session,
 });
 
 const today = (done: number, total: number): TodayResponse => ({
@@ -67,12 +69,12 @@ const today = (done: number, total: number): TodayResponse => ({
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-function mockFetch(routes: Record<string, () => Response>) {
-  const fn = vi.fn<typeof fetch>((input) => {
+function mockFetch(routes: Record<string, (init?: RequestInit) => Response>) {
+  const fn = vi.fn<typeof fetch>((input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const path = url.split('?')[0] ?? url;
     const handler = routes[path];
-    return Promise.resolve(handler ? handler() : json(404, { error: { code: 'not_found', message: '' } }));
+    return Promise.resolve(handler ? handler(init) : json(404, { error: { code: 'not_found', message: '' } }));
   });
   vi.stubGlobal('fetch', fn);
   return fn;
@@ -87,6 +89,7 @@ function renderShell(path: string) {
             <Route path="/today" element={<div>today-page</div>} />
             <Route path="/study" element={<div>study-page</div>} />
             <Route path="/admin" element={<div>admin-page</div>} />
+            <Route path="/children" element={<div>children-page</div>} />
           </Route>
         </Routes>
       </AuthProvider>
@@ -159,6 +162,34 @@ describe('AppLayout', () => {
     renderShell('/today');
     await screen.findByText('today-page');
     expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
+  });
+
+  it('shows the switch bar for a switched child session; switching back passes the gate (endpoint 105) and lands on /children', async () => {
+    const childMe = me({ id: 4, username: 'u_tao00001', display_name: 'Tao', is_child: true, has_password: false }, { suggestions_open: 0, attention: 0 }, { guardian: { id: 1, display_name: 'Mom' }, gate_until: null });
+    const guardianMe = me({ display_name: 'Mom', account_kind: 'guardian' }, { suggestions_open: 0, attention: 0 }, { guardian: null, gate_until: '2026-10-14T00:10:00Z' });
+    let current = childMe;
+    const fetchMock = mockFetch({
+      '/api/auth/me': () => json(200, current),
+      '/api/today': () => json(200, today(10, 10)),
+      '/api/auth/switch/back': () => {
+        current = guardianMe;
+        return json(200, { user: guardianMe.user, settings: guardianMe.settings });
+      },
+    });
+    renderShell('/today');
+    expect(await screen.findByText(zh.children.switchBar('Tao', 'Mom'))).toBeTruthy();
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull(); // a child without a password gets no note: the guardian sets the login
+    fireEvent.click(screen.getByRole('button', { name: zh.children.switchBack }));
+    const dialog = (await screen.findByRole('heading', { name: zh.children.gateTitle })).closest('dialog') as HTMLElement;
+    expect(within(dialog).getAllByRole('radio').map((r) => r.textContent)).toEqual([zh.children.gatePin, zh.children.gatePassword, zh.children.gateCode]);
+    fireEvent.change(within(dialog).getByLabelText(new RegExp(`^${zh.children.pin}`)), { target: { value: '274913' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: zh.children.gateVerify }));
+    expect(await screen.findByText('children-page')).toBeTruthy();
+    const back = fetchMock.mock.calls.find(([u]) => String(u) === '/api/auth/switch/back');
+    expect(back?.[1]?.method).toBe('POST');
+    expect(JSON.parse(String(back?.[1]?.body))).toEqual({ pin: '274913' });
+    expect(fetchMock.mock.calls.filter(([u]) => String(u) === '/api/auth/logout')).toHaveLength(0); // applyAuth, never logout()
+    await waitFor(() => expect(screen.queryByText(zh.children.switchBar('Tao', 'Mom'))).toBeNull());
   });
 
   it('exposes the today badge store to pages', () => {

@@ -23,7 +23,7 @@ vi.mock('@/native/capacitor', async (importOriginal) => ({
 }));
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const user: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null };
+const user: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
 const server = { version: '0.1.0', registration_mode: 'open', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false };
 const settings = { push_enabled: true, push_time: '08:00', timezone: 'Asia/Shanghai', stages: ['xs'], current_stage: 'xs' } as unknown as Settings;
 
@@ -44,7 +44,7 @@ beforeEach(() => {
       const method = (init?.method ?? 'GET').toUpperCase();
       if (method === 'GET' && path === '/api/auth/me') {
         await gate;
-        return meStatus === 200 ? json(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 } }) : json(meStatus, { error: { code: 'server_error', message: '' } });
+        return meStatus === 200 ? json(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } }) : json(meStatus, { error: { code: 'server_error', message: '' } });
       }
       if (method === 'POST' && path === '/api/auth/logout') return new Response(null, { status: 204 });
       if (method === 'GET' && path === '/api/health') return json(200, { status: 'ok', version: '0.1.0', registration_mode: 'open', needs_setup: false, time: '' });

@@ -29,7 +29,7 @@ vi.mock('@/native/capacitor', async (importOriginal) => ({
 }));
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const user: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null };
+const user: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
 const server = { version: '0.1.0', registration_mode: 'open', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false };
 let settings: Settings;
 let puts: Record<string, unknown>[];
@@ -51,7 +51,7 @@ beforeEach(() => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       const path = url.split('?')[0] ?? url;
       const method = (init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && path === '/api/auth/me') return json(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 } });
+      if (method === 'GET' && path === '/api/auth/me') return json(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
       if (method === 'GET' && path === '/api/settings/timezones') return json(200, { items: ['Asia/Shanghai'] });
       if (method === 'PUT' && path === '/api/settings') {
         const changes = JSON.parse(String(init?.body)) as Record<string, unknown>;

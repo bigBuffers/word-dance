@@ -14,7 +14,7 @@ import SettingsPage, { buildImportBody, toggleStageSetting, webhookFailureReason
 
 const HOOK = 'https://hooks.example.com/x';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null };
+const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
 let user: User = baseUser;
 const baseServer = { version: '0.1.0', registration_mode: 'open', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false };
 let server = baseServer;
@@ -35,7 +35,7 @@ function installFetch() {
         calls.push({ method, path, body, status });
         return json(status, payload);
       };
-      if (method === 'GET' && path === '/api/auth/me') return respond(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 } });
+      if (method === 'GET' && path === '/api/auth/me') return respond(200, { user, settings, server, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
       if (method === 'GET' && path === '/api/settings/timezones') return respond(200, { items: ['Asia/Shanghai'] });
       if (method === 'PUT' && path === '/api/settings') {
         const changes = body ?? {};
@@ -65,7 +65,11 @@ function installFetch() {
         user = { ...user, phone_masked: '139****9000' };
         return respond(200, { user });
       }
-      if (method === 'DELETE' && path === '/api/account') return respond(204, undefined);
+      if (method === 'DELETE' && path === '/api/account') {
+        // a guardian with children: 409 has_children (with the names) until delete_children is true (API.md 8, slice 1-B)
+        if (user.account_kind === 'guardian' && body?.['delete_children'] !== true) return respond(409, { error: { code: 'has_children', message: '', details: { children: [{ id: 4, display_name: 'Tao' }, { id: 6, display_name: 'Mei' }] } } });
+        return respond(204, undefined);
+      }
       if (method === 'POST' && path === '/api/auth/logout') return respond(204, undefined);
       if (method === 'GET' && path === '/api/health') return respond(200, { status: 'ok', version: '0.1.0', registration_mode: 'open', needs_setup: false, sms_enabled: true, email_enabled: true, captcha: false, time: '2026-10-14T00:00:00Z' });
       return respond(404, { error: { code: 'not_found', message: '' } });
@@ -498,5 +502,78 @@ describe('account - login methods (FRONTEND 5.8, API.md 85-88, 7 / 8 with a code
     expect(within(sheet).queryByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' })).toBeNull();
     expect(within(sheet).queryByRole('button', { name: zh.auth.sendCode })).toBeNull();
     expect((within(sheet).getByRole('button', { name: zh.common.save }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('account - guardian and child accounts (FRONTEND 5.8, API.md 8 / 108 / 109, slice 1-B)', () => {
+  beforeEach(() => {
+    calls = [];
+    user = baseUser;
+    server = { ...baseServer, sms_enabled: true };
+    settings = {
+      stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
+      webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+    } as unknown as Settings;
+    installFetch();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a guardian gets the children row first in the account section and no join-family row', async () => {
+    user = { ...baseUser, account_kind: 'guardian', age_band: 'adult' };
+    renderSettings();
+    const section = (await screen.findByRole('heading', { name: zh.settings.account })).closest('section') as HTMLElement;
+    const link = within(section).getByRole('link', { name: zh.settings.myChildren });
+    expect(link.getAttribute('href')).toBe('/children');
+    expect(within(section).queryByRole('button', { name: zh.settings.isChildAccount })).toBeNull();
+    expect(within(section).getByLabelText(zh.settings.displayName)).toBeTruthy(); // the ordinary account fields stay
+    const rows = [...section.querySelectorAll('.settings__row')];
+    expect(rows[0]?.textContent).toContain(zh.settings.myChildren);
+  });
+
+  it('a learner gets the join-family row; the button opens the claim sheet', async () => {
+    renderSettings();
+    const section = (await screen.findByRole('heading', { name: zh.settings.account })).closest('section') as HTMLElement;
+    expect(within(section).queryByRole('link', { name: zh.settings.myChildren })).toBeNull();
+    expect(within(section).getByText(zh.settings.joinFamily)).toBeTruthy();
+    fireEvent.click(within(section).getByRole('button', { name: zh.settings.isChildAccount }));
+    expect(await screen.findByRole('heading', { name: zh.children.claimTitle })).toBeTruthy();
+    expect(screen.getByText(zh.children.claimLead)).toBeTruthy();
+  });
+
+  it('a child sees the guardian note instead of the account fields; export, import and logout stay', async () => {
+    user = { ...baseUser, is_child: true, has_password: false, age_band: 'u14' };
+    renderSettings();
+    const section = (await screen.findByRole('heading', { name: zh.settings.account })).closest('section') as HTMLElement;
+    expect(within(section).getByText(zh.settings.childManaged)).toBeTruthy();
+    expect(within(section).queryByLabelText(zh.settings.displayName)).toBeNull();
+    expect(within(section).queryByText(zh.settings.loginMethods)).toBeNull();
+    expect(within(section).queryByLabelText(zh.auth.email)).toBeNull();
+    expect(within(section).queryByRole('button', { name: zh.settings.setPassword })).toBeNull();
+    expect(within(section).queryByRole('button', { name: zh.settings.deleteAccount })).toBeNull();
+    expect(within(section).queryByRole('button', { name: zh.settings.isChildAccount })).toBeNull();
+    expect(within(section).getByText(zh.settings.export)).toBeTruthy();
+    expect(within(section).getByRole('button', { name: zh.auth.logout })).toBeTruthy();
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
+  });
+
+  it('a guardian deleting the account sees the children named after 409 has_children and retries with delete_children once the box is ticked', async () => {
+    user = { ...baseUser, account_kind: 'guardian', age_band: 'adult' };
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: zh.settings.deleteAccount }));
+    const sheet = (await screen.findByRole('heading', { name: zh.settings.deleteAccount })).closest('dialog') as HTMLElement;
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.password}`)), { target: { value: 'secret123' } });
+    expect(within(sheet).queryByRole('checkbox')).toBeNull();
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.settings.deleteAccount }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/account').map((c) => c.status)).toEqual([409]));
+    expect(await screen.findByText(zh.errors.hasChildren)).toBeTruthy();
+    expect(within(sheet).getByText(new RegExp(`${zh.settings.childrenOf}.*Tao.*Mei`))).toBeTruthy();
+    const submit = within(sheet).getByRole('button', { name: zh.settings.deleteAccount }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true); // nothing is deleted until the guardian decides
+    fireEvent.click(within(sheet).getByRole('checkbox', { name: zh.settings.deleteChildren }));
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/account').map((c) => c.body)).toEqual([{ password: 'secret123' }, { password: 'secret123', delete_children: true }]));
+    expect(await screen.findByText('login-page')).toBeTruthy();
   });
 });

@@ -14,7 +14,7 @@ PW = "Correct-Horse-7"
 NOW = datetime(2026, 10, 14, 0, 0, 0, tzinfo=timezone.utc)
 NOW_ISO = "2026-10-14T00:00:00Z"
 INVITE_RE = re.compile(r"^[A-Z0-9-]{10,}$")
-ADMIN_USER_KEYS = {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "is_active", "last_login_at", "bank_size", "streak_days", "has_password", "phone_masked", "needs_profile", "age_band"}  # AdminUser extends User: the 0018 fields (docs/AUTH_SIGNUP_DESIGN.md §5.1)
+ADMIN_USER_KEYS = {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "is_active", "last_login_at", "bank_size", "streak_days", "has_password", "phone_masked", "needs_profile", "age_band", "account_kind", "is_child", "needs_profile_prompt"}  # AdminUser extends User: the 0018 fields (docs/AUTH_SIGNUP_DESIGN.md §5.1) + the slice 1-B fields (§5.1 「家长 + 孩子」)
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +69,7 @@ def test_list_users_with_search_paging_and_derived_fields(client: TestClient, pe
     alice = page["items"][0]
     assert set(alice) == ADMIN_USER_KEYS and alice["role"] == "admin" and alice["is_active"] is True and alice["last_login_at"] is None
     assert alice["bank_size"] == 0 and alice["streak_days"] == 0 and alice["email"] == "alice@example.com" and alice["email_verified"] is False
+    assert (alice["account_kind"], alice["is_child"], alice["needs_profile_prompt"]) == ("learner", False, True)  # a pre-1-A-style account: nothing declared (admins are prompted too)
     assert page["items"][1]["display_name"] == "小鲍"
     bob = people["bob"]
     c = db.connect(settings.db_path)

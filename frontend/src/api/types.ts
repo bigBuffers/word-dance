@@ -23,6 +23,7 @@ export type DanceColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purpl
 export type AgeBand = 'u14' | '14plus' | 'adult';   // users.age_band — the learner's own declaration, never verified (docs/AUTH_SIGNUP_DESIGN.md §5.1)
 export type CodeChannel = 'phone' | 'email';         // login_codes.channel (endpoints 80, 81, 85)
 export type IdentityProvider = 'phone' | 'wechat_mini' | 'qq' | 'apple';   // identities.provider — only `phone` is issued in slice 1-A
+export type AccountKind = 'learner' | 'guardian';   // users.account_kind (slice 1-B) — a guardian creates, switches into and manages child accounts (endpoints 94–105)
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -34,6 +35,9 @@ export interface User {
   phone_masked: string | null;          // the live phone identity with its middle digits hidden (`138****8000`); null without one
   needs_profile: boolean;               // a code-created account that has not saved its nickname + age band yet (endpoint 89); the SPA shows 「首次设置」 before step 1 of /welcome
   age_band: AgeBand | null;             // null = not declared
+  account_kind: AccountKind;            // 'guardian' unlocks 我的孩子 (endpoints 94–104); chosen at /welcome step 0 (89), the legacy prompt (110) or by a claim (109)
+  is_child: boolean;                    // users.guardian_user_id IS NOT NULL — a child account: account / identity changes only through the guardian (403 guardian_required on 6–10, 85–89, 104, 108–111)
+  needs_profile_prompt: boolean;        // an account that has not declared its kind / age band (null age_band, no placeholder username, not a child — pre-1-A accounts and password registrations alike) and was not snoozed in the last 30 days (111); the SPA shows 「补充信息」 once per sitting
 }
 export interface ServerFlags {
   version: string; registration_mode: 'open' | 'invite' | 'closed' | 'verified'; email_configured: boolean;
@@ -44,6 +48,10 @@ export interface ServerFlags {
   sms_enabled: boolean;                 // WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
 }
 export interface Counters { suggestions_open: number; attention: number }   // GET /api/auth/me → badges
+export interface SessionInfo {
+  guardian: { id: number; display_name: string } | null;   // the guardian who switched this device into a child account (sessions.actor_user_id, endpoint 104); the SPA shows 「切回家长」 → 105
+  gate_until: string | null;            // a guardian's own session: until when the 家长门 is passed (sessions.guardian_gate_at + 10 min, endpoints 102 / 105); null = not passed / not a guardian
+}
 export interface CaptchaChallenge { id: string; image: string; exp: number; sig: string; expires_in_s: number }   // endpoint 79: `image` is a PNG data: URI; the client returns id/exp/sig with the digits it read
 export interface CodeSendResponse { sent: boolean; expires_in_s: number }   // endpoints 9, 80, 82, 85, 90 — always `sent: true`; identical for known and unknown targets
 export interface StaleChallenge {
@@ -58,6 +66,18 @@ export interface CodeLoginResponse {
   created: boolean;                     // true when this call created the account (HTTP 201)
   challenge: StaleChallenge | null;     // set instead of a session when the phone identity is stale (WD_PHONE_STALE_DAYS)
 }
+export interface ChildAccount {
+  id: number; display_name: string;
+  username: string | null;              // the simple login the guardian set (95 / 96); null while the account has only its placeholder username
+  has_password: boolean; phone_masked: string | null; age_band: AgeBand | null;
+  onboarding_state: 'pending' | 'screen' | 'done'; created_at: string; last_login_at: string | null;
+  bank_size: number; streak_days: number;   // the AdminUser figures, for the guardian's overview
+  sessions: number;                     // live sessions of the child (signed-in devices); endpoint 98 revokes them
+}
+export interface ChildrenResponse { items: ChildAccount[]; pin_set: boolean; ready: boolean; missing: ('phone' | 'second_factor')[]; gate_until: string | null }   // endpoint 94: `ready` = the guardian holds a live phone AND a password or verified e-mail (the two-factor rule, docs/AUTH_SIGNUP_DESIGN.md §5.1); `missing` names what is absent
+export interface ChildResponse { child: ChildAccount }   // endpoints 95, 96, 101
+export interface ChildLoginCode { code: string; expires_in_s: number }   // endpoint 99: the 8-digit one-time code, shown once, never logged
+export interface GateResponse { gate_until: string }   // endpoint 102
 export interface DemoWord { word: WordBrief; content: Content | null; image: ImageMeta; dance: DanceSpec | null }   // endpoint 77
 export interface DemoResponse { items: DemoWord[] }
 export interface Settings {

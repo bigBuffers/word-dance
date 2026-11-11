@@ -661,6 +661,16 @@ def test_hourly_gc(settings, seeded):
             (6, uid, "2026-10-14T00:40:00Z", "2026-10-14T00:30:00Z"),  # used half an hour ago AND expired since (the real shape: a code is used before it expires) → kept a day
         ],
     )
+    # family_codes (0019): the same rule — expired unused rows go, used rows after a day; a live child code and a claim code used an hour ago stay
+    conn.executemany(
+        "INSERT INTO family_codes(id, kind, user_id, target, code_hash, expires_at, used_at) VALUES (?, ?, ?, ?, 'h', ?, ?)",
+        [
+            (1, "child_login", uid, None, "2026-10-14T00:59:00Z", None),  # expired, unused → gone
+            (2, "child_login", uid, None, "2026-10-14T01:10:00Z", None),  # live → kept
+            (3, "claim_guardian", uid, "+8613800138000", "2026-10-14T01:10:00Z", "2026-10-13T00:55:00Z"),  # used more than a day ago → gone
+            (4, "claim_guardian", uid, "+8613800138000", "2026-10-14T00:40:00Z", "2026-10-14T00:00:00Z"),  # used an hour ago (and expired since) → kept a day (audit)
+        ],
+    )
     # sms.sent.* kv counters (sms_budget): older than two days go, the rest stay
     for key in ("sms.sent.2026-10-11", "sms.sent.2026-10-11T23", "sms.sent.2026-10-12", "sms.sent.2026-10-13T22", "sms.sent.2026-10-14", "sms.sent.2026-10-14T00"):
         db.kv_set(conn, key, "3")
@@ -669,6 +679,7 @@ def test_hourly_gc(settings, seeded):
     assert [r[0] for r in conn.execute("SELECT token_hash FROM sessions")] == ["live"]
     assert [r[0] for r in conn.execute("SELECT key FROM auth_throttle")] == ["login:user:bob"]  # still locked out → kept
     assert [r[0] for r in conn.execute("SELECT id FROM login_codes ORDER BY id")] == [2, 5, 6]
+    assert [r[0] for r in conn.execute("SELECT id FROM family_codes ORDER BY id")] == [2, 4]
     assert [r[0] for r in conn.execute("SELECT key FROM kv WHERE key LIKE 'sms.sent.%' ORDER BY key")] == ["sms.sent.2026-10-12", "sms.sent.2026-10-13T22", "sms.sent.2026-10-14", "sms.sent.2026-10-14T00"]
     assert conn.execute("SELECT status, locked_by FROM jobs WHERE id = ?", (job,)).fetchone()[:] == ("queued", None)
     assert tick(conn, settings, now + timedelta(minutes=30)).gc is False

@@ -262,6 +262,17 @@ export function errorMessage(e: unknown): string {
     }
     case 'email_send_failed':
       return z.emailSendFailed;
+    // guardian and child accounts (API.md §1.1, slice 1-B)
+    case 'invalid_pin':
+      return z.invalidPin;
+    case 'guardian_required':
+      return z.guardianRequired;
+    case 'guardian_gate_required':
+      return z.guardianGateRequired;
+    case 'guardian_factors_required':
+      return z.guardianFactorsRequired;
+    case 'has_children':
+      return z.hasChildren;
     default:
       return e.message || z.server;
   }

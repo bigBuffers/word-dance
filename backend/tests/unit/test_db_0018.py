@@ -57,8 +57,8 @@ def test_0018_adds_identities_login_codes_and_the_account_columns(settings, tmp_
         assert (18, "auth_identities") in result.applied and db.current_version(c) >= 18
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         # columns appended in file order, nothing else moved
-        assert [r["name"] for r in c.execute("PRAGMA table_info(users)")] == [*before_users_cols, *USERS_0018_COLUMNS]
-        assert [r["name"] for r in c.execute("PRAGMA table_info(sessions)")] == [*before_sessions_cols, "actor_user_id"]
+        assert [r["name"] for r in c.execute("PRAGMA table_info(users)")] == [*before_users_cols, *USERS_0018_COLUMNS, "profile_prompted_at"]  # 0019 rides along
+        assert [r["name"] for r in c.execute("PRAGMA table_info(sessions)")] == [*before_sessions_cols, "actor_user_id", "guardian_gate_at"]
         kinds = {r["name"]: r for r in c.execute("PRAGMA table_info(users)")}
         assert (kinds["account_kind"]["notnull"], kinds["account_kind"]["dflt_value"]) == (1, "'learner'")
         assert all(kinds[col]["notnull"] == 0 and kinds[col]["dflt_value"] is None for col in USERS_0018_COLUMNS if col != "account_kind")
@@ -70,7 +70,7 @@ def test_0018_adds_identities_login_codes_and_the_account_columns(settings, tmp_
         assert all(r["account_kind"] == "learner" and r["age_band"] is None and r["guardian_user_id"] is None for r in rows.values())
         assert c.execute("SELECT actor_user_id FROM sessions").fetchone()[0] is None
         # the two tables and their indexes; email_codes stays with its row
-        assert set(db.table_names(c)) == before_tables | {"identities", "login_codes"}
+        assert set(db.table_names(c)) == before_tables | {"identities", "login_codes", "family_codes"}  # 0019 rides along
         assert c.execute("SELECT COUNT(*) FROM email_codes").fetchone()[0] == 1
 
         def indexes(table: str) -> set[str]:

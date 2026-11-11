@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -182,6 +182,8 @@ def issue_and_send(
     ip: str,
     now: datetime,
     new_account: bool = False,
+    issuer: Callable[[sqlite3.Connection], str] | None = None,
+    voider: Callable[[sqlite3.Connection], None] | None = None,
 ) -> None:
     """Write the ``login_codes`` row and deliver the code.
 
@@ -190,6 +192,11 @@ def issue_and_send(
     the commit and the provider call happens outside any transaction. E-mail: the row in its own transaction, then the mail. A
     failed send voids the row: a provider rate limit → 429 ``rate_limited`` (``retry_after_s``), a number the provider refuses →
     400 ``invalid_phone``, anything else → 503 ``sms_send_failed`` / ``email_send_failed``. Only the failure kind is logged.
+
+    ``issuer`` / ``voider`` (slice 1-B, the claim code of endpoint 108): on the phone channel ``issuer(conn)`` replaces
+    ``security.issue_login_code`` inside the reservation transaction (it returns the code to send — a ``family_codes`` row instead of a
+    ``login_codes`` row) and ``voider(conn)`` replaces ``void_login_codes`` after a failed send; the SMS caps, the template of ``purpose``
+    and the failure semantics stay. The e-mail channel has no such rows: passing either hook there is a ``ValueError``.
     """
     if channel == "phone":
         sender = sms_sender(request)
@@ -197,12 +204,18 @@ def issue_and_send(
             raise ApiError("sms_unconfigured")
         with db.tx(conn):
             sms_budget.reserve_sms(conn, cfg, now, new_account=new_account)
-            code = security.issue_login_code(conn, channel="phone", target=target, purpose=purpose, user_id=user_id, ip=ip, secret_key=cfg.secret_key, now=now)
+            if issuer is not None:
+                code = issuer(conn)
+            else:
+                code = security.issue_login_code(conn, channel="phone", target=target, purpose=purpose, user_id=user_id, ip=ip, secret_key=cfg.secret_key, now=now)
         sms_budget.sms_events(conn, cfg, now)
         try:
             sender.send_code(target, code, TEMPLATE_BY_PURPOSE[purpose], minutes=CODE_MINUTES)
         except SmsError as e:
-            security.void_login_codes(conn, channel="phone", target=target, purpose=purpose, now=now)
+            if voider is not None:
+                voider(conn)
+            else:
+                security.void_login_codes(conn, channel="phone", target=target, purpose=purpose, now=now)
             log.warning("sms code not sent: %s", e.kind, extra={"event": "sms_code_failed", "user_id": user_id})
             if e.kind == "rate_limited":
                 raise ApiError("rate_limited", details={"retry_after_s": int(e.retry_after_s or 60)}) from e
@@ -211,6 +224,8 @@ def issue_and_send(
             raise ApiError("sms_send_failed") from e
         log.info("sms code sent (%s)", purpose, extra={"event": "sms_code_sent", "user_id": user_id})
         return
+    if issuer is not None or voider is not None:
+        raise ValueError("issue_and_send: issuer / voider hooks are for the phone channel only")
     mailer = mailer_of(request)
     if mailer is None:
         raise ApiError("smtp_unconfigured")
@@ -474,7 +489,7 @@ def code_login(body: CodeLoginRequest, request: Request, response: Response, con
     log.info("code login", extra={"event": "code_login", "user_id": user_id, "channel": body.channel, "created_account": created})
     if created:
         response.status_code = 201
-    return {**_auth_payload(conn, user_id), "created": created, "challenge": None}
+    return {**_auth_payload(conn, user_id, now=now), "created": created, "challenge": None}
 
 
 # ------------------------------------------------------------------------------------------------- 82
@@ -535,7 +550,7 @@ def challenge_confirm(body: ChallengeConfirmRequest, request: Request, response:
         security.gc_sessions(conn, now_iso)
         _issue_session(request, response, conn, user_id, now)
     log.info("stale phone login confirmed", extra={"event": "auth_stale_login_confirmed", "user_id": user_id})
-    return _auth_payload(conn, user_id)
+    return _auth_payload(conn, user_id, now=now)
 
 
 # ------------------------------------------------------------------------------------------------- 84
@@ -566,7 +581,7 @@ def challenge_dispute(body: ChallengeDisputeRequest, request: Request, response:
             mailer.send(str(old_user["email"]), DISPUTE_NOTICE_SUBJECT, text)
         except MailerError:
             log.warning("dispute notice e-mail not sent", extra={"event": "phone_dispute_notice_failed", "user_id": old_user_id})
-    return _auth_payload(conn, new_user_id)
+    return _auth_payload(conn, new_user_id, now=now)
 
 
 # ------------------------------------------------------------------------------------------------- 90

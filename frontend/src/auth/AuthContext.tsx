@@ -1,8 +1,11 @@
 // AuthContext — session state (FRONTEND.md §3) and the route guards of FRONTEND §2.
 //
-// Loads `GET /api/auth/me` once; exposes `user`, `settings`, `server`, `counters`, `loading`,
+// Loads `GET /api/auth/me` once; exposes `user`, `settings`, `server`, `counters`, `session`, `loading`,
 // `login()`, `register()`, `applyAuth()` (any other call that answered an `AuthResponse` + cookie — code login,
-// stale-phone confirm / dispute), `logout()`, `refresh()`, `refreshCounters()`, `updateSettings()`.
+// stale-phone confirm / dispute, the guardian ⇄ child switches 104 / 105 and the child-device login 107, which therefore
+// never fire `auth:signed-out`), `logout()`, `refresh()`, `refreshCounters()`, `updateSettings()`. `session` (slice 1-B) is
+// `MeResponse.session`: the guardian who switched this device into a child account (the shell's switch-back bar) and a
+// guardian's own gate stamp; null while logged out.
 // A 401 `unauthorized` anywhere (the client's `auth:expired` event) clears the context, which makes
 // `<RequireAuth/>` redirect to `/login?next=…`. For guests the public `GET /api/health` flags
 // (`needs_setup`, `registration_mode`) are exposed as `health` for the login/register pages.
@@ -12,7 +15,7 @@ import { AUTH_EXPIRED_EVENT, AUTH_SIGNED_OUT_EVENT, isApiError } from '@/api/cli
 import * as endpoints from '@/api/endpoints';
 import type { AuthResponse, HealthResponse, RegisterBody, SettingsUpdate } from '@/api/endpoints';
 import { setServerAudio } from '@/audio/serverAudio';
-import type { Counters, ServerFlags, Settings, User } from '@/api/types';
+import type { Counters, ServerFlags, SessionInfo, Settings, User } from '@/api/types';
 import { useToast } from '@/hooks/useToast';
 import { zh } from '@/i18n/zh';
 
@@ -21,6 +24,8 @@ export interface AuthState {
   settings: Settings | null;
   server: ServerFlags | null;
   counters: Counters | null;
+  /** `MeResponse.session` (slice 1-B): the switching guardian and the guardian-gate stamp of this session; null while logged out. */
+  session: SessionInfo | null;
   /** `GET /api/health` flags, fetched while logged out (login/register pages). */
   health: HealthResponse | null;
   /** True until the first `/api/auth/me` attempt has settled. */
@@ -32,7 +37,8 @@ export interface AuthContextValue extends AuthState {
   register(body: RegisterBody): Promise<void>;
   /**
    * Installs the session an `AuthResponse` carries (its cookie is already set): `user` / `settings` first, then one
-   * `/api/auth/me` for the server flags and counters — the path every sign-in must take (endpoints 3, 2, 81, 83, 84).
+   * `/api/auth/me` for the server flags, counters and session — the path every sign-in must take (endpoints 3, 2, 81, 83, 84,
+   * and the switches 104 / 105 / 107, which replace the session without a sign-out).
    * `<RequireGuest/>` redirects the moment `user` is set, so call it only once a session really exists (never for a
    * `CodeLoginResponse` that carries a `challenge` instead of a user).
    */
@@ -51,10 +57,10 @@ export interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const signedOut = { user: null, settings: null, counters: null } as const;
+const signedOut = { user: null, settings: null, counters: null, session: null } as const;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AuthState>({ user: null, settings: null, server: null, counters: null, health: null, loading: true });
+  const [state, setState] = useState<AuthState>({ user: null, settings: null, server: null, counters: null, session: null, health: null, loading: true });
 
   // Whether a session is currently held — lets the auth:expired listener ignore the expected 401 of
   // the bootstrap /me call (the client dispatches the event for every 401 `unauthorized`).
@@ -77,7 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await endpoints.getMe();
       setServerAudio(me.server.audio, me.server.audio_key); // the module-level speak() (auto-pronounce, key P) reads the flag without the context
-      setState((s) => ({ ...s, user: me.user, settings: me.settings, server: me.server, counters: me.counters }));
+      setState((s) => ({ ...s, user: me.user, settings: me.settings, server: me.server, counters: me.counters, session: me.session ?? null }));
       return true;
     } catch (e) {
       if (isApiError(e) && e.status === 401) {
@@ -120,8 +126,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const applyAuth = useCallback(
     async (res: AuthResponse) => {
-      setState((s) => ({ ...s, user: res.user, settings: res.settings }));
-      await loadMe().catch(() => undefined); // server flags + counters; the session itself is already established
+      setState((s) => ({ ...s, user: res.user, settings: res.settings, session: null })); // the previous session's bar / stamp never outlives it
+      await loadMe().catch(() => undefined); // server flags + counters + session; the cookie session itself is already established
     },
     [loadMe],
   );

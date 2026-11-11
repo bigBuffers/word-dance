@@ -26,9 +26,11 @@
 * **Identities** (``identities``): :func:`phone_identity` / :func:`identity_by_subject` read the live (undisputed) rows; phone numbers
   are E.164 through :func:`normalize_phone` and shown masked (:func:`mask_phone`, :func:`mask_email`) — never logged.
 * :func:`is_safe_https_url`: the webhook host check (https, no raw IPs, no local names).
-* Row → DTO helpers (:func:`user_dto` / :func:`user_dto_for` with ``has_password`` / ``phone_masked`` / ``needs_profile`` / ``age_band``)
-  and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults, inside the caller's ``BEGIN IMMEDIATE``;
-  :func:`placeholder_username` + :func:`unusable_password_hash` for a code-created account) shared by the routers.
+* Row → DTO helpers (:func:`user_dto` / :func:`user_dto_for` with ``has_password`` / ``phone_masked`` / ``needs_profile`` / ``age_band`` and,
+  slice 1-B, ``account_kind`` / ``is_child`` / ``needs_profile_prompt`` — the last one needs ``now`` for the 30-day snooze of the legacy
+  prompt, API.md §9.1) and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults, inside the caller's
+  ``BEGIN IMMEDIATE``; the child columns of ``wd.family.create_child`` join the same INSERT; :func:`placeholder_username` +
+  :func:`unusable_password_hash` for a code-created account) shared by the routers.
 * CLI ``create-admin | set-password | promote | demote | invite | unlock | sms-probe`` (:func:`register_cli`, DEPLOY §9).
 """
 
@@ -95,6 +97,8 @@ CAPTCHA_IP_LIMIT, CAPTCHA_IP_WINDOW_S = 60, 3600  # GET /api/auth/captcha per cl
 PLACEHOLDER_USERNAME_RE = re.compile(r"^u_[a-z2-7]{8}$")  # the username a code-created account gets until endpoint 89 (User.needs_profile)
 PLACEHOLDER_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"  # lower-case base32: satisfies schemas.USERNAME_RE, distinct from the invite alphabet
 PHONE_RE = re.compile(r"^(?:\+?86)?(1\d{10})$")  # a mainland mobile number after the separators are dropped (+86 / 86 optional)
+PROFILE_PROMPT_SNOOZE_DAYS = 30  # the legacy 「补充信息」 prompt (API.md 110 / 111, slice 1-B): skipped → shown again after 30 days (wd.family re-exports it)
+ACCOUNT_KINDS = ("learner", "guardian")  # users.account_kind CHECK (0018)
 
 # DESIGN §10 "Throttling"
 LOGIN_IP_LIMIT, LOGIN_IP_WINDOW_S = 20, 600
@@ -258,11 +262,13 @@ def cookie_secure(request: Request, cfg: Settings) -> bool:
     return False
 
 
-def set_session_cookie(response: Response, token: str, cfg: Settings, *, secure: bool) -> None:
+def set_session_cookie(response: Response, token: str, cfg: Settings, *, secure: bool, max_age_s: int | None = None) -> None:
+    """The ``wd_session`` cookie; ``max_age_s`` overrides ``WD_SESSION_DAYS`` — the 90-day child-device session of endpoint 107 and the
+    sliding re-issue of ``main.WdMiddleware`` (the seconds left on a session the slide did not shorten, slice 1-B)."""
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
-        max_age=cfg.session_days * 86400,
+        max_age=int(max_age_s) if max_age_s is not None else cfg.session_days * 86400,
         path="/",
         httponly=True,
         samesite="lax",
@@ -813,12 +819,27 @@ def _column(row: Mapping[str, Any], key: str) -> Any:
         return None
 
 
-def user_dto(row: Mapping[str, Any], *, phone: str | None = None) -> dict[str, Any]:
+def needs_profile_prompt(row: Mapping[str, Any], now: datetime | None) -> bool:
+    """API.md §9.1 ``User.needs_profile_prompt`` (slice 1-B): a pre-1-A account that has not declared its kind / age band — ``age_band``
+    NULL, not a code-created account still in its first-time setup (the placeholder username, ``needs_profile``), not a child — and was
+    not snoozed in the last :data:`PROFILE_PROMPT_SNOOZE_DAYS` days (``profile_prompted_at``, endpoint 111). False without ``now``
+    (a caller that does not render the prompt)."""
+    if now is None or _column(row, "age_band") is not None or _column(row, "guardian_user_id") is not None:
+        return False
+    if PLACEHOLDER_USERNAME_RE.match(str(row["username"])):
+        return False  # endpoint 89 (needs_profile) comes first
+    prompted = _column(row, "profile_prompted_at")
+    return prompted is None or parse_iso(str(prompted)) <= now - timedelta(days=PROFILE_PROMPT_SNOOZE_DAYS)
+
+
+def user_dto(row: Mapping[str, Any], *, phone: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     """API.md §9 ``User`` from a ``users`` row (``display_name`` defaults to the username).
 
     ``has_password`` = ``password_set_at IS NOT NULL`` (0018; false for a code-created account until endpoint 89 / 7 sets one),
     ``phone_masked`` = the live phone identity passed as ``phone`` (E.164; :func:`user_dto_for` looks it up), ``needs_profile`` =
-    a code-created account (placeholder username) that has not declared its age band yet (endpoint 89), ``age_band`` as declared.
+    a code-created account (placeholder username) that has not declared its age band yet (endpoint 89), ``age_band`` as declared;
+    slice 1-B: ``account_kind`` (``learner`` for a row without the column), ``is_child`` = ``guardian_user_id IS NOT NULL`` and
+    ``needs_profile_prompt`` (:func:`needs_profile_prompt`; always False without ``now``).
     """
     username = row["username"]
     return {
@@ -834,18 +855,22 @@ def user_dto(row: Mapping[str, Any], *, phone: str | None = None) -> dict[str, A
         "phone_masked": mask_phone(phone) if phone else None,
         "needs_profile": _column(row, "age_band") is None and bool(PLACEHOLDER_USERNAME_RE.match(str(username))),
         "age_band": _column(row, "age_band"),
+        "account_kind": _column(row, "account_kind") or "learner",
+        "is_child": _column(row, "guardian_user_id") is not None,
+        "needs_profile_prompt": needs_profile_prompt(row, now),
     }
 
 
-def user_dto_for(conn: sqlite3.Connection, row: Mapping[str, Any]) -> dict[str, Any]:
-    """:func:`user_dto` with the live phone identity looked up (``phone_masked`` filled) — the form every ``{user}`` response uses."""
+def user_dto_for(conn: sqlite3.Connection, row: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """:func:`user_dto` with the live phone identity looked up (``phone_masked`` filled) — the form every ``{user}`` response uses;
+    routers pass ``now`` so ``needs_profile_prompt`` is computed."""
     identity = phone_identity(conn, int(row["id"]))
-    return user_dto(row, phone=str(identity["subject"]) if identity else None)
+    return user_dto(row, phone=str(identity["subject"]) if identity else None, now=now)
 
 
-def admin_user_dto(row: Mapping[str, Any], *, bank_size: int, streak_days: int, phone: str | None = None) -> dict[str, Any]:
+def admin_user_dto(row: Mapping[str, Any], *, bank_size: int, streak_days: int, phone: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     """API.md §9 ``AdminUser``."""
-    dto = user_dto(row, phone=phone)
+    dto = user_dto(row, phone=phone, now=now)
     dto.update(
         {
             "is_active": bool(int(row["is_active"])),
@@ -948,24 +973,35 @@ def create_user(
     email: str | None = None,
     password_set_at: str | None,
     email_verified_at: str | None = None,
+    account_kind: str = "learner",
+    guardian_user_id: int | None = None,
+    age_band: str | None = None,
+    age_declared_at: str | None = None,
+    age_declared_ip: str | None = None,
+    guardian_consent_at: str | None = None,
 ) -> int:
     """Insert ``users`` + ``user_settings`` (``next_push_at`` from the defaults ``Asia/Shanghai`` / ``08:00``).
 
     ``password_hash`` is pre-computed by the caller (:func:`hash_password`) so the bcrypt work never runs inside
     the write transaction; ``password_set_at`` is ``to_iso(now)`` for a password registration and None for a code-created
     account (``password_hash`` then holds :func:`unusable_password_hash`); ``email_verified_at`` is set when the e-mail itself
-    was the verified channel (endpoint 81). Runs inside the caller's transaction when one is open (registration does the
+    was the verified channel (endpoint 81). The slice 1-B columns join the same INSERT: ``account_kind`` (``guardian`` for the account
+    the claim flow creates, endpoint 109), and for a child (``wd.family.create_child``, endpoint 95) ``guardian_user_id``, ``age_band``,
+    the declaration stamps and ``guardian_consent_at``. Runs inside the caller's transaction when one is open (registration does the
     bootstrap count check in the same ``BEGIN IMMEDIATE``), otherwise in its own. Uniqueness is pre-checked by
     callers; a racing duplicate surfaces as ``sqlite3.IntegrityError``.
     """
     if role not in ("user", "admin"):
         raise ValueError(f"invalid role {role!r}")
+    if account_kind not in ACCOUNT_KINDS:
+        raise ValueError(f"invalid account_kind {account_kind!r}")
     now_iso = to_iso(now)
     with db.maybe_tx(conn):
         cur = conn.execute(
-            "INSERT INTO users(username, email, email_verified_at, display_name, password_hash, password_set_at, role, is_active, onboarding_state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)",
-            (username.strip(), email, email_verified_at, display_name, password_hash, password_set_at, role, now_iso, now_iso),
+            "INSERT INTO users(username, email, email_verified_at, display_name, password_hash, password_set_at, role, is_active, onboarding_state, created_at, updated_at, "
+            "account_kind, guardian_user_id, age_band, age_declared_at, age_declared_ip, guardian_consent_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (username.strip(), email, email_verified_at, display_name, password_hash, password_set_at, role, now_iso, now_iso, account_kind, guardian_user_id, age_band, age_declared_at, age_declared_ip, guardian_consent_at),
         )
         user_id = int(cur.lastrowid)
         conn.execute(

@@ -14,13 +14,13 @@ import AdminPage from './AdminPage';
 const ISO = '2026-11-10T08:00:00Z';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-const admin: User = { id: 1, username: 'root', display_name: 'root', email: 'root@example.com', email_verified: true, role: 'admin', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: 'adult' };
+const admin: User = { id: 1, username: 'root', display_name: 'root', email: 'root@example.com', email_verified: true, role: 'admin', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: 'adult', account_kind: 'learner', is_child: false, needs_profile_prompt: false };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: true, updated_at: ISO,
 };
-const me = () => json(200, { user: admin, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 } });
+const me = () => json(200, { user: admin, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
 
 const overview: AdminOverview = {
   users: { total: 12, active_7d: 5 },
@@ -43,8 +43,12 @@ const health: AdminHealth = {
   claude_bin: { path: '/usr/local/bin/claude', version: '2.0.0', ok: true, flag_tier: 1, last_probe_at: ISO }, seed_version: 'abc', migrations_version: 18, worker_lease: null, last_backup: null,
 };
 const users: Page<AdminUser> = {
-  items: [{ ...admin, id: 2, username: 'u_ab23cd45', display_name: 'Xiao Ming', email: null, email_verified: false, role: 'user', has_password: false, phone_masked: '138****8000', age_band: '14plus', is_active: true, last_login_at: ISO, bank_size: 12, streak_days: 3 }],
-  page: 1, page_size: 50, total: 1,
+  items: [
+    { ...admin, id: 2, username: 'u_ab23cd45', display_name: 'Xiao Ming', email: null, email_verified: false, role: 'user', has_password: false, phone_masked: '138****8000', age_band: '14plus', is_active: true, last_login_at: ISO, bank_size: 12, streak_days: 3 },
+    { ...admin, id: 3, username: 'mom', display_name: 'Mom', role: 'user', phone_masked: '139****9000', account_kind: 'guardian', is_active: true, last_login_at: ISO, bank_size: 0, streak_days: 0 },
+    { ...admin, id: 4, username: 'u_tao00001', display_name: 'Tao', email: null, email_verified: false, role: 'user', has_password: false, age_band: 'u14', is_child: true, is_active: true, last_login_at: null, bank_size: 5, streak_days: 1 },
+  ],
+  page: 1, page_size: 50, total: 3,
 };
 const disputedRow: DisputedIdentity = { id: 7, user: { id: 2, username: 'u_ab23cd45', display_name: 'Xiao Ming' }, provider: 'phone', subject_masked: '138****8001', verified_at: ISO, last_login_at: null, disputed_at: ISO, current_user_id: 3 };
 const disputed = (): Page<DisputedIdentity> => ({ items: [disputedRow], page: 1, page_size: 50, total: 1 });
@@ -125,6 +129,21 @@ describe('AdminPage', () => {
     expect(within(row).getByText(zh.admin.noPassword)).toBeTruthy();
     expect(within(row).getByText('138****8000')).toBeTruthy();
     expect(within(row).getByText('Xiao Ming')).toBeTruthy();
+    expect(within(row).queryByText(zh.admin.guardian)).toBeNull();
+    expect(within(row).queryByText(zh.admin.child)).toBeNull();
+  });
+
+  it('the users table marks guardians and children with chips next to the role (slice 1-B)', async () => {
+    mockFetch(baseRoutes());
+    renderAdmin();
+    fireEvent.click(await screen.findByRole('tab', { name: zh.admin.tabs.users }));
+    const mom = (await screen.findByText('mom')).closest('tr') as HTMLElement;
+    expect(within(mom).getByText(zh.admin.guardian)).toBeTruthy();
+    expect(within(mom).queryByText(zh.admin.child)).toBeNull();
+    const tao = (await screen.findByText('u_tao00001')).closest('tr') as HTMLElement;
+    expect(within(tao).getByText(zh.admin.child)).toBeTruthy();
+    expect(within(tao).getByText(zh.admin.noPassword)).toBeTruthy();
+    expect(within(tao).queryByText(zh.admin.guardian)).toBeNull();
   });
 
   it('the disputed-bindings card lists endpoint 92 rows; restore posts endpoint 93, drops the row and toasts zh.admin.restored', async () => {

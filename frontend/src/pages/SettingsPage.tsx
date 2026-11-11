@@ -4,13 +4,19 @@
 // CSV posted as is → result sheet), the login-methods block (API.md §3.1: phone bind / rebind / unbind through endpoints 85–88,
 // set-password for a code-created account through a `reauth` code + endpoint 7, change-password otherwise, the read-only username),
 // logout, delete account (password re-entry, or a `reauth` code when the account has no password — endpoint 8).
+// Slice 1-B (FRONTEND §5.8): a guardian gets the children row → /children first in the account section; a learner that is neither a
+// child nor an admin gets the join-family row (`zh.settings.joinFamily` + `isChildAccount` → `ClaimDialog`, endpoints 108 / 109);
+// a CHILD (`user.is_child`) sees `zh.settings.childManaged` instead of the nickname field, the login-methods block, the e-mail
+// field, the password row and the delete button (export / import / logout stay). A guardian's delete answers 409 `has_children`
+// with the children's names: the sheet lists them with the `deleteChildren` checkbox and retries with `delete_children: true`.
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { useNavigate } from 'react-router';
-import { errorMessage } from '@/api/client';
+import { Link, useNavigate } from 'react-router';
+import { errorMessage, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
 import type { CodeChannel, DanceMode, ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
+import { ClaimDialog } from '@/components/account/ClaimDialog';
 import { Button } from '@/components/ui/Button';
 import { CodeField, CODE_LENGTH } from '@/components/ui/CodeField';
 import { Field } from '@/components/ui/Field';
@@ -573,6 +579,9 @@ function AccountSection({ user }: { user: User }) {
   const [deletePw, setDeletePw] = useState('');
   const [deleteCode, setDeleteCode] = useState('');
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteChildrenOf, setDeleteChildrenOf] = useState<{ id: number; display_name: string }[] | null>(null); // 409 has_children: the children named by the server
+  const [deleteChildren, setDeleteChildren] = useState(false);
+  const [claimOpen, setClaimOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   // login methods: phone bind / rebind / unbind sheets (API.md 85–88)
   const [bindOpen, setBindOpen] = useState(false);
@@ -592,6 +601,9 @@ function AccountSection({ user }: { user: User }) {
   const smsOn = server?.sms_enabled === true;
   const emailOn = server?.email_configured !== false; // the same flag PushSection reads (`smtpMissing`)
   const hasPassword = user.has_password;
+  const isChild = user.is_child; // the guardian manages the child's nickname, login and deletion (API.md §1, the restriction list)
+  const isGuardian = user.account_kind === 'guardian';
+  const canClaim = !isChild && !isGuardian && user.role !== 'admin'; // the server refuses the others (108: admin / has_children)
 
   useEffect(() => setName(user.display_name), [user.display_name]);
   useEffect(() => setEmail(user.email ?? ''), [user.email]);
@@ -685,10 +697,15 @@ function AccountSection({ user }: { user: User }) {
     if (!deleteReady) return;
     setDeleteBusy(true);
     try {
-      await endpoints.deleteAccount(hasPassword ? { password: deletePw } : { code: deleteCode });
+      await endpoints.deleteAccount({ ...(hasPassword ? { password: deletePw } : { code: deleteCode }), ...(deleteChildren ? { delete_children: true } : {}) });
       await logout().catch(() => undefined);
       navigate(routePaths.login, { replace: true });
     } catch (err) {
+      if (isApiError(err) && err.code === 'has_children') {
+        // a guardian with children: name them and offer the checkbox, the retry carries delete_children (API.md 8)
+        const rows = err.details?.children;
+        setDeleteChildrenOf(Array.isArray(rows) ? (rows as { id: number; display_name: string }[]) : []);
+      }
       toast.error(errorMessage(err));
       setDeleteBusy(false);
     }
@@ -756,24 +773,43 @@ function AccountSection({ user }: { user: User }) {
 
   return (
     <Section title={zh.settings.account} saved={saved}>
-      <Field label={zh.settings.displayName} htmlFor="acct-name">
-        <input
-          id="acct-name"
-          type="text"
-          value={name}
-          maxLength={32}
-          autoComplete="nickname"
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => {
-            const v = name.trim();
-            if (v && v !== user.display_name) void saveAccount({ display_name: v });
-            else setName(user.display_name);
-          }}
-        />
-      </Field>
+      {isGuardian && (
+        <div className="settings__row">
+          <span>{zh.settings.myChildren}</span>
+          <Link className="btn btn--secondary btn--sm" to={routePaths.children}>
+            <span className="btn__label">{zh.settings.myChildren}</span>
+          </Link>
+        </div>
+      )}
+      {canClaim && (
+        <div className="settings__row">
+          <span>{zh.settings.joinFamily}</span>
+          <Button size="sm" onClick={() => setClaimOpen(true)}>
+            {zh.settings.isChildAccount}
+          </Button>
+        </div>
+      )}
+      {isChild && <p className="settings__hint">{zh.settings.childManaged}</p>}
+      {!isChild && (
+        <Field label={zh.settings.displayName} htmlFor="acct-name">
+          <input
+            id="acct-name"
+            type="text"
+            value={name}
+            maxLength={32}
+            autoComplete="nickname"
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => {
+              const v = name.trim();
+              if (v && v !== user.display_name) void saveAccount({ display_name: v });
+              else setName(user.display_name);
+            }}
+          />
+        </Field>
+      )}
 
-      <h3 className="settings__subtitle">{zh.settings.loginMethods}</h3>
-      {smsOn && (
+      {!isChild && <h3 className="settings__subtitle">{zh.settings.loginMethods}</h3>}
+      {!isChild && smsOn && (
         <div className="settings__row">
           <span>{zh.settings.phone}</span>
           <div className="settings__inline">
@@ -795,29 +831,33 @@ function AccountSection({ user }: { user: User }) {
           </div>
         </div>
       )}
-      <Field label={zh.auth.email} htmlFor="acct-email" hint={emailHint}>
-        <input
-          id="acct-email"
-          type="email"
-          inputMode="email"
-          autoComplete="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onBlur={() => {
-            const v = email.trim();
-            if (v !== (user.email ?? '')) void saveAccount({ email: v || null });
-          }}
-        />
-      </Field>
-      <div className="settings__row">
-        <span>{zh.auth.password}</span>
-        <div className="settings__inline">
-          {!hasPassword && <span className="settings__hint">{zh.settings.noPasswordYet}</span>}
-          <Button size="sm" onClick={() => setPwOpen(true)}>
-            {hasPassword ? zh.settings.changePassword : zh.settings.setPassword}
-          </Button>
+      {!isChild && (
+        <Field label={zh.auth.email} htmlFor="acct-email" hint={emailHint}>
+          <input
+            id="acct-email"
+            type="email"
+            inputMode="email"
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onBlur={() => {
+              const v = email.trim();
+              if (v !== (user.email ?? '')) void saveAccount({ email: v || null });
+            }}
+          />
+        </Field>
+      )}
+      {!isChild && (
+        <div className="settings__row">
+          <span>{zh.auth.password}</span>
+          <div className="settings__inline">
+            {!hasPassword && <span className="settings__hint">{zh.settings.noPasswordYet}</span>}
+            <Button size="sm" onClick={() => setPwOpen(true)}>
+              {hasPassword ? zh.settings.changePassword : zh.settings.setPassword}
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
       <div className="settings__row">
         <span>{zh.settings.username}</span>
         <span className="muted" lang="en">
@@ -852,11 +892,14 @@ function AccountSection({ user }: { user: User }) {
           {zh.auth.logout}
         </Button>
       </div>
-      <div className="settings__danger">
-        <Button size="sm" variant="danger" onClick={() => setDeleteOpen(true)}>
-          {zh.settings.deleteAccount}
-        </Button>
-      </div>
+      {!isChild && (
+        <div className="settings__danger">
+          <Button size="sm" variant="danger" onClick={() => setDeleteOpen(true)}>
+            {zh.settings.deleteAccount}
+          </Button>
+        </div>
+      )}
+      <ClaimDialog open={claimOpen} onClose={() => setClaimOpen(false)} />
 
       <Sheet open={pwOpen} onClose={() => setPwOpen(false)} title={hasPassword ? zh.settings.changePassword : zh.settings.setPassword}>
         <form className="auth__form" onSubmit={changePassword}>
@@ -959,7 +1002,18 @@ function AccountSection({ user }: { user: User }) {
           ) : (
             <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={deleteCode} onChange={setDeleteCode} disabled={deleteBusy} />
           )}
-          <Button type="submit" variant="danger" block loading={deleteBusy} disabled={!deleteReady}>
+          {deleteChildrenOf !== null && (
+            <div className="settings__children" role="group" aria-label={zh.settings.childrenOf}>
+              <p className="settings__hint">
+                {zh.settings.childrenOf} {deleteChildrenOf.map((c) => c.display_name).join(' · ')}
+              </p>
+              <label className="auth__consent">
+                <input type="checkbox" checked={deleteChildren} disabled={deleteBusy} onChange={(e) => setDeleteChildren(e.target.checked)} />
+                <span>{zh.settings.deleteChildren}</span>
+              </label>
+            </div>
+          )}
+          <Button type="submit" variant="danger" block loading={deleteBusy} disabled={!deleteReady || (deleteChildrenOf !== null && !deleteChildren)}>
             {zh.settings.deleteAccount}
           </Button>
         </form>

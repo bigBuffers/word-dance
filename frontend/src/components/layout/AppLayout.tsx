@@ -4,13 +4,19 @@
 // while the TabBar is shown so fixed bars and toasts clear it, and hides the whole shell on `/study`
 // (the study card owns the viewport, FRONTEND §6.2). The inner <Suspense> keeps the shell visible while
 // a lazy page chunk loads. Above the outlet, a dismissible note asks a learner whose account has no password yet
-// (`user.has_password === false`, a code-created account; never admins) to set one — `zh.auth.passwordBanner`
-// (docs/AUTH_SIGNUP_DESIGN.md §5.2, the recycled-number defence, rule 2); the dismissal is a per-viewer convenience (useLocalPref) that
-// expires after 30 days.
-import { Suspense, useCallback, useEffect, useSyncExternalStore } from 'react';
-import { Link, Outlet, useLocation } from 'react-router';
+// (`user.has_password === false`, a code-created account; never admins, never a child — its guardian manages the login) to set one —
+// `zh.auth.passwordBanner` (docs/AUTH_SIGNUP_DESIGN.md §5.2, the recycled-number defence, rule 2); the dismissal is a per-viewer
+// convenience (useLocalPref) that expires after 30 days. Slice 1-B adds two shell-level pieces on every non-bare route: the
+// `SwitchBar` while `session.guardian` is set (this device was switched into a child account, API.md 104 — `zh.children.switchBar`
+// + the switch-back button → `GateDialog` in switch-back mode → endpoint 105 → `applyAuth` → /children), and the
+// `ProfilePromptDialog` (the legacy profile prompt, endpoints 110 / 111, once per sitting).
+import { Suspense, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router';
 import * as endpoints from '@/api/endpoints';
+import type { SessionInfo, User } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
+import { GateDialog } from '@/components/account/GateDialog';
+import { ProfilePromptDialog } from '@/components/account/ProfilePromptDialog';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { CloseIcon } from '@/components/ui/icons';
@@ -118,10 +124,13 @@ function useTodayBadgeCheck(enabled: boolean, pathname: string): void {
   }, [enabled, pathname]);
 }
 
-/** `zh.auth.passwordBanner` ("set a password, a new number cannot lose your progress") for a learner without a password, dismissible for 30 days. */
-function PasswordBanner({ user }: { user: { has_password: boolean; role: 'user' | 'admin' } | null }) {
+/**
+ * `zh.auth.passwordBanner` ("set a password, a new number cannot lose your progress") for a learner without a password, dismissible
+ * for 30 days; never for an admin or a child account (`user.is_child` — the guardian sets the child's login).
+ */
+function PasswordBanner({ user }: { user: Pick<User, 'has_password' | 'role' | 'is_child'> | null }) {
   const [dismissedAt, setDismissedAt] = useLocalPref<number>(PASSWORD_BANNER_PREF, 0);
-  if (!user || user.has_password || user.role === 'admin') return null;
+  if (!user || user.has_password || user.role === 'admin' || user.is_child) return null;
   if (dismissedAt > 0 && Date.now() - dismissedAt < PASSWORD_BANNER_SNOOZE_MS) return null;
   return (
     <div className="app-banner" role="status">
@@ -133,6 +142,36 @@ function PasswordBanner({ user }: { user: { has_password: boolean; role: 'user' 
         <CloseIcon />
       </Button>
     </div>
+  );
+}
+
+/**
+ * The switched-device bar (slice 1-B): `zh.children.switchBar(child, guardian)` while `session.guardian` is set, with the switch-back
+ * button → `GateDialog` (switch-back mode: PIN / password / code → endpoint 105 → `applyAuth`) → /children.
+ */
+export function SwitchBar({ session, user }: { session: SessionInfo | null; user: User | null }) {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  if (!session?.guardian || !user) return null;
+  return (
+    <>
+      <div className="app-banner app-banner--switch" role="status">
+        <span className="app-banner__text">{zh.children.switchBar(user.display_name || user.username, session.guardian.display_name)}</span>
+        <Button variant="primary" size="sm" className="app-banner__action" onClick={() => setOpen(true)}>
+          {zh.children.switchBack}
+        </Button>
+      </div>
+      {/* beside the bar, not inside its live region: the dialog's own content must not be announced as a status update */}
+      <GateDialog
+        open={open}
+        mode="switch-back"
+        onClose={() => setOpen(false)}
+        onSwitched={() => {
+          setOpen(false);
+          navigate(routePaths.children, { replace: true });
+        }}
+      />
+    </>
   );
 }
 
@@ -148,7 +187,7 @@ function useTabBarHeight(active: boolean): void {
 }
 
 export function AppLayout() {
-  const { user, counters } = useAuth();
+  const { user, counters, session } = useAuth();
   const location = useLocation();
   const bare = BARE_ROUTES.includes(location.pathname);
   const isPhone = useMediaQuery(PHONE_QUERY);
@@ -164,7 +203,9 @@ export function AppLayout() {
   return (
     <div className={cx('app-shell', bare && 'app-shell--bare')}>
       {!bare && <TopNav badges={badges} isAdmin={user?.role === 'admin'} userName={user?.display_name || user?.username} />}
+      {!bare && <SwitchBar session={session} user={user} />}
       {!bare && <PasswordBanner user={user} />}
+      {!bare && <ProfilePromptDialog />}
       <main className="app-main" id="main">
         <Suspense
           fallback={

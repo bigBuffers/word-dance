@@ -40,6 +40,7 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "challenge_expired": (400, "确认已过期，请重新登录"),
     "unauthorized": (401, "请先登录"),
     "invalid_credentials": (401, "用户名或密码错误"),
+    "invalid_pin": (401, "家长 PIN 不正确"),  # the 家长门 (102, 105): a wrong guardian PIN, counted on the gate lockout key (slice 1-B)
     "forbidden": (403, "没有权限执行此操作"),
     "account_disabled": (403, "账号已被停用"),
     "registration_closed": (403, "当前不开放注册"),
@@ -49,6 +50,9 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "password_required": (403, "管理员请使用密码登录"),
     "verification_required": (403, "请先验证手机号或邮箱再注册"),
     "second_factor_required": (403, "请用密码或邮箱验证码确认"),
+    # guardian + child accounts (docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2; endpoints 94–111, slice 1-B)
+    "guardian_required": (403, "该操作需要家长在「我的孩子」中完成"),  # a child account on the restriction list (API.md §1)
+    "guardian_gate_required": (403, "请先通过家长验证"),  # a `G+gate` endpoint without a 家长门 stamp younger than 10 minutes
     "not_found": (404, "资源不存在"),
     "word_not_found": (404, "找不到该单词"),
     "batch_not_found": (404, "找不到该学习批次"),
@@ -71,6 +75,8 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "identity_taken": (409, "该手机号已绑定其他账号"),
     "last_login_method": (409, "至少保留一种登录方式"),
     "sms_unconfigured": (409, "服务器未配置短信发送"),
+    "guardian_factors_required": (409, "家长账号需要绑定手机号，并设置密码或验证邮箱"),  # the two-factor rule for guardians (95, 99–101, 104; 6 / 87 would break it)
+    "has_children": (409, "名下还有孩子账号，请先选择如何处理"),  # 8 without `delete_children: true` (`details.children`)
     "payload_too_large": (413, "请求体过大"),
     "account_locked": (423, "登录失败次数过多，账号已暂时锁定"),
     "rate_limited": (429, "操作过于频繁，请稍后再试"),
