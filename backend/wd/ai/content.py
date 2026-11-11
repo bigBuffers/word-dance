@@ -118,6 +118,109 @@ class Applied:
     version: int | None = None
 
 
+# ---------------------------------------------------------------------------- phrases (kind 'phrase')
+# A multi-word headword ("go on", "be good at", "on one's way", "give sb. a hand", "turn over") is used in a sentence with its verb
+# inflected, its placeholder slots filled and sometimes a word or two inside it ("went on", "is good at", "on his way", "gave him a hand",
+# "turned the paper over"). The literal check alone rejected every example of such phrases (the 2026-11-11 whole-library run killed 148
+# phrase words that way), so :func:`contains_phrase` matches token by token: each token accepts its inflections (``word_forms`` of the
+# single word when the library has it, the regular suffixes and :data:`IRREGULAR_VERBS` otherwise), the slot tokens accept their
+# realisations (:data:`PHRASE_SLOTS`), ``sb.`` / ``sth.`` accept any one to three words (:data:`PHRASE_WILDCARDS`), and up to
+# :data:`PHRASE_GAP` extra words may sit between two tokens. Single-word headwords keep :func:`contains_headword`.
+PHRASE_GAP = 2
+PHRASE_WILDCARDS = frozenset({"sb", "sb.", "sth", "sth.", "somebody", "someone", "something", "somewhere", "someplace", "smb", "smth"})
+PHRASE_SLOTS: dict[str, tuple[str, ...]] = {  # token → regex fragments (already escaped where needed)
+    "be": ("be", "am", "is", "are", "was", "were", "been", "being", "isn't", "aren't", "wasn't", "weren't", r"\w+'s", r"\w+'m", r"\w+'re"),
+    "one's": ("one's", "my", "your", "his", "her", "its", "our", "their", r"\w+'s"),
+    "oneself": ("oneself", "myself", "yourself", "himself", "herself", "itself", "ourselves", "yourselves", "themselves"),
+    "do": ("do", "does", "did", "done", "doing", "don't", "doesn't", "didn't"),
+    "have": ("have", "has", "had", "having", "haven't", "hasn't", "hadn't", r"\w+'ve"),
+}
+IRREGULAR_VERBS: dict[str, tuple[str, ...]] = {
+    "go": ("goes", "went", "gone", "going"), "come": ("comes", "came", "coming"), "take": ("takes", "took", "taken", "taking"),
+    "give": ("gives", "gave", "given", "giving"), "make": ("makes", "made", "making"), "get": ("gets", "got", "gotten", "getting"),
+    "think": ("thinks", "thought", "thinking"), "lose": ("loses", "lost", "losing"), "die": ("dies", "died", "dying"),
+    "put": ("puts", "putting"), "set": ("sets", "setting"), "let": ("lets", "letting"), "cut": ("cuts", "cutting"), "hit": ("hits", "hitting"),
+    "run": ("runs", "ran", "running"), "fall": ("falls", "fell", "fallen", "falling"), "break": ("breaks", "broke", "broken", "breaking"),
+    "bring": ("brings", "brought", "bringing"), "buy": ("buys", "bought", "buying"), "catch": ("catches", "caught", "catching"),
+    "teach": ("teaches", "taught", "teaching"), "hold": ("holds", "held", "holding"), "keep": ("keeps", "kept", "keeping"),
+    "leave": ("leaves", "left", "leaving"), "pay": ("pays", "paid", "paying"), "say": ("says", "said", "saying"), "see": ("sees", "saw", "seen", "seeing"),
+    "show": ("shows", "showed", "shown", "showing"), "stand": ("stands", "stood", "standing"), "tell": ("tells", "told", "telling"),
+    "sit": ("sits", "sat", "sitting"), "wake": ("wakes", "woke", "woken", "waking"), "write": ("writes", "wrote", "written", "writing"),
+    "grow": ("grows", "grew", "grown", "growing"), "know": ("knows", "knew", "known", "knowing"), "throw": ("throws", "threw", "thrown", "throwing"),
+    "fly": ("flies", "flew", "flown", "flying"), "draw": ("draws", "drew", "drawn", "drawing"), "forget": ("forgets", "forgot", "forgotten", "forgetting"),
+    "choose": ("chooses", "chose", "chosen", "choosing"), "speak": ("speaks", "spoke", "spoken", "speaking"), "wear": ("wears", "wore", "worn", "wearing"),
+    "sleep": ("sleeps", "slept", "sleeping"), "feel": ("feels", "felt", "feeling"), "meet": ("meets", "met", "meeting"), "send": ("sends", "sent", "sending"),
+    "spend": ("spends", "spent", "spending"), "build": ("builds", "built", "building"), "hear": ("hears", "heard", "hearing"), "ride": ("rides", "rode", "ridden", "riding"),
+    "drive": ("drives", "drove", "driven", "driving"), "eat": ("eats", "ate", "eaten", "eating"), "drink": ("drinks", "drank", "drunk", "drinking"),
+    "begin": ("begins", "began", "begun", "beginning"), "swim": ("swims", "swam", "swum", "swimming"), "sing": ("sings", "sang", "sung", "singing"),
+    "win": ("wins", "won", "winning"), "lie": ("lies", "lay", "lain", "lying", "lied"), "lay": ("lays", "laid", "laying"), "lead": ("leads", "led", "leading"),
+    "mean": ("means", "meant", "meaning"), "shake": ("shakes", "shook", "shaken", "shaking"), "sell": ("sells", "sold", "selling"), "stick": ("sticks", "stuck", "sticking"),
+    "find": ("finds", "found", "finding"), "fight": ("fights", "fought", "fighting"), "hang": ("hangs", "hung", "hanging"), "hide": ("hides", "hid", "hidden", "hiding"),
+    "deal": ("deals", "dealt", "dealing"), "dig": ("digs", "dug", "digging"), "rise": ("rises", "rose", "risen", "rising"), "seek": ("seeks", "sought", "seeking"),
+    "spread": ("spreads", "spreading"), "understand": ("understands", "understood", "understanding"), "feed": ("feeds", "fed", "feeding"),
+    "light": ("lights", "lit", "lighted", "lighting"), "shut": ("shuts", "shutting"), "quit": ("quits", "quitting"), "read": ("reads", "reading"),
+    "stay": ("stays", "stayed", "staying"), "carry": ("carries", "carried", "carrying"), "try": ("tries", "tried", "trying"), "hurry": ("hurries", "hurried", "hurrying"),
+    "worry": ("worries", "worried", "worrying"), "look": ("looks", "looked", "looking"), "turn": ("turns", "turned", "turning"), "pick": ("picks", "picked", "picking"),
+    "ask": ("asks", "asked", "asking"), "work": ("works", "worked", "working"), "wait": ("waits", "waited", "waiting"), "care": ("cares", "cared", "caring"),
+}
+_PHRASE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'.\-]*")
+
+
+def regular_inflections(token: str) -> set[str]:
+    """The regular suffix forms of a lower-case token (``s`` / ``es`` / ``ed`` / ``d`` / ``ing``, final-e drop, y → ies / ied, consonant doubling)."""
+    out = {token, token + "s", token + "es", token + "ed", token + "d", token + "ing"}
+    if token.endswith("e"):
+        out |= {token[:-1] + "ing", token[:-1] + "ed"}
+    if len(token) > 2 and token.endswith("y") and token[-2] not in "aeiou":
+        out |= {token[:-1] + "ies", token[:-1] + "ied"}
+    if len(token) >= 3 and token[-1] not in "aeiouwxy" and token[-2] in "aeiou" and token[-3] not in "aeiou":
+        out |= {token + token[-1] + "ed", token + token[-1] + "ing"}
+    return out
+
+
+def phrase_tokens(display: str) -> list[str]:
+    """The lower-case tokens of a multi-word headword, apostrophes / dots kept (``one's``, ``sb.``)."""
+    return [t.rstrip(".") if t not in PHRASE_WILDCARDS else t for t in _PHRASE_TOKEN_RE.findall(display.lower())]
+
+
+def phrase_pattern(display: str, token_forms: Mapping[str, set[str]] | None = None) -> re.Pattern[str] | None:
+    """The regex a sentence must contain to count as using the phrase ``display`` (None for a single word)."""
+    tokens = phrase_tokens(display)
+    if len(tokens) < 2:
+        return None
+    parts: list[str] = []
+    for tok in tokens:
+        if tok in PHRASE_WILDCARDS:
+            parts.append(r"\w+(?:'\w+)?(?:\s+\w+(?:'\w+)?){0,2}")
+            continue
+        if tok in PHRASE_SLOTS:
+            frags = list(PHRASE_SLOTS[tok])
+        else:
+            forms = {tok} | regular_inflections(tok) | set(IRREGULAR_VERBS.get(tok, ())) | {f.lower() for f in (token_forms or {}).get(tok, set())}
+            frags = [re.escape(f) for f in sorted(forms, key=len, reverse=True)]
+        parts.append("(?:" + "|".join(frags) + ")")
+    gap = r"\s+(?:\w+(?:'\w+)?\s+){0," + str(PHRASE_GAP) + "}"
+    return re.compile(r"(?<![A-Za-z])" + gap.join(parts) + r"(?![A-Za-z])", re.IGNORECASE)
+
+
+def contains_phrase(text: str, display: str, token_forms: Mapping[str, set[str]] | None = None) -> bool:
+    """True when ``text`` uses the multi-word headword ``display`` in any of its realisations (see the block comment above)."""
+    pattern = phrase_pattern(display, token_forms)
+    return bool(pattern and pattern.search(text))
+
+
+def phrase_token_forms(conn: sqlite3.Connection, display: str) -> dict[str, set[str]]:
+    """``word_forms`` of every plain token of the phrase that the library knows as a word (the verb's own inflections)."""
+    out: dict[str, set[str]] = {}
+    for tok in phrase_tokens(display):
+        if tok in PHRASE_WILDCARDS or tok in PHRASE_SLOTS:
+            continue
+        forms = words.word_forms_of_lemma(conn, tok)
+        if forms:
+            out[tok] = forms
+    return out
+
+
 def contains_headword(text: str, lemma: str, display: str, forms: list[str]) -> bool:
     """The sentence uses the headword, an inflected form, or a word starting with the lemma's first ≥ 4 letters."""
     low = text.lower()
@@ -132,9 +235,11 @@ def contains_headword(text: str, lemma: str, display: str, forms: list[str]) -> 
     return False
 
 
-def validate_item(item: Mapping[str, Any], word: Mapping[str, Any], forms: list[str], *, last_attempt: bool) -> tuple[dict[str, Any] | None, str]:
-    """Post-validate one response item (§6.4); ``(cleaned, '')`` or ``(None, reason)`` with reason unmatched/invalid/retry."""
+def validate_item(item: Mapping[str, Any], word: Mapping[str, Any], forms: list[str], *, last_attempt: bool, token_forms: Mapping[str, set[str]] | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Post-validate one response item (§6.4); ``(cleaned, '')`` or ``(None, reason)`` with reason unmatched/invalid/retry. A multi-word
+    headword counts as used when :func:`contains_phrase` matches (``token_forms`` = the library's inflections of its tokens)."""
     lemma, display = str(word["lemma"]), str(word["display"])
+    phrase = phrase_pattern(display, token_forms)
     raw_word = item.get("word")
     if not isinstance(raw_word, str) or raw_word.strip().lower() not in (lemma.lower(), display.lower()):
         return None, "unmatched"
@@ -158,7 +263,7 @@ def validate_item(item: Mapping[str, Any], word: Mapping[str, Any], forms: list[
             continue
         if not (EXAMPLE_ZH_MIN <= len(zh) <= EXAMPLE_ZH_MAX) or not common.has_cjk(zh):
             continue
-        if not contains_headword(en, lemma, display, forms):
+        if not contains_headword(en, lemma, display, forms) and not (phrase is not None and phrase.search(en)):
             continue
         examples.append({"en": en, "zh": zh})
         if len(examples) >= EXAMPLES_MAX:
@@ -342,7 +447,9 @@ def apply_item(
         reject_word(conn, word, str(item.get("meaning_zh") or ""), now=now)
         return Applied("rejected", "valid=false; word marked is_valid_english=0")
     last_attempt = job.attempts >= job.max_attempts
-    cleaned, reason = validate_item(item, word, words.forms_of(conn, int(word["id"])), last_attempt=last_attempt)
+    display = str(word["display"])
+    token_forms = phrase_token_forms(conn, display) if len(phrase_tokens(display)) > 1 else None
+    cleaned, reason = validate_item(item, word, words.forms_of(conn, int(word["id"])), last_attempt=last_attempt, token_forms=token_forms)
     if cleaned is None:
         status = "unmatched" if reason == "unmatched" else ("retry" if reason.startswith("retry") else "invalid")
         return Applied(status, reason)
