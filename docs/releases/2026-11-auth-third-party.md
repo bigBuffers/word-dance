@@ -1,7 +1,7 @@
 # 注册与登录改造 切片 2-A：微信小程序登录桥、QQ 与 Apple 网页登录、第三方身份绑定（迁移 0020，暗上线）
 
 > 设计：[`docs/AUTH_SIGNUP_DESIGN.md`](../AUTH_SIGNUP_DESIGN.md) §5.3「微信、QQ、Apple（第二步）」、§5.6 不变量；业主 2026-11-10 确认 D4（第二步做，带 D8 退出条件）、D6（A：Apple 登录网页 + iOS）、D8（备案在 1-A 上线后启动；小程序内容选 (a)）。上一切片：[`2026-11-auth-signup-1b.md`](2026-11-auth-signup-1b.md)。
-> 状态：**〔待填：上线时间 / commit〕**。**暗上线**：`.env` 未改，三个第三方登录都没有配置（`ServerFlags.wechat_enabled / qq_enabled / apple_enabled` 为 false），用户看不到任何变化；等您完成 §3 的账号与备案步骤、把对应配置写入 `.env` 并重启，登录页和设置页的入口才会出现。
+> 状态：**已暗上线**——`eefe1a6` 于 2026-11-11 16:04 在 Mac 上生效（迁移 0020 启动时自动应用，快照 `backups/pre-migrate-19-to-20.db.gz`）。**暗上线**：`.env` 未改，三个第三方登录都没有配置（`ServerFlags.wechat_enabled / qq_enabled / apple_enabled` 为 false），用户看不到任何变化；等您完成 §3 的账号与备案步骤、把对应配置写入 `.env` 并重启，登录页和设置页的入口才会出现。
 
 ## 1 起因
 
@@ -51,4 +51,7 @@ Mac 上线（暗）：`git pull` 后按 1-A 的步骤构建前端快照并 `laun
 
 ## 6 上线记录
 
-〔待填〕
+- 2026-11-11 16:04:45 按 1-A 的步骤上线 `eefe1a6`：前端构建到 `frontend-releases/eefe1a6`（APK 三个文件照抄进 `dl/`），软链原子切换，`launchctl kickstart -k` 重启；2 秒后 `/api/health` ok。
+- 启动日志：`applied migration 0020_wechat_tickets`；schema 19 → 20；`backups/pre-migrate-19-to-20.db.gz`（2.6 MB）已写；`sign-in channels: sms off, mail off, captcha on, registration invite, wechat off, qq off, apple off`（`.env` 未改）；AI 仍为 `split`。
+- 上线后检查：`/api/health` 的 `wechat_enabled / qq_enabled / apple_enabled` 均为 false；`POST /api/auth/wechat/ticket` → 409 `provider_unconfigured`；`GET /api/auth/qq/start`、`/api/auth/apple/start` → 409；`GET /api/auth/oauth/finish?grant=bogus` → 302 `/login?error=invalid_grant`；假授权页 `/api/auth/fake/qq` → 404（生产未开启假通道）；`/api/guardian/children` 无会话 → 401、`/api/demo` 200、三个法律页 200；新包含「配对码」文案；`wechat_tickets` 表就位；`wd check` 全 ok。登录页与设置页对用户没有任何变化。
+- 回滚（仅在业主明确要求时）：`git checkout 2bd865f`，按同样步骤重建前端快照并重启；数据库不必回退（0020 只加一张表）。
