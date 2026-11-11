@@ -1057,6 +1057,78 @@ def test_cli_images_retry_dry_run_lists_candidates(conn, capsys):
     assert "requeued 0" in capsys.readouterr().out
 
 
+def test_outage_sweep_requeues_failed_words_whose_only_attempt_since_found_nothing(ctx, conn, mock_http, pinned_dns, frozen_clock):
+    """retry_failed_since (`wd images-retry --since ISO`): library-wide — studied or not — but only the words whose single
+    fetch_image attempt at/after `since` ended `failed`; a word fetched before the window, a function word (result `skipped`),
+    a word with two attempts in the window and a word with a live job are left out; the job is priority 90 without a retry
+    flag, the 6 h / 30-day rules do not apply, and a swept word that fails again is not swept twice."""
+    from wd.images import handler
+
+    all_empty(mock_http)
+    early = insert_word(conn, "apple")  # failed before the window
+    enqueue(conn, early)
+    drain_images(ctx)
+    frozen_clock.advance(hours=1)
+    since = ctx.now()
+    lonely = insert_word(conn, "pear")  # nobody studies it: swept all the same
+    of = insert_word(conn, "of", pos="i:100")  # function word: result skipped, never swept
+    twice = insert_word(conn, "plum")  # two attempts in the window: already had its second chance
+    busy = insert_word(conn, "fig")  # a live job
+    studied = insert_word(conn, "kiwi")  # studied words are swept too, without waiting 6 h
+    add_to_bank(conn, studied)
+    for w in (lonely, of, twice, busy, studied):
+        enqueue(conn, w, now=ctx.now())
+    drain_images(ctx)
+    frozen_clock.advance(minutes=1)
+    enqueue(conn, twice, now=ctx.now())
+    drain_images(ctx)
+    enqueue(conn, busy, now=ctx.now())  # a live job (the raw helper leaves image_state alone; the live job is what excludes the word)
+    assert all(image_state(conn, w) == "failed" for w in (early, lonely, of, twice, busy, studied)) and service._live_fetch_exists(conn, busy)
+    assert service.retry_failed_studied(conn, ctx.now()) == []  # the nightly rules: too recent
+    before = conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0]
+    assert service.retry_failed_since(conn, ctx.now(), since=since, limit=10, dry_run=True) == [lonely, studied]
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == before and image_state(conn, lonely) == "failed"
+    frozen_clock.advance(minutes=1)
+    assert service.retry_failed_since(conn, ctx.now(), since=ctx.now(), limit=10) == []  # a window after every attempt
+    assert service.retry_failed_since(conn, ctx.now(), since=since, limit=0) == []
+    assert service.retry_failed_since(conn, ctx.now(), since=since, limit=1) == [lonely]
+    j = fetch_jobs(conn, lonely)[-1]
+    assert j["priority"] == service.OUTAGE_SWEEP_PRIORITY == handler.PREWARM_PRIORITY == 90 and j["status"] == "queued"
+    assert json.loads(j["payload_json"]) == {"word_id": lonely} and image_state(conn, lonely) == "queued"
+    assert service.retry_failed_since(conn, ctx.now(), since=since, limit=10) == [studied]  # lonely is live now
+    assert service.retry_failed_since(conn, ctx.now(), since=since, limit=10) == []
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'fetch_image'").fetchone()[0] == before + 2
+    drain_images(ctx)  # the swept words fail again: two attempts in the window, never a third from the sweep
+    assert image_state(conn, lonely) == "failed" and service.retry_failed_since(conn, ctx.now(), since=since, limit=10) == []
+    assert service.auto_retries_30d(conn, lonely, ctx.now()) == 0  # not an automatic retry
+    # a window that starts before the first attempt takes `early` (one failed attempt) and nothing else; the instant is normalised (offset form)
+    assert service.retry_failed_since(conn, ctx.now(), since="2026-10-14T00:00:00Z", limit=10, dry_run=True) == [early]
+    assert service.retry_failed_since(conn, ctx.now(), since="2026-10-13T23:00:00+00:00", limit=10, dry_run=True) == [early]
+
+
+def test_cli_images_retry_since_runs_the_outage_sweep(ctx, conn, mock_http, pinned_dns, frozen_clock, capsys):
+    """`wd images-retry --since ISO [--limit N] [--dry-run]` (DEPLOY §9): the outage sweep by hand; a bad instant is exit 2."""
+    all_empty(mock_http)
+    since = ctx.now()
+    pear = insert_word(conn, "pear")
+    enqueue(conn, pear, now=ctx.now())
+    drain_images(ctx)
+    assert image_state(conn, pear) == "failed"
+    assert cli.main(["images-retry", "--since", "yesterday"]) == 2
+    assert "ISO-8601" in capsys.readouterr().out
+    assert cli.main(["images-retry", "--since", since, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"would requeue 1 failed-image word(s) whose only fetch since {since} found no photo" in out and "  pear\n" in out and "Wikimedia only" in out
+    assert len(fetch_jobs(conn, pear)) == 1 and image_state(conn, pear) == "failed"
+    assert cli.main(["images-retry", "--since", since, "--limit", "100"]) == 0
+    out = capsys.readouterr().out
+    assert "requeued 1 failed-image word(s) whose only fetch since" in out and "(limit 100;" in out and "  pear" in out
+    j = fetch_jobs(conn, pear)[-1]
+    assert j["priority"] == 90 and json.loads(j["payload_json"]) == {"word_id": pear} and image_state(conn, pear) == "queued"
+    assert cli.main(["images-retry", "--since", since]) == 0
+    assert "requeued 0" in capsys.readouterr().out
+
+
 # ------------------------------------------------------------------------------------------ svg + mix
 def test_activate_svg_sanitises_and_serves_a_svg_image(conn, cfg):
     """CLAUDE_INTEGRATION §6.7: the drawing is cleaned with allow_text=False (the headword the model printed is gone — that

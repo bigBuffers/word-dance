@@ -19,7 +19,9 @@
       all failed, no image → generate_svg enqueued when WD_SVG_VIA_CLAUDE=1, priority < 90 and the word is studied;
                              words.image_state = 'failed' (the template card is served; the SVG replaces it when it lands)
       a failed word is fetched again by the retry rules (service.retry_failed_studied: nightly, ≥ 6 h apart, ≤ 3 per
-          30 days, only while studied — the job then carries retry: true, which this handler ignores)
+          30 days, only while studied — the job then carries retry: true, which this handler ignores) or, after a provider
+          outage, by the operator's library-wide sweep `wd images-retry --since ISO` (service.retry_failed_since: every
+          failed word whose only attempt since then found no photo, at priority 90 — Wikimedia only, no SVG, no retry flag)
 """
 
 from __future__ import annotations
@@ -459,26 +461,43 @@ def cmd_images_prune(args: argparse.Namespace) -> int:
 
 
 def cmd_images_retry(args: argparse.Namespace) -> int:
-    """``wd images-retry [--limit N] [--dry-run]``: the nightly failed-image sweep by hand (DEPLOY §9); prints the words."""
+    """``wd images-retry [--limit N] [--dry-run] [--since ISO]``: the nightly failed-image sweep by hand, or with ``--since``
+    the library-wide provider-outage sweep (DEPLOY §9); prints the words."""
     cfg = _settings()
     if cfg is None:
         return 2
+    since: str | None = None
+    if args.since is not None:
+        try:
+            since = to_iso(parse_iso(args.since))
+        except (TypeError, ValueError):
+            print(f"images-retry: --since wants an ISO-8601 instant such as 2026-11-11T12:00:00Z, not {args.since!r}")
+            return 2
     ensure_dirs(cfg)
     if not cfg.images_enabled:
         print("images-retry: images are disabled (WD_IMAGES_ENABLED=0); nothing to requeue")
         return 0
     conn = db.connect(cfg.db_path)
     try:
-        word_ids = service.retry_failed_studied(conn, now_iso(), limit=args.limit, priority=service.RETRY_NIGHTLY_PRIORITY, dry_run=args.dry_run)
+        if since is not None:
+            word_ids = service.retry_failed_since(conn, now_iso(), since=since, limit=args.limit, dry_run=args.dry_run)
+        else:
+            word_ids = service.retry_failed_studied(conn, now_iso(), limit=args.limit, priority=service.RETRY_NIGHTLY_PRIORITY, dry_run=args.dry_run)
         lemma_of = {int(r[0]): str(r[1]) for r in conn.execute(f"SELECT id, lemma FROM words WHERE id IN ({','.join('?' * len(word_ids))})", word_ids)} if word_ids else {}
         lemmas = [lemma_of.get(w, str(w)) for w in word_ids]  # in sweep order (oldest failure first), like the nightly run
     finally:
         conn.close()
     verb = "would requeue" if args.dry_run else "requeued"
-    print(
-        f"images-retry: {verb} {len(word_ids)} failed-image word(s) being studied (limit {args.limit}; "
-        f">= {service.RETRY_MIN_AGE_H} h since the last attempt, <= {service.RETRY_MAX_AUTO_30D} automatic retries per 30 days, function words excluded)"
-    )
+    if since is not None:
+        print(
+            f"images-retry: {verb} {len(word_ids)} failed-image word(s) whose only fetch since {since} found no photo (limit {args.limit}; "
+            f"priority {service.OUTAGE_SWEEP_PRIORITY} = Wikimedia only, no SVG, not an automatic retry; function words and words with a live fetch job excluded)"
+        )
+    else:
+        print(
+            f"images-retry: {verb} {len(word_ids)} failed-image word(s) being studied (limit {args.limit}; "
+            f">= {service.RETRY_MIN_AGE_H} h since the last attempt, <= {service.RETRY_MAX_AUTO_30D} automatic retries per 30 days, function words excluded)"
+        )
     for lemma in lemmas:
         print(f"  {lemma}")
     return 0
@@ -498,7 +517,17 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--dry-run", action="store_true", help="report only")
     p.set_defaults(func=cmd_images_prune)
 
-    p = sub.add_parser("images-retry", help="requeue fetch_image for failed-image words somebody is studying (the nightly 03:30 sweep by hand)")
-    p.add_argument("--limit", type=int, default=service.RETRY_NIGHTLY_LIMIT, help=f"at most N words per run (default {service.RETRY_NIGHTLY_LIMIT})")
+    p = sub.add_parser("images-retry", help="requeue fetch_image for failed-image words somebody is studying (the nightly 03:30 sweep by hand); --since ISO: the library-wide sweep after a provider outage")
+    p.add_argument("--limit", type=int, default=service.RETRY_NIGHTLY_LIMIT, help=f"at most N words per run (default {service.RETRY_NIGHTLY_LIMIT}; pass a larger one for --since)")
     p.add_argument("--dry-run", action="store_true", help="list the words without queueing anything")
+    p.add_argument(
+        "--since",
+        metavar="ISO",
+        default=None,
+        help=(
+            "provider-outage sweep instead of the nightly selection: every failed word, studied or not, whose ONLY fetch attempt at or after "
+            f"this instant found no photo is queued once more at priority {PREWARM_PRIORITY} (Wikimedia only, no SVG, no retry flag); "
+            "run it when Wikimedia is reachable again, out of cooldown and under its daily quota"
+        ),
+    )
     p.set_defaults(func=cmd_images_retry)

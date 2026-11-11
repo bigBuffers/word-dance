@@ -75,7 +75,9 @@ def test_images_retry_is_owned_and_registered_by_the_images_handler(settings):
     args = parser.parse_args(["images-retry", "--dry-run", "--limit", "5"])
     assert args.func is handler.cmd_images_retry and args.dry_run is True and args.limit == 5
     args = parser.parse_args(["images-retry"])
-    assert args.dry_run is False and args.limit == service.RETRY_NIGHTLY_LIMIT == 50
+    assert args.dry_run is False and args.limit == service.RETRY_NIGHTLY_LIMIT == 50 and args.since is None
+    args = parser.parse_args(["images-retry", "--since", "2026-11-11T12:00:00Z", "--limit", "300"])
+    assert args.since == "2026-11-11T12:00:00Z" and args.limit == 300 and service.OUTAGE_SWEEP_PRIORITY == 90
 
 
 def test_learn_order_is_owned_and_registered_by_the_learn_order_module(settings):

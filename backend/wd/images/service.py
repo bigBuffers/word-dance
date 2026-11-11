@@ -13,6 +13,11 @@
   03:30 maintenance (``scheduler.maintenance``) and ``wd images-retry`` call :func:`retry_failed_studied` with the
   :data:`RETRY_NIGHTLY_LIMIT` cap; the live counter-example that motivated it: 17 of the 18 failed words were being
   studied and would never have been fetched again, most of them never having reached a provider (cooldown).
+* :func:`retry_failed_since` — the provider-outage sweep behind ``wd images-retry --since ISO``: library-wide, every
+  ``failed`` word whose only ``fetch_image`` attempt at or after ``since`` found no photo (the chain ran while Wikimedia
+  was unreachable or its daily quota was spent) is queued once more at the prewarm priority — Wikimedia only, no SVG,
+  no Claude cost, not counted as an automatic retry; the live example: the 2026-11-11 whole-library run lost about a
+  thousand photos to TLS resets of the office network, each word marked ``failed`` without a usable provider request.
 """
 
 from __future__ import annotations
@@ -38,6 +43,8 @@ RETRY_MIN_AGE_H = 6  # provider cooldowns last 10–15 min; six hours is ample a
 RETRY_MAX_AUTO_30D = 3  # automatic (payload retry:true) attempts per word per 30 days — a manual 换一张 / admin refetch is not counted
 RETRY_NIGHTLY_LIMIT = 50  # like PREFETCH_LIMIT: one night's worth of IoWorker work
 RETRY_NIGHTLY_PRIORITY = 30  # same lane as the prefetch content jobs (below bank p20, above prewarm p90)
+OUTAGE_SWEEP_PRIORITY = 90  # = handler.PREWARM_PRIORITY: Wikimedia only (PREWARM_SKIP_PROVIDERS), no automatic SVG, no Claude cost
+STATUS_FAILED_OUTCOME = "failed"  # handler.STATUS_FAILED in result_json: the chain ran and found no acceptable photo (a function word's result is `skipped`)
 
 
 def card_meta(word_id: int) -> dict[str, Any]:
@@ -341,6 +348,68 @@ def retry_failed_studied(
             continue
         if not dry_run:
             enqueue_fetch(conn, int(word["id"]), priority=int(priority), now=now, retry=True)
+        chosen.append(int(word["id"]))
+    return chosen
+
+
+def _window_attempts(conn: sqlite3.Connection, since: str) -> dict[int, tuple[int, int, bool]]:
+    """Per word: ``(finished attempts at/after since, failed ones among them, a live job exists)`` over every ``fetch_image``
+    job — one scan of the jobs table instead of three correlated lookups per failed word."""
+    out: dict[int, tuple[int, int, bool]] = {}
+    rows = conn.execute(
+        "SELECT json_extract(payload_json, '$.word_id') AS wid, status, COALESCE(finished_at, updated_at) AS ended, "
+        "json_extract(result_json, '$.status') AS outcome FROM jobs WHERE type = 'fetch_image' "
+        "AND (status IN ('queued','running') OR COALESCE(finished_at, updated_at) >= ?)",
+        (since,),
+    ).fetchall()
+    for wid, status, ended, outcome in rows:
+        if wid is None:
+            continue
+        finished, failed, live = out.get(int(wid), (0, 0, False))
+        if status in ("queued", "running"):
+            live = True
+        elif ended is not None and str(ended) >= since:
+            finished += 1
+            if status == "done" and outcome == STATUS_FAILED_OUTCOME:
+                failed += 1
+        out[int(wid)] = (finished, failed, live)
+    return out
+
+
+def retry_failed_since(
+    conn: sqlite3.Connection,
+    now: str,
+    *,
+    since: str,
+    limit: int,
+    priority: int = OUTAGE_SWEEP_PRIORITY,
+    dry_run: bool = False,
+) -> list[int]:
+    """The provider-outage sweep (``wd images-retry --since ISO``): every ``failed`` word — studied or not — whose ONLY
+    finished ``fetch_image`` attempt at or after ``since`` ended ``failed`` (the chain found no photo while a provider was
+    unreachable, in cooldown or over its daily quota), oldest first (``words.updated_at``), at most ``limit``.
+
+    Function words (``style.skip_image``) and words with a live fetch job are left out; a word fetched twice in the
+    window (a sweep already gave it its second chance, or someone pressed 换一张) is not swept again, so a sweep never
+    loops over the words that really have no photo. The age / 30-day rules of :func:`retry_due` do not apply — the
+    outage, not the word, is the reason — and the job carries no ``retry`` flag (an operator action, like the admin
+    refetch, so it leaves the learners' automatic retries untouched). The default priority is the prewarm lane: Wikimedia
+    only, no SVG, no cost. Returns the word ids chosen (the dry run returns the same list without enqueueing)."""
+    since = to_iso(parse_iso(since))
+    attempts = _window_attempts(conn, since)
+    rows = conn.execute(
+        "SELECT id, lemma, pos, image_state FROM words WHERE image_state = 'failed' AND merged_into_word_id IS NULL ORDER BY updated_at, id"
+    ).fetchall()
+    chosen: list[int] = []
+    for row in rows:
+        if len(chosen) >= max(0, int(limit)):
+            break
+        word = {k: row[k] for k in row.keys()}
+        finished, failed, live = attempts.get(int(word["id"]), (0, 0, False))
+        if live or finished != 1 or failed != 1 or style.skip_image(word):
+            continue
+        if not dry_run:
+            enqueue_fetch(conn, int(word["id"]), priority=int(priority), now=now)
         chosen.append(int(word["id"]))
     return chosen
 
