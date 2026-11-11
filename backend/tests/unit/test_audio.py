@@ -1112,7 +1112,7 @@ def test_cli_audio_voices_probe_and_prewarm_with_bailian(test_env: dict[str, str
     assert cli.main(["audio-prewarm", "--accent", "en-US", "--limit", "2"]) == 0
     out = capsys.readouterr().out
     assert "≈ 9 characters to send to 百炼" in out  # hop + farmer: the two clips of this run, not the whole plan
-    assert "audio-prewarm: 2 clip(s) made" in out and len(seen) == 4 and [json.loads(r.content)["input"]["text"] for r in seen[::2]] == ["hop", "farmer"]
+    assert "audio-prewarm: 2 clip(s) made" in out and len(seen) == 4 and {json.loads(r.content)["input"]["text"] for r in seen if r.method == "POST"} == {"hop", "farmer"}  # two workers: either may finish first
     assert cli.main(["audio-prewarm"]) == 0
     out = capsys.readouterr().out
     assert "10 clip(s) planned: 2 cached, 8 to synthesise" in out and "≈ 127 characters to send" in out and "audio-prewarm: 8 clip(s) made" in out and len(seen) == 20
