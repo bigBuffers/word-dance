@@ -125,7 +125,7 @@ export const zh = {
               providers: { wechat_mini: '微信', qq: 'QQ', apple: 'Apple' }, bindWechat: '绑定微信', bound: '已绑定', unbindTitle: (p: string) => `解绑${/^[A-Za-z]/.test(p) ? ' ' : ''}${p}`,
               unbindProviderHint: '解绑后至少保留一种其他登录方式：密码、手机号、已验证邮箱或另一个第三方账号',
               boundToast: (p: string) => `${p}${/[A-Za-z]$/.test(p) ? ' ' : ''}已绑定`, unboundToast: (p: string) => `${p}${/[A-Za-z]$/.test(p) ? ' ' : ''}已解绑`,
-              sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：小学（课标二级）、初中（课标三级与上海市初中英语词汇表）、高中（高中课标词表）、大学英语四级与六级大纲', images: '图片来源：Wikimedia Commons、Openverse（CC 许可）、AI 生成示意图或系统生成卡片', ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考' } },
+              sources: { dict: '词典数据：ECDICT（MIT 许可）', lists: '词表范围：小学（课标二级）、初中（课标三级与上海市初中英语词汇表）、高中（高中课标词表）、大学英语四级与六级大纲', images: '图片来源：Wikimedia Commons、Openverse（CC 许可）、AI 生成示意图或系统生成卡片', ai: '例句、搭配与记忆提示由 AI 生成，仅供学习参考', licenses: '开源许可与数据来源' } },
   native: { reminderTitle: 'word-Dance', reminderBody: '今日词汇已准备好，点开复习' },
   admin: { title: '管理', tabs: { overview: '概览', users: '用户与邀请', jobs: '任务', ai: 'AI', reports: '内容反馈', events: '事件', config: '配置' },
            spendToday: '今日花费', spendMonth: '本月花费', cap: '上限', queue: '队列', paused: '已暂停', pause: '暂停 AI', resume: '恢复 AI', probe: '探测 claude', probeOk: (t: number) => `探测成功（flag tier ${t}）`,

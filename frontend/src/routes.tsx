@@ -65,6 +65,7 @@ export const legalUrls = {
   terms: '/legal/terms.html',
   privacy: '/legal/privacy.html',
   children: '/legal/children.html',
+  licenses: '/legal/licenses.html',
 } as const;
 
 function PageFallback() {

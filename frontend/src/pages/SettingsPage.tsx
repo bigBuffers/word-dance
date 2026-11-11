@@ -1147,7 +1147,8 @@ function AboutSection() {
         <p>{zh.settings.sources.images}</p>
         <p>{zh.settings.sources.ai}</p>
         <p>
-          <a href={legalUrls.privacy}>{zh.settings.privacy}</a> · <a href={legalUrls.terms}>{zh.settings.terms}</a> · <a href={legalUrls.children}>{zh.auth.childrenLink}</a>
+          <a href={legalUrls.privacy}>{zh.settings.privacy}</a> · <a href={legalUrls.terms}>{zh.settings.terms}</a> · <a href={legalUrls.children}>{zh.auth.childrenLink}</a> ·{' '}
+          <a href={legalUrls.licenses}>{zh.settings.sources.licenses}</a>
         </p>
       </div>
     </Section>
