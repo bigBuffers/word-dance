@@ -10,6 +10,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
+import type { User } from '@/api/types';
 import { ToastProvider } from '@/components/ui/Toast';
 import { STAGE_ORDER } from '@/components/word/StageChips';
 import { TAP_LOCK_MS } from '@/hooks/useTapLock';
@@ -39,7 +40,7 @@ const h = vi.hoisted(() => {
     },
     phonetic: null,
   });
-  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null as string | null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z', has_password: true, phone_masked: null as string | null, needs_profile: false, age_band: null as string | null, account_kind: 'learner' as string, is_child: false, needs_profile_prompt: false };
+  const screenUser = { id: 1, username: 'u', display_name: 'u', email: null as string | null, email_verified: false, role: 'user', onboarding_state: 'screen', created_at: '2026-10-01T00:00:00Z', has_password: true, phone_masked: null as string | null, needs_profile: false, age_band: null as string | null, account_kind: 'learner' as string, is_child: false, needs_profile_prompt: false, providers: [] as string[] };
   const screenSettings = {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -116,7 +117,7 @@ vi.mock('@/auth/AuthContext', async (importOriginal) => {
   return { ...actual, useAuth: value, useOptionalAuth: value };
 });
 
-import WelcomePage, { DEFAULT_PRESET, ROLES, ROLE_PRESETS, type Role } from './WelcomePage';
+import WelcomePage, { DEFAULT_PRESET, isThirdPartyOnly, ROLES, ROLE_PRESETS, type Role } from './WelcomePage';
 
 const keydown = (key: string, repeat: boolean) => window.dispatchEvent(new KeyboardEvent('keydown', { key, repeat, bubbles: true, cancelable: true }));
 const settle = (ms = 30) => act(async () => new Promise((r) => setTimeout(r, ms)));
@@ -360,6 +361,43 @@ describe('WelcomePage step 0 (first setup of a code-created account, API.md 89)'
     } finally {
       h.server = null;
     }
+  });
+
+  it('a third-party-only account (WeChat / QQ / Apple is its only way in, slice 2-A) must set a password — the endpoint-89 rule; a bound phone makes it optional again', async () => {
+    h.auth = { user: { ...h.auth.user!, phone_masked: null, has_password: false, providers: ['wechat_mini'] }, settings: null };
+    const first = renderStep0();
+    expect(screen.getByLabelText(new RegExp(`^${zh.welcome.requiredPassword}`))).toBeTruthy();
+    expect(screen.getByText(zh.welcome.thirdPartyPassword)).toBeTruthy();
+    expect(screen.queryByText(zh.welcome.passwordWhy)).toBeNull();
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.nickname}`)), { target: { value: 'Xiao Ming' } });
+    fireEvent.click(screen.getByLabelText(zh.welcome.ageAdult));
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', zh.auth.passwordHint); // empty → required
+    expect(h.profiles).toEqual([]);
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${zh.welcome.requiredPassword}`)), { target: { value: 'Str0ng-Passphrase!' } });
+    fireEvent.click(screen.getByRole('button', { name: zh.welcome.next }));
+    await waitFor(() => expect(h.profiles).toEqual([{ display_name: 'Xiao Ming', account_kind: 'learner', age_band: 'adult', password: 'Str0ng-Passphrase!' }]));
+    first.unmount();
+
+    h.auth = { user: { ...h.auth.user!, phone_masked: '138****8000' }, settings: null }; // the phone is a second way in
+    renderStep0();
+    expect(screen.getByLabelText(new RegExp(`^${zh.welcome.optionalPassword}`))).toBeTruthy();
+    expect(screen.getByText(zh.welcome.passwordWhy)).toBeTruthy();
+    expect(screen.queryByText(zh.welcome.thirdPartyPassword)).toBeNull();
+  });
+});
+
+describe('isThirdPartyOnly', () => {
+  const base: Parameters<typeof isThirdPartyOnly>[0] = { providers: ['qq'] as User['providers'], phone_masked: null, email: null, email_verified: false, has_password: false };
+
+  it('is true only while a third-party identity is the sole way in (no phone, no verified e-mail, no password)', () => {
+    expect(isThirdPartyOnly(base)).toBe(true);
+    expect(isThirdPartyOnly({ ...base, providers: ['wechat_mini', 'apple'] })).toBe(true);
+    expect(isThirdPartyOnly({ ...base, providers: [] })).toBe(false);
+    expect(isThirdPartyOnly({ ...base, phone_masked: '138****8000' })).toBe(false);
+    expect(isThirdPartyOnly({ ...base, email: 'a@example.com', email_verified: true })).toBe(false);
+    expect(isThirdPartyOnly({ ...base, email: 'a@example.com' })).toBe(true); // an unverified e-mail is no way in
+    expect(isThirdPartyOnly({ ...base, has_password: true })).toBe(false);
   });
 });
 

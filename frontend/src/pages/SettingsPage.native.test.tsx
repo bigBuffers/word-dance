@@ -1,7 +1,9 @@
 // SettingsPage inside the native shell (FRONTEND §6.6): the export links are not offered (a WebView cannot download them), the push
 // section explains that the reminder is local, and switching push on asks for notification permission inside the gesture — a refusal
-// is reported but the setting is still saved (the OS setting can be changed later).
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+// is reported but the setting is still saved (the OS setting can be changed later). Slice 2-A (FRONTEND §5.8): the third-party
+// login-methods rows follow `thirdPartyEntries` — in the Android shell only WeChat can be bound, in the iOS shell nothing, while an
+// already-bound provider keeps its row for unbinding.
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Settings, User } from '@/api/types';
@@ -11,6 +13,7 @@ import { zh } from '@/i18n/zh';
 import SettingsPage from './SettingsPage';
 
 const native = vi.hoisted(() => ({
+  platform: 'android' as 'ios' | 'android' | 'web',
   granted: true,
   permission: 'prompt' as 'granted' | 'denied' | 'prompt',
   // like the OS: a granted request is remembered by the later permission check
@@ -23,20 +26,26 @@ const native = vi.hoisted(() => ({
 vi.mock('@/native/capacitor', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/native/capacitor')>()),
   isNative: () => true,
+  nativePlatform: () => native.platform,
   requestReminderPermission: native.request,
   reminderPermission: async () => native.permission,
   syncDailyReminder: native.sync,
 }));
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const user: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
-const server = { version: '0.1.0', registration_mode: 'open', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false };
+const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [] };
+const baseServer = { version: '0.1.0', registration_mode: 'open', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false };
+let user: User = baseUser;
+let server = baseServer;
 let settings: Settings;
 let puts: Record<string, unknown>[];
 
 beforeEach(() => {
+  native.platform = 'android';
   native.granted = true;
   native.permission = 'prompt';
+  user = baseUser;
+  server = baseServer;
   native.request.mockClear();
   native.sync.mockClear();
   puts = [];
@@ -132,5 +141,44 @@ describe('SettingsPage in the native shell', () => {
     await screen.findByText(zh.settings.nativeReminderHint);
     expect(screen.queryByRole('button', { name: zh.settings.allowNotifications })).toBeNull();
     expect(screen.queryByText(zh.settings.reminderDenied)).toBeNull();
+  });
+});
+
+describe('SettingsPage in the native shell · third-party login methods (FRONTEND §5.8, slice 2-A)', () => {
+  const accountSection = async () => (await screen.findByRole('heading', { name: zh.settings.account })).closest('section') as HTMLElement;
+  /** The login-methods row of a provider (its label is the row's first span), or null. */
+  const providerRow = (section: HTMLElement, label: string) => {
+    const span = within(section).queryByText(label, { selector: '.settings__row > span' });
+    return span ? (span.closest('.settings__row') as HTMLElement) : null;
+  };
+
+  it('Android: only WeChat can be bound (a QQ / Apple redirect would open the system browser); a bound QQ keeps its row for unbinding, an unbound Apple has none', async () => {
+    server = { ...baseServer, wechat_enabled: true, qq_enabled: true, apple_enabled: true };
+    user = { ...baseUser, providers: ['qq'] };
+    renderSettings();
+    const section = await accountSection();
+    const wechat = providerRow(section, zh.settings.providers.wechat_mini) as HTMLElement;
+    expect(within(wechat).getByText(zh.settings.unbound)).toBeTruthy();
+    expect(within(wechat).getByRole('button', { name: zh.settings.bind })).toBeTruthy();
+    const qq = providerRow(section, zh.settings.providers.qq) as HTMLElement;
+    expect(within(qq).getByText(zh.settings.bound)).toBeTruthy();
+    expect(within(qq).getByRole('button', { name: zh.settings.unbind })).toBeTruthy();
+    expect(providerRow(section, zh.settings.providers.apple)).toBeNull();
+    expect(screen.queryByRole('link', { name: zh.settings.bind })).toBeNull(); // no redirect link anywhere in the shell
+  });
+
+  it('iOS: nothing can be bound (WeChat only next to Apple, Apple only on the web); a bound WeChat still has its unbind button', async () => {
+    native.platform = 'ios';
+    server = { ...baseServer, wechat_enabled: true, qq_enabled: true, apple_enabled: true };
+    user = { ...baseUser, providers: ['wechat_mini'] };
+    renderSettings();
+    const section = await accountSection();
+    const wechat = providerRow(section, zh.settings.providers.wechat_mini) as HTMLElement;
+    expect(within(wechat).getByText(zh.settings.bound)).toBeTruthy();
+    expect(within(wechat).getByRole('button', { name: zh.settings.unbind })).toBeTruthy();
+    expect(within(wechat).queryByRole('button', { name: zh.settings.bind })).toBeNull();
+    expect(providerRow(section, zh.settings.providers.qq)).toBeNull();
+    expect(providerRow(section, zh.settings.providers.apple)).toBeNull();
+    expect(within(section).queryByRole('link', { name: zh.settings.bind })).toBeNull(); // no redirect link anywhere in the shell
   });
 });

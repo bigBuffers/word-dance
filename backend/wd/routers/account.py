@@ -1,5 +1,5 @@
-"""``/api/account*`` — API.md endpoints 6–11, 85–89 and 108–111 (WP2; slice 1-A docs/AUTH_SIGNUP_DESIGN.md §5.2; slice 1-B §5.1
-「家长 + 孩子」 / §5.2 「存量账号」).
+"""``/api/account*`` — API.md endpoints 6–11, 85–89, 108–111 and 117 (WP2; slice 1-A docs/AUTH_SIGNUP_DESIGN.md §5.2; slice 1-B §5.1
+「家长 + 孩子」 / §5.2 「存量账号」; slice 2-A §5.3 third-party identities).
 
 * ``PUT /api/account``: display name / e-mail (a changed e-mail clears ``email_verified_at`` and disables the e-mail channel;
   409 ``last_login_method`` when a password-less account would lose its only login method; 409 ``guardian_factors_required`` when a
@@ -22,7 +22,14 @@
   ``routers/auth_codes.py``; 86 / 87 / 88 bind, unbind and replace the phone identity; 89 is the first-time setup of a
   code-created account (nickname, account kind — slice 1-B: ``guardian`` needs the ``adult`` band and a password unless the account
   already holds one or a verified e-mail; a row the claim flow made a guardian keeps that kind whatever the body says —, age band,
-  optional username and password — ``User.needs_profile``).
+  optional username and password — ``User.needs_profile``; slice 2-A: a third-party-only account — no live phone, no verified e-mail, no
+  password, at least one WeChat / QQ / Apple identity (``third_party.third_party_only``) — must send ``password`` here, 400
+  ``validation_error`` ``details.fields.password`` = ``third_party.THIRD_PARTY_PASSWORD_ZH``, because those providers are never a
+  re-authentication factor).
+* ``DELETE /api/account/identities/{provider}`` (117, slice 2-A): unbind a WeChat / QQ / Apple identity after the same re-authentication
+  as 87 (``IdentityUnbindRequest``, the 87 one-of); ``provider`` outside ``third_party.PROVIDERS`` → 404; nothing bound → 409
+  ``invalid_transition`` ``reason:'not_bound'`` (409 ``provider_unconfigured`` when the provider is off too); the account must keep ≥ 2
+  ways in (``third_party.ways_in``: password, live phone, verified e-mail, each third-party identity) else 409 ``last_login_method``.
 * **The child restriction list** (API.md §1, slice 1-B): 6–10, 85–89 and 108–111 take ``deps.require_not_child`` — a child account
   (``guardian_user_id`` set) gets 403 ``guardian_required`` whatever its session; its guardian does these things in 「我的孩子」 (94–101).
 * **Legacy accounts** (slice 1-B, API.md §3.2): ``POST /api/account/guardian/code`` (108) sends a claim code to the guardian's phone —
@@ -47,7 +54,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from .. import db, family, security
+from .. import db, family, security, third_party
 from ..ai.common import system_event
 from ..clock import local_date, to_iso
 from ..config import Settings
@@ -64,6 +71,7 @@ from ..schemas import (
     ExportFormat,
     GuardianClaimCodeRequest,
     GuardianClaimRequest,
+    IdentityUnbindRequest,
     PasswordChangeRequest,
     PhoneBindRequest,
     PhoneRebindRequest,
@@ -83,6 +91,8 @@ REVIEW_LOG_EXPORT_DAYS = 365
 JOB_KEY_PREFIXES = family.JOB_KEY_PREFIXES  # live jobs cancelled with an orphaned private word (the rule now lives in family.delete_user_rows)
 GUARDIAN_PHONE_ZH = "请输入家长的手机号"  # 108 / 109: the number is the caller's own
 GUARDIAN_PASSWORD_ZH = "家长账号需要设置密码"  # 89: a guardian without a verified e-mail needs the password as its second factor
+THIRD_PARTY_PASSWORD_ZH = third_party.THIRD_PARTY_PASSWORD_ZH  # 89: a third-party-only account sets its password at step 0 (slice 2-A)
+PROVIDER_STATE_ATTR = {"wechat_mini": "wechat", "qq": "qq", "apple": "apple"}  # third_party.PROVIDERS → the app.state client (None = off)
 
 
 def _field_error(field: str, text: str) -> ApiError:
@@ -350,6 +360,32 @@ def unbind_phone(body: PhoneUnbindRequest, request: Request, user: dict[str, Any
     return _user_response(conn, uid, now)
 
 
+@router.delete("/api/account/identities/{provider}", response_model=UserResponse)
+def unbind_identity(provider: str, body: IdentityUnbindRequest, request: Request, user: dict[str, Any] = Depends(require_not_child), conn: sqlite3.Connection = Depends(get_db)):
+    """API.md 117 (slice 2-A): unbind the WeChat / QQ / Apple identity after the endpoint-7 re-authentication; the account must keep at
+    least one other way in (409 ``last_login_method`` — ``third_party.ways_in`` counts the password, a live phone, a verified e-mail and
+    every third-party identity). ``phone`` never reaches this route: endpoint 87 is registered first."""
+    cfg: Settings = request.app.state.settings
+    now = request.app.state.clock.now_utc()
+    uid = int(user["id"])
+    if provider not in third_party.PROVIDERS:
+        raise ApiError("not_found", details={"provider": provider})
+    code_row = _reauthenticate(conn, user, password=body.password, code=body.code, password_field="password", now=now, cfg=cfg)  # outside any transaction
+    with db.tx(conn):
+        _consume(conn, code_row, now)
+        mine = security.row_dict(conn.execute("SELECT * FROM identities WHERE user_id = ? AND provider = ? AND disputed_at IS NULL", (uid, provider)).fetchone())
+        if mine is None:
+            if getattr(request.app.state, PROVIDER_STATE_ATTR[provider], None) is None:
+                raise ApiError("provider_unconfigured")  # the provider is off AND nothing is bound (API.md §1.1)
+            raise ApiError("invalid_transition", details={"reason": "not_bound"})
+        fresh = security.load_user(conn, uid) or user
+        if third_party.ways_in(conn, fresh) < 2:
+            raise ApiError("last_login_method")
+        conn.execute("DELETE FROM identities WHERE id = ?", (mine["id"],))
+    log.info("third-party identity unbound", extra={"event": "auth_identity_unbound", "provider": provider, "user_id": uid})
+    return _user_response(conn, uid, now)
+
+
 @router.post("/api/account/identities/phone/rebind", response_model=UserResponse)
 def rebind_phone(body: PhoneRebindRequest, request: Request, user: dict[str, Any] = Depends(require_not_child), conn: sqlite3.Connection = Depends(get_db)):
     """API.md 88: replace the bound phone — a ``rebind_phone`` code on the old number and a ``bind_phone`` code on the new one."""
@@ -392,7 +428,8 @@ def save_profile(body: ProfileRequest, request: Request, user: dict[str, Any] = 
     """API.md 89: a code-created account saves its nickname, account kind and age band once (optionally a username and a password);
     allowed only while ``User.needs_profile`` (409 ``invalid_transition``, ``details.reason:'profile_done'``). Slice 1-B: ``guardian``
     needs the ``adult`` band and a second factor — a password in this body unless the account already has one or a verified e-mail;
-    a row the claim flow (109) already made a guardian ignores the body's ``account_kind`` and follows the guardian rules."""
+    a row the claim flow (109) already made a guardian ignores the body's ``account_kind`` and follows the guardian rules. Slice 2-A: an
+    account whose only way in is a WeChat / QQ / Apple identity must set a password here (the guardian rule comes first)."""
     now = request.app.state.clock.now_utc()
     now_iso = to_iso(now)
     uid = int(user["id"])
@@ -404,6 +441,8 @@ def save_profile(body: ProfileRequest, request: Request, user: dict[str, Any] = 
             raise _field_error("age_band", GUARDIAN_ADULT_ZH)  # the schema checks the body's kind; the claim-created guardian's row is checked here
         if body.password is None and user["password_set_at"] is None and user["email_verified_at"] is None:
             raise _field_error("password", GUARDIAN_PASSWORD_ZH)  # the two-factor rule: the phone plus a password or a verified e-mail
+    if body.password is None and third_party.third_party_only(conn, user):
+        raise _field_error("password", THIRD_PARTY_PASSWORD_ZH)  # slice 2-A: WeChat / QQ / Apple are never a re-authentication factor (API.md 89)
     username = body.username if body.username and body.username.lower() != str(user["username"]).lower() else None
     if username is not None and security.username_taken(conn, username):
         raise ApiError("username_taken")

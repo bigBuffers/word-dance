@@ -9,12 +9,20 @@
 // a CHILD (`user.is_child`) sees `zh.settings.childManaged` instead of the nickname field, the login-methods block, the e-mail
 // field, the password row and the delete button (export / import / logout stay). A guardian's delete answers 409 `has_children`
 // with the children's names: the sheet lists them with the `deleteChildren` checkbox and retries with `delete_children: true`.
+// Slice 2-A (FRONTEND §5.8, API.md §3.3): after the phone row one login-methods row per third-party provider that this platform can
+// start binding (`thirdPartyEntries(server)`: the flags `server.wechat_enabled` / `qq_enabled` / `apple_enabled`, QQ / Apple on the
+// web only — a redirect flow cannot finish inside the native shell —, on iOS WeChat only next to Apple) or that is bound
+// (`user.providers`, whatever the platform, so it can still be unbound) — bound → `zh.settings.bound` + unbind (a sheet with the
+// endpoint-87 re-authentication → endpoint 117), unbound → bind (WeChat: the `WechatSignIn kind="bind"` sheet; QQ / Apple: a link to
+// the redirect endpoint 118 / 120 with `next=/settings`, back through 122 as `?bound=<provider>`); `?bound=` shows the success toast
+// once and `?error=` an error toast (`identity_taken` without an envelope reads `errors.identityTakenGeneric`), both params removed.
+// A child never sees the block.
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router';
-import { errorMessage, isApiError } from '@/api/client';
+import { Link, useNavigate, useSearchParams } from 'react-router';
+import { errorMessage, errorMessageForCode, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
-import { exportAccountUrl, importPayloadFromJsonExport, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
-import type { CodeChannel, DanceMode, ImportResponse, Settings, Stage, User, WebhookFormat } from '@/api/types';
+import { exportAccountUrl, importPayloadFromJsonExport, oauthStartUrl, type ImportBody, type SettingsUpdate, type WebhookTestResponse } from '@/api/endpoints';
+import type { CodeChannel, DanceMode, ImportResponse, Settings, Stage, ThirdPartyProvider, User, WebhookFormat } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { ClaimDialog } from '@/components/account/ClaimDialog';
 import { Button } from '@/components/ui/Button';
@@ -24,6 +32,8 @@ import { PhoneField } from '@/components/ui/PhoneField';
 import { Segmented } from '@/components/ui/Segmented';
 import { Sheet } from '@/components/ui/Sheet';
 import { Switch } from '@/components/ui/Switch';
+import { thirdPartyEntries } from '@/components/ui/ThirdPartyRow';
+import { WechatSignIn } from '@/components/ui/WechatSignIn';
 import { STAGE_ORDER } from '@/components/word/StageChips';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { useToast } from '@/hooks/useToast';
@@ -40,6 +50,9 @@ import './SettingsPage.css';
 const FORMATS: readonly WebhookFormat[] = ['generic', 'wecom', 'feishu', 'serverchan', 'bark'];
 const DANCE_MODES: readonly DanceMode[] = ['full', 'form_only', 'off']; // the three levels of the word dance (WORD_DANCE_DESIGN §6.3), in display order
 const SAVED_FLASH_MS = 2000;
+/** The third-party login-methods rows in display order (API.md §3.3, slice 2-A). */
+export const THIRD_PARTY_PROVIDERS: readonly ThirdPartyProvider[] = ['wechat_mini', 'qq', 'apple'];
+const isThirdPartyProvider = (value: string): value is ThirdPartyProvider => (THIRD_PARTY_PROVIDERS as readonly string[]).includes(value);
 
 /**
  * Turns a previous export file into the `POST /api/bank/import` body (API.md 11/75): a JSON export is reduced
@@ -597,6 +610,13 @@ function AccountSection({ user }: { user: User }) {
   const [unbindPw, setUnbindPw] = useState('');
   const [unbindCode, setUnbindCode] = useState('');
   const [unbindBusy, setUnbindBusy] = useState(false);
+  // third-party identities (API.md 112 / 117, slice 2-A): the WeChat bind sheet and the unbind sheet of one provider
+  const [wechatBindOpen, setWechatBindOpen] = useState(false);
+  const [unbindProvider, setUnbindProvider] = useState<ThirdPartyProvider | null>(null);
+  const [identityPw, setIdentityPw] = useState('');
+  const [identityCode, setIdentityCode] = useState('');
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const [params, setParams] = useSearchParams();
 
   const smsOn = server?.sms_enabled === true;
   const emailOn = server?.email_configured !== false; // the same flag PushSection reads (`smtpMissing`)
@@ -604,9 +624,26 @@ function AccountSection({ user }: { user: User }) {
   const isChild = user.is_child; // the guardian manages the child's nickname, login and deletion (API.md §1, the restriction list)
   const isGuardian = user.account_kind === 'guardian';
   const canClaim = !isChild && !isGuardian && user.role !== 'admin'; // the server refuses the others (108: admin / has_children)
+  // the providers this platform can start binding (flags + the web-only redirect rule + the iOS rule, shared with the login page's row);
+  // a bound provider keeps its row while its flag is off or on a platform that cannot start it, so it can still be unbound
+  const startable = thirdPartyEntries(server);
+  const canBind: Record<ThirdPartyProvider, boolean> = { wechat_mini: startable.wechat, qq: startable.qq, apple: startable.apple };
+  const providerRows = THIRD_PARTY_PROVIDERS.filter((p) => canBind[p] || user.providers.includes(p));
 
   useEffect(() => setName(user.display_name), [user.display_name]);
   useEffect(() => setEmail(user.email ?? ''), [user.email]);
+  // the QQ / Apple redirect flows land here (API.md 119 / 121 / 122): one toast, then the params leave the URL
+  useEffect(() => {
+    const bound = params.get('bound');
+    const error = params.get('error');
+    if (bound === null && error === null) return;
+    if (bound !== null) toast.success(isThirdPartyProvider(bound) ? zh.settings.boundToast(zh.settings.providers[bound]) : zh.common.saved, { id: 'oauth-bound' });
+    if (error !== null) toast.error(errorMessageForCode(error), { id: 'oauth-error' });
+    const rest = new URLSearchParams(params);
+    rest.delete('bound');
+    rest.delete('error');
+    setParams(rest, { replace: true });
+  }, [params, setParams, toast]);
   useEffect(
     () => () => {
       if (flashTimer.current) clearTimeout(flashTimer.current);
@@ -769,6 +806,25 @@ function AccountSection({ user }: { user: User }) {
     }
   };
 
+  const identityReady = hasPassword ? identityPw.length > 0 : identityCode.length === CODE_LENGTH;
+  const doUnbindIdentity = async (e: FormEvent) => {
+    e.preventDefault();
+    if (unbindProvider === null || !identityReady) return;
+    setIdentityBusy(true);
+    try {
+      const res = await endpoints.unbindIdentity(unbindProvider, hasPassword ? { password: identityPw } : { code: identityCode });
+      applySession({ user: res.user });
+      toast.success(zh.settings.unboundToast(zh.settings.providers[unbindProvider]));
+      setUnbindProvider(null);
+      setIdentityPw('');
+      setIdentityCode('');
+    } catch (err) {
+      toast.error(errorMessage(err)); // 409 last_login_method: this identity is the account's only other way in
+    } finally {
+      setIdentityBusy(false);
+    }
+  };
+
   const emailHint = user.email ? (user.email_verified ? zh.settings.emailVerified : zh.settings.emailUnverified) : undefined;
 
   return (
@@ -831,6 +887,31 @@ function AccountSection({ user }: { user: User }) {
           </div>
         </div>
       )}
+      {!isChild &&
+        providerRows.map((provider) => {
+          const bound = user.providers.includes(provider);
+          return (
+            <div className="settings__row" key={provider}>
+              <span>{zh.settings.providers[provider]}</span>
+              <div className="settings__inline">
+                <span className="muted">{bound ? zh.settings.bound : zh.settings.unbound}</span>
+                {bound ? (
+                  <Button size="sm" variant="ghost" onClick={() => setUnbindProvider(provider)}>
+                    {zh.settings.unbind}
+                  </Button>
+                ) : provider === 'wechat_mini' ? (
+                  <Button size="sm" onClick={() => setWechatBindOpen(true)}>
+                    {zh.settings.bind}
+                  </Button>
+                ) : (
+                  <a className="btn btn--secondary btn--sm" href={oauthStartUrl(provider, 'bind', routePaths.settings)}>
+                    <span className="btn__label">{zh.settings.bind}</span>
+                  </a>
+                )}
+              </div>
+            </div>
+          );
+        })}
       {!isChild && (
         <Field label={zh.auth.email} htmlFor="acct-email" hint={emailHint}>
           <input
@@ -965,6 +1046,35 @@ function AccountSection({ user }: { user: User }) {
             <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={unbindCode} onChange={setUnbindCode} disabled={unbindBusy} />
           )}
           <Button type="submit" variant="danger" block loading={unbindBusy} disabled={!unbindReady}>
+            {zh.settings.unbind}
+          </Button>
+        </form>
+      </Sheet>
+
+      <Sheet open={wechatBindOpen} onClose={() => setWechatBindOpen(false)} title={zh.settings.bindWechat}>
+        {wechatBindOpen && (
+          <WechatSignIn
+            kind="bind"
+            onDone={(bound) => {
+              applySession({ user: bound }); // `providers` now carries wechat_mini
+              toast.success(zh.settings.boundToast(zh.settings.providers.wechat_mini));
+              setWechatBindOpen(false);
+            }}
+          />
+        )}
+      </Sheet>
+
+      <Sheet open={unbindProvider !== null} onClose={() => setUnbindProvider(null)} title={unbindProvider === null ? undefined : zh.settings.unbindTitle(zh.settings.providers[unbindProvider])}>
+        <form className="auth__form" onSubmit={doUnbindIdentity} noValidate>
+          <p className="settings__hint">{zh.settings.unbindProviderHint}</p>
+          {hasPassword ? (
+            <Field label={zh.auth.password} required>
+              {(c) => <input {...c} type="password" autoComplete="current-password" value={identityPw} onChange={(e) => setIdentityPw(e.target.value)} />}
+            </Field>
+          ) : (
+            <ReauthCode user={user} smsOn={smsOn} emailOn={emailOn} code={identityCode} onChange={setIdentityCode} disabled={identityBusy} />
+          )}
+          <Button type="submit" variant="danger" block loading={identityBusy} disabled={!identityReady}>
             {zh.settings.unbind}
           </Button>
         </form>

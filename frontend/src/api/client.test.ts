@@ -1,7 +1,7 @@
 // api/client contract tests (FRONTEND §7): envelope → ApiError, 401 event, header injection.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { zh } from '@/i18n/zh';
-import { ApiError, AUTH_EXPIRED_EVENT, buildQuery, CSRF_HEADER, errorMessage, request, requestText } from './client';
+import { ApiError, AUTH_EXPIRED_EVENT, buildQuery, CSRF_HEADER, errorMessage, errorMessageForCode, request, requestText } from './client';
 
 function jsonResponse(status: number, body?: unknown, headers: Record<string, string> = {}): Response {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -190,7 +190,6 @@ describe('errorMessage()', () => {
       ['invalid_phone', zh.errors.invalidPhone],
       ['challenge_expired', zh.errors.challengeExpired],
       ['second_factor_required', zh.errors.secondFactorRequired],
-      ['identity_taken', zh.errors.identityTaken],
       ['last_login_method', zh.errors.lastLoginMethod],
       ['sms_unconfigured', zh.errors.smsUnconfigured],
       ['sms_budget_exhausted', zh.errors.smsBudgetExhausted],
@@ -198,6 +197,26 @@ describe('errorMessage()', () => {
       ['email_send_failed', zh.errors.emailSendFailed],
     ];
     for (const [code, copy] of table) expect(errorMessage(new ApiError(code, 400, 'raw server text'))).toBe(copy);
+    // identity_taken is the one code whose wording only the server knows (phone / WeChat / QQ / Apple): its envelope message is shown,
+    // and a bare code (the `?error=` query of the redirect flows) reads the neutral copy
+    expect(errorMessage(new ApiError('identity_taken', 409, 'the server names the identity'))).toBe('the server names the identity');
+    expect(errorMessage(new ApiError('identity_taken', 409, ''))).toBe(zh.errors.identityTakenGeneric);
+  });
+
+  it('maps the third-party sign-in codes (API.md §1.1, slice 2-A) and reads a bare `?error=` code through errorMessageForCode', () => {
+    const table: [string, string][] = [
+      ['provider_unconfigured', zh.errors.providerUnconfigured],
+      ['invalid_identity_token', zh.errors.invalidIdentityToken],
+      ['invalid_grant', zh.errors.invalidGrant],
+      ['provider_error', zh.errors.providerError],
+    ];
+    for (const [code, copy] of table) {
+      expect(errorMessage(new ApiError(code, 400, 'raw server text'))).toBe(copy);
+      expect(errorMessageForCode(code)).toBe(copy); // the QQ / Apple redirects carry the code in the query, without an envelope
+    }
+    expect(errorMessageForCode('identity_taken')).toBe(zh.errors.identityTakenGeneric); // a redirect bind that found the identity on another account: no envelope, so the neutral wording
+    expect(errorMessageForCode('something_new')).toBe(zh.errors.server); // never a raw code
+    expect(new Set(table.map(([, copy]) => copy)).size).toBe(4);
   });
 
   it('falls back to the server message for other codes, then to the generic copy', () => {

@@ -1,0 +1,4 @@
+.sentence { font-size: 36rpx; line-height: 1.5; margin: 12rpx 0 8rpx; }
+.translation { line-height: 1.5; }
+.actions { margin-top: 32rpx; }
+.title.small { font-size: 32rpx; }

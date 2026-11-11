@@ -17,7 +17,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from .. import db, security
+from .. import db, security, third_party
 from ..ai.common import system_event
 from ..clock import local_date, to_iso
 from ..deps import get_db, require_admin
@@ -59,7 +59,14 @@ def _admin_user(conn: sqlite3.Connection, row: dict[str, Any], now: datetime) ->
     tz_row = conn.execute("SELECT timezone FROM user_settings WHERE user_id = ?", (uid,)).fetchone()
     tz = str(tz_row[0]) if tz_row else security.DEFAULT_TIMEZONE
     identity = security.phone_identity(conn, uid)
-    return security.admin_user_dto(row, bank_size=bank_size, streak_days=streak_days(conn, uid, tz, now), phone=str(identity["subject"]) if identity else None, now=now)  # now: needs_profile_prompt (1-B)
+    return security.admin_user_dto(
+        row,
+        bank_size=bank_size,
+        streak_days=streak_days(conn, uid, tz, now),
+        phone=str(identity["subject"]) if identity else None,
+        providers=third_party.providers_of(conn, uid),  # slice 2-A: the bound WeChat / QQ / Apple identities (API.md §9.1)
+        now=now,  # needs_profile_prompt (1-B)
+    )
 
 
 def _like(q: str) -> str:

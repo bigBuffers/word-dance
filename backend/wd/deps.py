@@ -15,7 +15,9 @@
 * :func:`csrf_guard` — API.md §1: every non-GET ``/api/*`` request carries ``X-WD-Request: 1`` and, when an
   ``Origin`` header is present, it equals the request's own Host-derived origin or the origin of
   ``WD_PUBLIC_URL`` (plus ``http://localhost:5173`` under ``WD_DEV=1``). The same check runs globally in
-  ``main.py``'s middleware; the dependency exists for explicit wiring and tests.
+  ``main.py``'s middleware; the dependency exists for explicit wiring and tests. :data:`CSRF_EXEMPT_PATHS` names the
+  one exception (slice 2-A, API.md 121): Apple's ``response_mode=form_post`` lands on ``POST /api/auth/apple/callback``
+  without the header — its signed ``state`` is that endpoint's CSRF defence.
 * :func:`client_ip` — the connecting peer; behind a trusted proxy (``WD_TRUST_PROXY=1``) the address the proxy
   appended to ``X-Forwarded-For`` (resolved by uvicorn's ``ProxyHeadersMiddleware``; fallback: the LAST hop), never the
   client-supplied first hop, which would let anyone rotate past the per-IP throttles.
@@ -40,6 +42,9 @@ SESSION_COOKIE = "wd_session"
 CSRF_HEADER = "x-wd-request"
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 DEV_ORIGIN = "http://localhost:5173"
+# the only /api path the CSRF rule skips (API.md §1 / 121, slice 2-A): Apple posts the id_token here from appleid.apple.com, so
+# neither `X-WD-Request` nor a same-origin Origin can be present; the HMAC-signed `state` the callback verifies replaces them
+CSRF_EXEMPT_PATHS: frozenset[str] = frozenset({"/api/auth/apple/callback"})
 # the peers `wd serve` trusts for X-Forwarded-* (uvicorn `forwarded_allow_ips="127.0.0.1"`, DEPLOY §3)
 TRUSTED_PROXY_PEERS: tuple[str, ...] = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 USER_COLUMNS = (
@@ -144,8 +149,8 @@ def csrf_violation(method: str, scheme: str, headers: Mapping[str, str], cfg: Se
 
 
 def csrf_guard(request: Request) -> None:
-    """Dependency form of the CSRF rule (403 ``csrf_rejected``)."""
-    if not request.url.path.startswith("/api/"):
+    """Dependency form of the CSRF rule (403 ``csrf_rejected``); :data:`CSRF_EXEMPT_PATHS` pass like the middleware lets them."""
+    if not request.url.path.startswith("/api/") or request.url.path in CSRF_EXEMPT_PATHS:
         return
     reason = csrf_violation(request.method, request.url.scheme, request.headers, request.app.state.settings)
     if reason:

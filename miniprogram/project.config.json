@@ -1,0 +1,17 @@
+{
+  "description": "单词之舞 — the WeChat mini program of the word-Dance login bridge (API.md §3.3, endpoints 115 / 116): scan / pairing-code confirmation + a static 今日一句. Paste the real AppID below (README.md).",
+  "appid": "wx0000000000000000",
+  "projectname": "word-dance",
+  "compileType": "miniprogram",
+  "libVersion": "3.8.0",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "coverView": true,
+    "showShadowRootInWxmlPanel": true
+  },
+  "condition": {}
+}

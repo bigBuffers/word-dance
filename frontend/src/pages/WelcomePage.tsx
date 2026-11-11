@@ -9,6 +9,8 @@
 // GET /api/screen/next?stage=auto&count=30 with known / unfamiliar / skip / peek, 5-s undo (server `restore`),
 // skip onboarding / finish → POST /api/onboarding/complete → /today (a guardian → /children, the children page). While the server has SMS off,
 // step 0 carries a note under the declarations: a guardian account cannot manage children until SMS is on and a phone is bound.
+// Slice 2-A: a third-party-only account (`isThirdPartyOnly` — WeChat / QQ / Apple is its only way in) must set a password at step 0
+// too (the server rule of endpoint 89, `THIRD_PARTY_PASSWORD_ZH`): label `welcome.requiredPassword`, hint `welcome.thirdPartyPassword`.
 // Keys 1 / 2 / S / Space go through the
 // shared `useKeyboard` (drops auto-repeat, modifiers, form controls, open dialogs — FRONTEND §5.4) and the
 // verdict buttons through `useTapLock`, so one held key or one double tap judges exactly one card.
@@ -17,7 +19,7 @@ import { useNavigate } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { ProfileBody } from '@/api/endpoints';
-import type { AccountKind, ScreenVerdict, ScreenWord, Stage } from '@/api/types';
+import type { AccountKind, ScreenVerdict, ScreenWord, Stage, User } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
@@ -84,12 +86,22 @@ export const DECLARATION_BODY: Record<Declaration, { account_kind: AccountKind; 
 };
 
 /**
+ * A third-party-only account (slice 2-A, the endpoint-89 rule): a WeChat / QQ / Apple identity is its only way in — no live phone,
+ * no verified e-mail, no password — so step 0 must set a password (the server answers 400 `fields.password` otherwise).
+ */
+export function isThirdPartyOnly(user: Pick<User, 'providers' | 'phone_masked' | 'email' | 'email_verified' | 'has_password'>): boolean {
+  return user.providers.length > 0 && !user.phone_masked && !(user.email && user.email_verified) && !user.has_password;
+}
+
+/**
  * Step 0 (first setup) of a code-created account (API.md 89): nickname + the declaration, optional username and password — the
- * password is required for a guardian whose e-mail is not verified (the server answers 400 `fields.password` otherwise).
+ * password is required for a guardian whose e-mail is not verified and for a third-party-only account (the server answers 400
+ * `fields.password` otherwise).
  */
 function ProfileStep({ onDone }: { onDone: () => void }) {
   const { user, server, applySession, refresh } = useAuth();
   const lockedGuardian = user?.account_kind === 'guardian'; // created by a claim (endpoint 109): the kind is settled
+  const thirdPartyOnly = user !== null && isThirdPartyOnly(user); // created by a WeChat / QQ / Apple confirmation: a password is the only second factor it can have
   const smsOff = server?.sms_enabled !== true; // a guardian needs a phone, bound only through SMS: say so before the choice, do not block it
   const [nickname, setNickname] = useState('');
   const [choice, setChoice] = useState<Declaration | null>(lockedGuardian ? 'guardian' : null);
@@ -103,7 +115,8 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
   const trimmedUser = username.trim();
   const usernameOk = trimmedUser === '' || USERNAME_RE.test(trimmedUser);
   const strength = passwordStrength(password, trimmedUser);
-  const passwordRequired = choice === 'guardian' && user?.email_verified !== true;
+  const guardianNeedsPassword = choice === 'guardian' && user?.email_verified !== true;
+  const passwordRequired = guardianNeedsPassword || thirdPartyOnly;
   const passwordOk = password === '' ? !passwordRequired : strength >= 2;
   const valid = trimmedName.length > 0 && trimmedName.length <= 32 && choice !== null && usernameOk && passwordOk;
   const nameError = touched && !trimmedName ? zh.welcome.nicknameHint : null;
@@ -173,7 +186,12 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
         <Field label={zh.welcome.optionalUsername} hint={usernameError ? undefined : zh.auth.usernameHint} error={usernameError}>
           {(control) => <input {...control} type="text" autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck={false} maxLength={32} value={username} onChange={(e) => setUsername(e.target.value)} />}
         </Field>
-        <Field label={passwordRequired ? zh.welcome.guardianPassword : zh.welcome.optionalPassword} required={passwordRequired} hint={passwordError ? undefined : zh.welcome.passwordWhy} error={passwordError}>
+        <Field
+          label={guardianNeedsPassword ? zh.welcome.guardianPassword : thirdPartyOnly ? zh.welcome.requiredPassword : zh.welcome.optionalPassword}
+          required={passwordRequired}
+          hint={passwordError ? undefined : thirdPartyOnly ? zh.welcome.thirdPartyPassword : zh.welcome.passwordWhy}
+          error={passwordError}
+        >
           {(control) => (
             <>
               <input {...control} type="password" autoComplete="new-password" maxLength={64} value={password} onChange={(e) => setPassword(e.target.value)} />

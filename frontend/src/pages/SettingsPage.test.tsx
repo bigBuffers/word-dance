@@ -3,20 +3,22 @@
 // reported in zh from the response's closed-set `reason` (API.md 17; HTTP status / connection advice as the fallback,
 // never the transport text), and the queued test e-mail is announced as queued, not as a success.
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Settings, User } from '@/api/types';
+import type { Settings, ThirdPartyProvider, User } from '@/api/types';
 import { AuthProvider } from '@/auth/AuthContext';
 import { ToastProvider } from '@/components/ui/Toast';
 import { exportAccountUrl } from '@/api/endpoints';
 import { zh } from '@/i18n/zh';
-import SettingsPage, { buildImportBody, toggleStageSetting, webhookFailureReason } from './SettingsPage';
+import SettingsPage, { buildImportBody, THIRD_PARTY_PROVIDERS, toggleStageSetting, webhookFailureReason } from './SettingsPage';
 
 const HOOK = 'https://hooks.example.com/x';
+const WX_TICKET = 'abcdefghijklmnopqrstuvwxyz';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
+let lastLoginMethod = false; // the server's `ways_in` verdict for a third-party unbind (API.md 117)
+const baseUser: User = { id: 1, username: 'alice', display_name: 'alice', email: 'a@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: '2026-10-14T00:00:00Z', has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [] };
 let user: User = baseUser;
-const baseServer = { version: '0.1.0', registration_mode: 'open', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false };
+const baseServer = { version: '0.1.0', registration_mode: 'open', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false };
 let server = baseServer;
 
 let settings: Settings;
@@ -65,25 +67,50 @@ function installFetch() {
         user = { ...user, phone_masked: '139****9000' };
         return respond(200, { user });
       }
+      // third-party identities (API.md 112 / 113 / 117, slice 2-A)
+      const identity = /^\/api\/account\/identities\/(wechat_mini|qq|apple)$/.exec(path);
+      if (method === 'DELETE' && identity) {
+        const provider = identity[1] as ThirdPartyProvider;
+        if (!user.providers.includes(provider)) return respond(409, { error: { code: 'invalid_transition', message: '', details: { reason: 'not_bound' } } });
+        if (lastLoginMethod) return respond(409, { error: { code: 'last_login_method', message: '' } });
+        user = { ...user, providers: user.providers.filter((p) => p !== provider) };
+        return respond(200, { user });
+      }
+      if (method === 'POST' && path === '/api/auth/wechat/ticket') return respond(201, { ticket: WX_TICKET, pairing_code: '123456', expires_in_s: 180, qr_url: `/api/auth/wechat/ticket/${WX_TICKET}/qr` });
+      if (method === 'GET' && path === `/api/auth/wechat/ticket/${WX_TICKET}`) return respond(200, { status: 'pending', user: null, settings: null, created: null });
       if (method === 'DELETE' && path === '/api/account') {
         // a guardian with children: 409 has_children (with the names) until delete_children is true (API.md 8, slice 1-B)
         if (user.account_kind === 'guardian' && body?.['delete_children'] !== true) return respond(409, { error: { code: 'has_children', message: '', details: { children: [{ id: 4, display_name: 'Tao' }, { id: 6, display_name: 'Mei' }] } } });
         return respond(204, undefined);
       }
       if (method === 'POST' && path === '/api/auth/logout') return respond(204, undefined);
-      if (method === 'GET' && path === '/api/health') return respond(200, { status: 'ok', version: '0.1.0', registration_mode: 'open', needs_setup: false, sms_enabled: true, email_enabled: true, captcha: false, time: '2026-10-14T00:00:00Z' });
+      if (method === 'GET' && path === '/api/health') return respond(200, { status: 'ok', version: '0.1.0', registration_mode: 'open', needs_setup: false, sms_enabled: true, email_enabled: true, captcha: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false, time: '2026-10-14T00:00:00Z' });
       return respond(404, { error: { code: 'not_found', message: '' } });
     }),
   );
 }
 
-function renderSettings() {
+/** The current query string, so a test can see the `?bound=` / `?error=` params leave the URL. */
+function SearchProbe() {
+  const location = useLocation();
+  return <div data-testid="search">{location.search}</div>;
+}
+
+function renderSettings(path = '/settings') {
   return render(
-    <MemoryRouter initialEntries={['/settings']}>
+    <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
         <AuthProvider>
           <Routes>
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route
+              path="/settings"
+              element={
+                <>
+                  <SettingsPage />
+                  <SearchProbe />
+                </>
+              }
+            />
             <Route path="/login" element={<div>login-page</div>} />
           </Routes>
         </AuthProvider>
@@ -502,6 +529,140 @@ describe('account - login methods (FRONTEND 5.8, API.md 85-88, 7 / 8 with a code
     expect(within(sheet).queryByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' })).toBeNull();
     expect(within(sheet).queryByRole('button', { name: zh.auth.sendCode })).toBeNull();
     expect((within(sheet).getByRole('button', { name: zh.common.save }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('account - third-party identities (FRONTEND 5.8, API.md 112 / 117 / 118 / 120 / 122, slice 2-A)', () => {
+  const providerSettings = () =>
+    ({
+      stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
+      webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+    }) as unknown as Settings;
+  const allOn = { wechat_enabled: true, qq_enabled: true, apple_enabled: true };
+  beforeEach(() => {
+    calls = [];
+    lastLoginMethod = false;
+    settings = providerSettings();
+    user = baseUser;
+    server = { ...baseServer, sms_enabled: true };
+    installFetch();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const accountSection = async () => (await screen.findByRole('heading', { name: zh.settings.account })).closest('section') as HTMLElement;
+  /** The login-methods row of a provider (its label is the row's first span), or null. */
+  const providerRow = (section: HTMLElement, provider: ThirdPartyProvider) => {
+    const label = within(section).queryByText(zh.settings.providers[provider], { selector: '.settings__row > span' });
+    return label ? (label.closest('.settings__row') as HTMLElement) : null;
+  };
+  const dialogOf = (title: string) => screen.getByRole('heading', { name: title }).closest('dialog') as HTMLDialogElement;
+
+  it('a dark server (flags off, nothing bound) shows no third-party row; a bound provider keeps its row while its flag is off, so it can be unbound', async () => {
+    const dark = renderSettings();
+    let section = await accountSection();
+    for (const p of THIRD_PARTY_PROVIDERS) expect(providerRow(section, p)).toBeNull();
+    expect(screen.getByText(zh.settings.unbound)).toBeTruthy(); // the phone row alone
+    dark.unmount();
+    vi.unstubAllGlobals();
+
+    user = { ...baseUser, providers: ['qq'] };
+    installFetch();
+    renderSettings();
+    section = await accountSection();
+    const qq = providerRow(section, 'qq') as HTMLElement;
+    expect(within(qq).getByText(zh.settings.bound)).toBeTruthy();
+    expect(within(qq).getByRole('button', { name: zh.settings.unbind })).toBeTruthy();
+    expect(within(qq).queryByText(zh.settings.bind)).toBeNull();
+    expect(providerRow(section, 'wechat_mini')).toBeNull();
+    expect(providerRow(section, 'apple')).toBeNull();
+  });
+
+  it('with the flags on, every provider has a row: WeChat binds through the ticket sheet (POST /api/auth/wechat/ticket {kind:"bind"}), QQ / Apple through links to 118 / 120 with next=/settings', async () => {
+    server = { ...baseServer, sms_enabled: true, ...allOn };
+    installFetch();
+    renderSettings();
+    const section = await accountSection();
+    const rows = THIRD_PARTY_PROVIDERS.map((p) => providerRow(section, p) as HTMLElement);
+    expect(rows.every((r) => r !== null)).toBe(true);
+    for (const row of rows) expect(within(row).getByText(zh.settings.unbound)).toBeTruthy();
+    expect(within(rows[1]!).getByRole('link', { name: zh.settings.bind }).getAttribute('href')).toBe('/api/auth/qq/start?kind=bind&next=%2Fsettings');
+    expect(within(rows[2]!).getByRole('link', { name: zh.settings.bind }).getAttribute('href')).toBe('/api/auth/apple/start?kind=bind&next=%2Fsettings');
+    // the rows sit in the login-methods block, after the phone row
+    const labels = [...section.querySelectorAll('.settings__row > span:first-child')].map((s) => s.textContent);
+    expect(labels.indexOf(zh.settings.phone)).toBeLessThan(labels.indexOf(zh.settings.providers.wechat_mini));
+    expect(labels.slice(labels.indexOf(zh.settings.providers.wechat_mini), labels.indexOf(zh.settings.providers.wechat_mini) + 3)).toEqual([zh.settings.providers.wechat_mini, zh.settings.providers.qq, zh.settings.providers.apple]);
+
+    fireEvent.click(within(rows[0]!).getByRole('button', { name: zh.settings.bind }));
+    const sheet = dialogOf(zh.settings.bindWechat);
+    expect((await within(sheet).findByAltText(zh.auth.wechatQrAlt)).getAttribute('src')).toBe(`/api/auth/wechat/ticket/${WX_TICKET}/qr`);
+    expect(within(sheet).getByText(zh.auth.wechatPairHint)).toBeTruthy();
+    expect(calls.filter((c) => c.path === '/api/auth/wechat/ticket').map((c) => c.body)).toEqual([{ kind: 'bind' }]);
+  });
+
+  it('unbind re-authenticates with the password → DELETE /api/account/identities/wechat_mini {password}; the row returns to unbound with a toast', async () => {
+    server = { ...baseServer, sms_enabled: true, ...allOn };
+    user = { ...baseUser, providers: ['wechat_mini', 'qq'] };
+    installFetch();
+    renderSettings();
+    const section = await accountSection();
+    fireEvent.click(within(providerRow(section, 'wechat_mini') as HTMLElement).getByRole('button', { name: zh.settings.unbind }));
+    const sheet = dialogOf(zh.settings.unbindTitle(zh.settings.providers.wechat_mini));
+    expect(within(sheet).getByText(zh.settings.unbindProviderHint)).toBeTruthy();
+    const submit = within(sheet).getByRole('button', { name: zh.settings.unbind }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.password}`)), { target: { value: 'secret123' } });
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE').map((c) => [c.path, c.body, c.status])).toEqual([['/api/account/identities/wechat_mini', { password: 'secret123' }, 200]]));
+    expect(await screen.findByText(zh.settings.unboundToast(zh.settings.providers.wechat_mini))).toBeTruthy(); // toast
+    const wechat = providerRow(section, 'wechat_mini') as HTMLElement;
+    await waitFor(() => expect(within(wechat).getByText(zh.settings.unbound)).toBeTruthy());
+    expect(within(wechat).getByRole('button', { name: zh.settings.bind })).toBeTruthy(); // the flag is on, so it can be bound again
+    expect(within(providerRow(section, 'qq') as HTMLElement).getByText(zh.settings.bound)).toBeTruthy(); // the other identity stays
+  });
+
+  it('an account without a password unbinds with a reauth code (endpoint 85 → DELETE {code}); the server refusing the last way in (409 last_login_method) is a toast and the row stays bound', async () => {
+    user = { ...baseUser, has_password: false, email: null, email_verified: false, phone_masked: '138****8000', providers: ['apple'] };
+    lastLoginMethod = true;
+    installFetch();
+    renderSettings();
+    const section = await accountSection();
+    const apple = providerRow(section, 'apple') as HTMLElement;
+    fireEvent.click(within(apple).getByRole('button', { name: zh.settings.unbind }));
+    const sheet = dialogOf(zh.settings.unbindTitle(zh.settings.providers.apple));
+    expect(within(sheet).queryByLabelText(new RegExp(`^${zh.auth.password}`))).toBeNull();
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.auth.sendCode }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/api/account/code').map((c) => c.body)).toEqual([{ channel: 'phone', purpose: 'reauth' }]));
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.code}`), { selector: 'input' }), { target: { value: '654321' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.settings.unbind }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE').map((c) => [c.path, c.body, c.status])).toEqual([['/api/account/identities/apple', { code: '654321' }, 409]]));
+    expect(await screen.findByText(zh.errors.lastLoginMethod)).toBeTruthy(); // toast
+    expect(within(apple).getByText(zh.settings.bound)).toBeTruthy();
+  });
+
+  it('?bound=<provider> from endpoint 122 shows the success toast once and leaves the URL; ?error=<code> shows the mapped error toast', async () => {
+    const first = renderSettings('/settings?bound=qq');
+    expect(await screen.findByText(zh.settings.boundToast(zh.settings.providers.qq))).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe(''));
+    expect(screen.getAllByText(zh.settings.boundToast(zh.settings.providers.qq))).toHaveLength(1);
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    installFetch();
+    renderSettings('/settings?error=identity_taken&foo=1');
+    expect(await screen.findByText(zh.errors.identityTakenGeneric)).toBeTruthy(); // no envelope on the redirect: the neutral wording, never the phone one
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?foo=1')); // only the flow's params leave
+  });
+
+  it('a child never sees the third-party rows, bound or not', async () => {
+    server = { ...baseServer, sms_enabled: true, ...allOn };
+    user = { ...baseUser, is_child: true, has_password: false, age_band: 'u14', providers: ['wechat_mini'] };
+    installFetch();
+    renderSettings();
+    const section = await accountSection();
+    expect(within(section).getByText(zh.settings.childManaged)).toBeTruthy();
+    for (const p of THIRD_PARTY_PROVIDERS) expect(providerRow(section, p)).toBeNull();
   });
 });
 

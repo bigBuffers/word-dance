@@ -12,8 +12,9 @@ over an open connection so tests drive :func:`run_tick` with a frozen clock and 
   time, ``next_push_at`` is re-anchored to that instant (guarded) so today's batch is built in its normal window
   and published + delivered at push time instead of being published at once with ``skipped`` deliveries;
 * ``finalize_building``; hourly GC (expired sessions, ``auth_throttle``, expired / day-old used ``login_codes`` and ``family_codes``
-  (the child login codes and claim codes of slice 1-B, ``family.gc_family_codes``) and the ``sms.sent.*`` kv counters older than two
-  days (docs/AUTH_SIGNUP_DESIGN.md §5.1), stale ``running`` jobs, timed-out open ``bank_suggestions`` → ``expired`` for every user —
+  (the child login codes and claim codes of slice 1-B, ``family.gc_family_codes``), the WeChat login tickets expired / consumed more
+  than a day ago (``wechat_bridge.gc_tickets``) and the one-time OAuth grants (``kv`` ``oauth_grant:<exp iso>:<hash>``) whose embedded
+  expiry passed (slice 2-A), and the ``sms.sent.*`` kv counters older than two days (docs/AUTH_SIGNUP_DESIGN.md §5.1), stale ``running`` jobs, timed-out open ``bank_suggestions`` → ``expired`` for every user —
   ``consolidate.expire_stale_suggestions``);
 * nightly 02:30 (per user, local) ``consolidate_bank`` enqueue guarded by ``kv consolidate:<user_id>:last_date``;
 * 03:30 ``WD_TZ`` maintenance (``kv maintenance.last_date``): :func:`prefetch`, the failed-image retry sweep
@@ -42,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from .. import db, family
+from .. import db, family, oauth_state, wechat_bridge
 from ..ai import budget, consolidate
 from ..clock import SYSTEM_CLOCK, compute_next_push, day_start, local_date as clock_local_date, parse_iso, parse_push_time, to_iso, zone
 from ..services import bank, batches, learn_order
@@ -176,7 +177,8 @@ def process_pushes(conn: sqlite3.Connection, now: datetime, *, prebuild_hours: i
 # -------------------------------------------------------------------------------------------- hourly
 def hourly_gc(conn: sqlite3.Connection, now: datetime, *, boot_id: str) -> bool:
     """Once per hour: expired sessions, finished throttle rows, verification codes and family codes that expired or were used more than a
-    day ago (the used row is kept a day as the audit trail of a login / binding / dispute / child login / claim), the site-wide ``sms.sent.<day|hour>`` kv
+    day ago (the used row is kept a day as the audit trail of a login / binding / dispute / child login / claim), WeChat login tickets expired or
+    consumed more than a day ago and the one-time OAuth grants whose expiry passed (slice 2-A), the site-wide ``sms.sent.<day|hour>`` kv
     counters older than two days, stale ``running`` jobs (boot-id sweep), and open ``bank_suggestions`` past their 30-day
     ``expires_at`` → ``expired`` (CLAUDE_INTEGRATION §6.6; the nightly ``consolidate_bank`` job does the same for its user only,
     and only when the bank needs a run)."""
@@ -194,6 +196,10 @@ def hourly_gc(conn: sqlite3.Connection, now: datetime, *, boot_id: str) -> bool:
         # an unused code goes when it expires; a used one (a login / binding / dispute happened) is kept a day as the audit trail
         conn.execute("DELETE FROM login_codes WHERE (used_at IS NULL AND expires_at <= ?) OR (used_at IS NOT NULL AND used_at <= ?)", (now_s, day_ago))
         family.gc_family_codes(conn, now)  # the same rule for the child login codes and claim codes (0019)
+        wechat_bridge.gc_tickets(conn, now)  # the same rule for the WeChat login tickets (0020): expired / consumed more than a day ago
+        # the one-time OAuth grants of QQ / Apple (wd.oauth_state): `oauth_grant:<exp iso>:<sha256 hex>` — the 20 ISO characters after the
+        # 12-character prefix are the expiry, so a plain string compare finds the dead ones (a redeemed grant is deleted by the redeem itself)
+        oauth_state.gc_grants(conn, now)  # one definition of the key layout (wd.oauth_state), so the sweep cannot drift from it
         # `sms.sent.<YYYY-MM-DD>` / `sms.sent.<YYYY-MM-DDTHH>` (sms_budget): the part after the 9-character prefix sorts by date
         conn.execute("DELETE FROM kv WHERE key LIKE 'sms.sent.%' AND substr(key, 10) < ?", ((now - timedelta(days=2)).strftime("%Y-%m-%d"),))
         swept = queue.requeue_stale(conn, boot_id, now=now_s)

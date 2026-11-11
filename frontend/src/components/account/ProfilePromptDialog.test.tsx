@@ -14,14 +14,14 @@ const ISO = '2026-11-10T08:00:00Z';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const legacy: User = {
   id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO,
-  has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: true,
+  has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: true, providers: [],
 };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
-const server: ServerFlags = { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true };
+const server: ServerFlags = { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false };
 
 let user: User;
 let calls: { method: string; path: string; body: Record<string, unknown> | null }[];

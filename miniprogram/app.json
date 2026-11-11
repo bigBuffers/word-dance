@@ -1,0 +1,16 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/pair/pair",
+    "pages/confirm/confirm"
+  ],
+  "window": {
+    "navigationBarTitleText": "单词之舞",
+    "navigationBarBackgroundColor": "#1f4e79",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f6f7f9"
+  },
+  "requiredPrivateInfos": [],
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

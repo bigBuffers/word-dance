@@ -38,9 +38,11 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "invalid_captcha": (400, "图形验证码不正确或已过期"),
     "invalid_phone": (400, "请输入正确的中国大陆手机号"),
     "challenge_expired": (400, "确认已过期，请重新登录"),
+    "invalid_grant": (400, "登录授权已失效，请重新登录"),  # 122: an unknown / used / expired one-time OAuth grant (slice 2-A, API.md §3.3)
     "unauthorized": (401, "请先登录"),
     "invalid_credentials": (401, "用户名或密码错误"),
     "invalid_pin": (401, "家长 PIN 不正确"),  # the 家长门 (102, 105): a wrong guardian PIN, counted on the gate lockout key (slice 1-B)
+    "invalid_identity_token": (401, "身份凭证无效或已过期"),  # 116 (a bad / expired mp_token), 121 (an id_token that fails verification), a bad OAuth `state` (119 / 121) — slice 2-A
     "forbidden": (403, "没有权限执行此操作"),
     "account_disabled": (403, "账号已被停用"),
     "registration_closed": (403, "当前不开放注册"),
@@ -75,6 +77,7 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "identity_taken": (409, "该手机号已绑定其他账号"),
     "last_login_method": (409, "至少保留一种登录方式"),
     "sms_unconfigured": (409, "服务器未配置短信发送"),
+    "provider_unconfigured": (409, "该登录方式尚未开启"),  # third-party sign-in while its provider is off (112–116 WeChat, 118 / 119 QQ, 120 / 121 Apple; 117 when off AND nothing is bound) — slice 2-A
     "guardian_factors_required": (409, "家长账号需要绑定手机号，并设置密码或验证邮箱"),  # the two-factor rule for guardians (95, 99–101, 104; 6 / 87 would break it)
     "has_children": (409, "名下还有孩子账号，请先选择如何处理"),  # 8 without `delete_children: true` (`details.children`)
     "payload_too_large": (413, "请求体过大"),
@@ -83,6 +86,7 @@ CATALOGUE: dict[str, tuple[int, str]] = {
     "internal_error": (500, "服务器内部错误"),
     "ai_disabled": (503, "AI 功能当前不可用"),
     "audio_unavailable": (503, "服务器暂时无法提供发音"),
+    "provider_error": (502, "第三方登录服务暂时不可用，请稍后再试"),  # code2Session / 小程序码 / QQ token / Apple JWKS failures (the provider's error code goes to the log, never to the client) — slice 2-A
     "email_send_failed": (503, "邮件发送失败，请稍后重试"),
     "sms_budget_exhausted": (503, "今日短信额度已用完，请改用邮箱或密码登录"),
     "sms_send_failed": (503, "短信发送失败，请稍后再试"),

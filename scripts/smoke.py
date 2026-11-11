@@ -9,7 +9,12 @@ Boots a throwaway word-Dance instance and walks the whole product once against t
     photos: image/jpeg + fixture attribution, abandon's the CC0 one) → today/build → tick
     → grade every kind incl. an in-batch screen 不熟悉 (second row) → master → restore (snapshot back) → master again
     → re-add via unfamiliar (times_added 2) → export → import into bob → history/stats → admin overview
-    (today_usd > 0 with the fake; with_photo + with_claude_svg + card_only == with_content) → logout → 401
+    (today_usd > 0 with the fake; with_photo + with_claude_svg + card_only == with_content) → pronunciation clip
+    → third-party sign-in with the dev fakes (WD_AUTH_FAKE_PROVIDERS=1, slice 2-A): health flags → WeChat bridge
+    (ticket → scan → confirm → poll = session, providers ['wechat_mini']; 89 wants a password; unbind the last way in → 409;
+    with a password → unbind 200) → QQ (start → fake consent → callback → finish → session) → Apple (start → fake consent
+    form → form_post callback → finish → session) — the QQ / Apple steps are skipped with a reason while endpoints 118–122
+    are not in the tree → logout → 401
 
 Instance: a temporary data directory, port 8010, the fake `claude` (backend/tests/fake_claude.py), mocked image
 providers (WD_SMOKE_MOCK_HTTP=1 + WD_DEV=1 — honoured by `wd serve` through create_app AND by every `wd` subprocess
@@ -26,8 +31,10 @@ the data directory is kept for inspection and the exit code is 1. Options: --por
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -58,6 +65,7 @@ WIKIMEDIA_FIXTURE_ATTRIBUTIONS = (
     '"Red Apple" · Abhijit Tembhekar from Mumbai, India · CC BY 2.0',
 )
 JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 class SmokeFailure(Exception):
@@ -158,6 +166,7 @@ class Smoke:
         self.log_path = self.data_dir / "smoke-server.log"
         self.server: subprocess.Popen | None = None
         self.steps: list[str] = []
+        self.skipped: list[tuple[str, str]] = []
         self.started = time.monotonic()
         self.env = self._build_env(args.seed)
 
@@ -185,6 +194,7 @@ class Smoke:
                 "WD_CONTACT_EMAIL": "smoke@localhost",
                 "WD_AI_ENABLED": "1",
                 "WD_IMAGES_ENABLED": "1",
+                "WD_AUTH_FAKE_PROVIDERS": "1",  # slice 2-A: the fake WeChat / QQ / Apple clients + the fake consent pages (dev only; nothing leaves the box)
             }
         )
         if seed:
@@ -278,6 +288,33 @@ class Smoke:
             expect(wait <= max_wait_s, f"{len(queued)} job(s) deferred {wait:.0f}s into the future: {[(j['type'], j['run_after']) for j in queued][:5]}")
             time.sleep(max(0.5, wait + 0.5))
         raise AssertionError(f"queue did not drain after {max_rounds} rounds")
+
+    def skip(self, name: str, why: str) -> None:
+        """A step this tree cannot run yet (an endpoint another implementer owns is missing): reported, never a failure."""
+        self.skipped.append((name, why))
+        print(f"  skip {name} — {why}")
+
+    def issue_reauth_code(self, user_id: int) -> str:
+        """A `reauth` code written into the smoke database by the wd package itself (the same `security.issue_login_code` endpoint 85
+        calls — which refuses an account without a phone / verified e-mail, exactly the third-party-only account whose 409
+        `last_login_method` the step checks). Runs as a `wd`-style subprocess under the smoke environment; prints only the code."""
+        script = (
+            "import sys\n"
+            "from datetime import datetime, timezone\n"
+            "from wd import db, security\n"
+            "from wd.config import Settings\n"
+            "cfg = Settings.from_env()\n"
+            "c = db.connect(cfg.db_path)\n"
+            "try:\n"
+            "    print(security.issue_login_code(c, channel='email', target='smoke@localhost', purpose='reauth', user_id=int(sys.argv[1]), ip='127.0.0.1', secret_key=cfg.secret_key, now=datetime.now(timezone.utc)))\n"
+            "finally:\n"
+            "    c.close()\n"
+        )
+        cp = subprocess.run([self.python, "-c", script, str(int(user_id))], env=self.env, cwd=str(self.backend.parent), capture_output=True, text=True, timeout=60)
+        expect(cp.returncode == 0, f"reauth code helper exited {cp.returncode}: {cp.stderr[-400:]}")
+        code = cp.stdout.strip().splitlines()[-1].strip()
+        expect(re.fullmatch(r"\d{6}", code) is not None, f"reauth code helper printed {code!r}")
+        return code
 
     def cleanup(self, success: bool) -> None:
         self.stop_server()
@@ -663,6 +700,113 @@ def run_scenario(s: Smoke) -> None:
         alice.get("/media/audio", params={"text": "-ish"}, expect_status=400)
         expect(alice.error_code() == "validation_error", f"code {alice.error_code()}")
 
+    # ------------------------------------------------------------------ third-party sign-in (slice 2-A, the dev fakes)
+    wx = Api(s.base_url, "wechat-web")
+    mp = Api(s.base_url, "miniprogram")
+    with s.step("third-party sign-in: health and /me show wechat / qq / apple enabled (WD_AUTH_FAKE_PROVIDERS=1)"):
+        h = anon.get("/api/health")
+        expect((h["wechat_enabled"], h["qq_enabled"], h["apple_enabled"]) == (True, True, True), f"health flags {h}")
+        server = alice.get("/api/auth/me")["server"]
+        expect((server["wechat_enabled"], server["qq_enabled"], server["apple_enabled"]) == (True, True, True), f"server flags {server}")
+
+    with s.step("wechat bridge: ticket → scan (fake js_code) → confirm → poll gets a session (created) → /me providers == ['wechat_mini']"):
+        t = wx.post("/api/auth/wechat/ticket", {"kind": "login"}, expect_status=201)
+        expect(re.fullmatch(r"[a-z2-7]{26}", t["ticket"]) is not None and re.fullmatch(r"\d{6}", t["pairing_code"]) is not None and t["expires_in_s"] == 180, f"ticket {t}")
+        expect(wx.client.cookies.get("wd_wxt") is not None, "no wd_wxt poll cookie")
+        expect(wx.get(f"/api/auth/wechat/ticket/{t['ticket']}")["status"] == "pending", "the poll should say pending")
+        anon.get(f"/api/auth/wechat/ticket/{t['ticket']}", expect_status=404)  # no poll cookie: identical to an unknown ticket
+        png = wx.get(t["qr_url"])
+        expect(png.headers.get("content-type", "").startswith("image/png") and png.content[:8] == PNG_MAGIC, "the 小程序码 is not a PNG")
+        info = mp.post("/api/auth/wechat/scan", {"js_code": "smoke-wx-1", "pairing_code": t["pairing_code"]})
+        expect(info["kind"] == "login" and info["account"] == "new" and info["mp_token"] and info["web_ip_masked"] == "127.0.0.*", f"scan {info}")
+        expect(wx.get(f"/api/auth/wechat/ticket/{t['ticket']}")["status"] == "scanned", "the poll should say scanned")
+        done = mp.post("/api/auth/wechat/confirm", {"mp_token": info["mp_token"], "ticket": t["ticket"], "accept": True})
+        expect(done == {"status": "confirmed", "created": True}, f"confirm {done}")
+        got = wx.call("GET", f"/api/auth/wechat/ticket/{t['ticket']}", expect_status=201)
+        expect(got["status"] == "confirmed" and got["created"] is True and got["user"]["providers"] == ["wechat_mini"] and got["user"]["needs_profile"] is True, f"poll {got}")
+        expect("wd_session=" in wx.last.headers.get("set-cookie", ""), "the confirmed poll set no session cookie")
+        ids["wx_user"] = got["user"]["id"]
+        me = wx.get("/api/auth/me")
+        expect(me["user"]["id"] == ids["wx_user"] and me["user"]["providers"] == ["wechat_mini"] and me["user"]["has_password"] is False, f"me {me['user']}")
+        wx.get(f"/api/auth/wechat/ticket/{t['ticket']}", expect_status=404)  # consumed: delivered exactly once
+
+    with s.step("wechat account: 89 wants a password (third-party-only) → unbind the last way in → 409 last_login_method → with a password → unbind 200"):
+        wx.post("/api/account/profile", {"display_name": "微信用户", "age_band": "adult"}, expect_status=400)
+        fields = wx.last.json()["error"].get("details", {}).get("fields", {})
+        expect(fields.get("password", "").startswith("用微信"), f"89 should ask for the password: {fields}")
+        code = s.issue_reauth_code(ids["wx_user"])
+        wx.call("DELETE", "/api/account/identities/wechat_mini", json={"code": code}, expect_status=409)
+        expect(wx.error_code() == "last_login_method", f"code {wx.error_code()}")
+        r = wx.post("/api/account/profile", {"display_name": "微信用户", "age_band": "adult", "password": PASSWORD})
+        expect(r["user"]["has_password"] is True and r["user"]["needs_profile"] is False and r["user"]["providers"] == ["wechat_mini"], f"profile {r['user']}")
+        r = wx.call("DELETE", "/api/account/identities/wechat_mini", json={"password": PASSWORD})
+        expect(r["user"]["providers"] == [], f"unbind {r['user']}")
+        wx.call("DELETE", "/api/account/identities/wechat_mini", json={"password": PASSWORD}, expect_status=409)
+        expect(wx.error_code() == "invalid_transition", f"code {wx.error_code()}")
+
+    def form_fields(page_text: str) -> dict[str, str]:
+        """The hidden inputs of the FIRST form on the fake Apple consent page — the 同意 form (the 取消 form next to it carries `error`);
+        attribute order free, both quote styles."""
+        m = re.search(r"<form\b[^>]*>(.*?)</form>", page_text, flags=re.IGNORECASE | re.DOTALL)
+        scope = m.group(1) if m else page_text
+        fields: dict[str, str] = {}
+        for tag in re.findall(r"<input\b[^>]*>", scope, flags=re.IGNORECASE):
+            name = re.search(r'\bname\s*=\s*["\']([^"\']+)["\']', tag)
+            value = re.search(r'\bvalue\s*=\s*["\']([^"\']*)["\']', tag)
+            if name:
+                fields[html.unescape(name.group(1))] = html.unescape(value.group(1)) if value else ""
+        return fields
+
+    qq_step = "qq: start → fake consent → callback → finish → session (providers == ['qq'])"
+    qq = Api(s.base_url, "qq-web", csrf_header=False)  # navigations only: GETs need no CSRF header
+    probe = qq.raw("GET", "/api/auth/qq/start", params={"kind": "login"})
+    if probe.status_code == 404:
+        s.skip(qq_step, "endpoints 118–122 (the QQ / Apple implementer) are not in this tree yet (404)")
+    else:
+        with s.step(qq_step):
+            expect(probe.status_code == 302, f"start → {probe.status_code}: {probe.text[:200]}")
+            consent_url = probe.headers["location"]
+            expect("/api/auth/fake/qq?" in consent_url, f"start should send to the fake consent page, got {consent_url}")
+            page = qq.raw("GET", consent_url)
+            expect(page.status_code == 200, f"consent page → {page.status_code}")
+            m = re.search(r'href\s*=\s*["\']([^"\']*api/auth/qq/callback\?[^"\']*code=[^"\']*)["\']', page.text)
+            expect(m is not None, "no 同意 link to /api/auth/qq/callback on the fake consent page")
+            r = qq.raw("GET", html.unescape(m.group(1)))
+            finish = r.headers.get("location", "")
+            expect(r.status_code == 302 and "/api/auth/oauth/finish?grant=" in finish, f"callback → {r.status_code} {finish}")
+            r = qq.raw("GET", finish)
+            expect(r.status_code == 302 and r.headers.get("location", "").endswith("/welcome"), f"finish → {r.status_code} {r.headers.get('location')}")
+            expect("wd_session=" in r.headers.get("set-cookie", ""), "finish set no session cookie")
+            qq.raw("GET", finish)
+            expect(qq.last.status_code == 302 and "error=invalid_grant" in qq.last.headers.get("location", ""), f"a reused grant should bounce to /login?error=invalid_grant, got {qq.last.headers.get('location')}")
+            me = qq.get("/api/auth/me")
+            expect(me["user"]["providers"] == ["qq"] and me["user"]["needs_profile"] is True, f"me {me['user']}")
+
+    apple_step = "apple: start → fake consent form → callback (form_post, CSRF-exempt) → finish → session (providers == ['apple'])"
+    ap = Api(s.base_url, "apple-web", csrf_header=False)  # the form_post callback is CSRF-exempt by path; the rest are GETs
+    probe = ap.raw("GET", "/api/auth/apple/start", params={"kind": "login"})
+    if probe.status_code == 404:
+        s.skip(apple_step, "endpoints 118–122 (the QQ / Apple implementer) are not in this tree yet (404)")
+    else:
+        with s.step(apple_step):
+            expect(probe.status_code == 302, f"start → {probe.status_code}: {probe.text[:200]}")
+            consent_url = probe.headers["location"]
+            expect("/api/auth/fake/apple?" in consent_url, f"start should send to the fake consent page, got {consent_url}")
+            page = ap.raw("GET", consent_url)
+            expect(page.status_code == 200 and "/api/auth/apple/callback" in page.text, f"consent page → {page.status_code}")
+            fields = form_fields(page.text)
+            expect({"state", "id_token"} <= set(fields), f"the consent form lacks state / id_token: {sorted(fields)}")
+            r = ap.raw("POST", "/api/auth/apple/callback", data=fields)
+            finish = r.headers.get("location", "")
+            expect(r.status_code == 302 and "/api/auth/oauth/finish?grant=" in finish, f"callback → {r.status_code} {finish} {r.text[:200]}")
+            r = ap.raw("GET", finish)
+            expect(r.status_code == 302 and r.headers.get("location", "").endswith("/welcome"), f"finish → {r.status_code} {r.headers.get('location')}")
+            expect("wd_session=" in r.headers.get("set-cookie", ""), "finish set no session cookie")
+            me = ap.get("/api/auth/me")
+            expect(me["user"]["providers"] == ["apple"] and me["user"]["needs_profile"] is True, f"me {me['user']}")
+            anon.post("/api/auth/logout", expect_status=403)  # the exemption is for that one path only: other POSTs still need the header
+            expect(anon.error_code() == "csrf_rejected", f"code {anon.error_code()}")
+
     with s.step("logout → 401"):
         alice.post("/api/auth/logout", expect_status=204)
         alice.get("/api/auth/me", expect_status=401)
@@ -673,7 +817,7 @@ def run_scenario(s: Smoke) -> None:
         mode = os.stat(s.data_dir / "word-dance.db").st_mode & 0o777
         expect(mode == 0o600, f"word-dance.db mode {oct(mode)}")
 
-    for actor in (alice, bob, anon):
+    for actor in (alice, bob, anon, wx, mp, qq, ap):
         actor.close()
 
 
@@ -717,7 +861,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         s.cleanup(ok)
     if ok:
-        print(f"\nSMOKE PASSED — {len(s.steps)} steps in {time.monotonic() - s.started:.0f}s")
+        skipped = f", {len(s.skipped)} skipped" if s.skipped else ""
+        print(f"\nSMOKE PASSED — {len(s.steps)} steps{skipped} in {time.monotonic() - s.started:.0f}s")
         return 0
     return 1
 

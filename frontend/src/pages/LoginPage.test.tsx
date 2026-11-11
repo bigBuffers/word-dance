@@ -4,7 +4,7 @@
 // second factor or a dispute (endpoint 81 is posted exactly once — the sheet lives outside the form), a 429 on the send
 // counts the button down, and the read-only demo renders only when `GET /api/demo` answers with items.
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CodeLoginResponse, Content, DemoResponse, ImageMeta, Settings, User, WordBrief } from '@/api/types';
 import { AuthProvider, RequireGuest } from '@/auth/AuthContext';
@@ -12,18 +12,20 @@ import { zh } from '@/i18n/zh';
 import LoginPage from './LoginPage';
 
 const ISO = '2026-10-14T00:00:00Z';
+const WX_TICKET = 'abcdefghijklmnopqrstuvwxyz';
+const wechatTicket = () => json(201, { ticket: WX_TICKET, pairing_code: '123456', expires_in_s: 180, qr_url: `/api/auth/wechat/ticket/${WX_TICKET}/qr` });
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const unauthorized = () => json(401, { error: { code: 'unauthorized', message: '' } });
 const health = (over: Record<string, unknown>) => () =>
-  json(200, { status: 'ok', version: '0.1.0', registration_mode: 'invite', needs_setup: false, sms_enabled: false, email_enabled: false, captcha: false, time: ISO, ...over });
+  json(200, { status: 'ok', version: '0.1.0', registration_mode: 'invite', needs_setup: false, sms_enabled: false, email_enabled: false, captcha: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false, time: ISO, ...over });
 
-const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: '138****8000', needs_profile: true, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false };
+const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: '138****8000', needs_profile: true, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [] };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: true, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
-const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
+const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
 const word = (id: number, lemma: string): WordBrief => ({
   id, lemma, display: lemma, kind: 'word', phonetic: null, translation_short: `zh-${lemma}`, stages: ['xs'], stage_min: 1, cet6_star: false, frq: null, collins: null, oxford: null, difficulty: null,
   is_public: true, is_valid_english: true, my_state: null, content_state: 'ready', image_state: 'none',
@@ -51,13 +53,27 @@ const bodyOf = (fetchMock: ReturnType<typeof mockFetch>, path: string) => {
   return call?.[1]?.body ? (JSON.parse(String(call[1].body)) as Record<string, unknown>) : null;
 };
 
+/** The current query string, so a test can see `?error=` leave the URL while `?next=` stays. */
+function SearchProbe() {
+  const location = useLocation();
+  return <div data-testid="search">{location.search}</div>;
+}
+
 function renderLogin(path = '/login') {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AuthProvider>
         <Routes>
           <Route element={<RequireGuest />}>
-            <Route path="/login" element={<LoginPage />} />
+            <Route
+              path="/login"
+              element={
+                <>
+                  <LoginPage />
+                  <SearchProbe />
+                </>
+              }
+            />
           </Route>
           <Route path="/today" element={<div>today-page</div>} />
           <Route path="/bank" element={<div>bank-page</div>} />
@@ -374,4 +390,88 @@ describe('LoginPage', () => {
     expect(headword()).toBe('jump');
     expect(screen.getByText('zh-jump')).toBeTruthy(); // no content → the short translation
   });
+
+  it('slice 2-A: no third-party row on a dark server, none while needs_setup; with the flags on, QQ / Apple link to 118 / 120 with ?next and WeChat opens the ticket sheet', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({}) });
+    const dark = renderLogin();
+    await screen.findByRole('button', { name: zh.auth.login });
+    expect(screen.queryByRole('group', { name: zh.auth.thirdParty })).toBeNull();
+    dark.unmount();
+    vi.unstubAllGlobals();
+
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ needs_setup: true, wechat_enabled: true, qq_enabled: true, apple_enabled: true }) });
+    const setup = renderLogin();
+    await screen.findByText(zh.auth.needsSetup, { exact: false });
+    expect(screen.queryByRole('group', { name: zh.auth.thirdParty })).toBeNull(); // the first admin signs up with a password
+    setup.unmount();
+    vi.unstubAllGlobals();
+
+    const fetchMock = mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'open', wechat_enabled: true, qq_enabled: true, apple_enabled: true }), '/api/auth/wechat/ticket': wechatTicket });
+    renderLogin('/login?next=%2Fbank');
+    const row = await screen.findByRole('group', { name: zh.auth.thirdParty });
+    expect(within(row).getByRole('link', { name: zh.auth.qq }).getAttribute('href')).toBe('/api/auth/qq/start?kind=login&next=%2Fbank');
+    expect(within(row).getByRole('link', { name: zh.auth.apple }).getAttribute('href')).toBe('/api/auth/apple/start?kind=login&next=%2Fbank');
+    fireEvent.click(within(row).getByRole('button', { name: zh.auth.wechat }));
+    const sheet = (await screen.findByRole('heading', { name: zh.auth.wechatTitle })).closest('dialog') as HTMLDialogElement;
+    expect((await within(sheet).findByAltText(zh.auth.wechatQrAlt)).getAttribute('src')).toBe(`/api/auth/wechat/ticket/${WX_TICKET}/qr`);
+    expect(within(sheet).getByText(zh.auth.wechatPairHint)).toBeTruthy();
+    expect(bodyOf(fetchMock, '/api/auth/wechat/ticket')).toEqual({ kind: 'login' });
+    expect(screen.queryByRole('alert')).toBeNull(); // no ?error= → no notice
+  });
+
+  it('slice 2-A: in invite mode the WeChat sheet asks for the invite code before the ticket', async () => {
+    const fetchMock = mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'invite', wechat_enabled: true }), '/api/auth/wechat/ticket': wechatTicket });
+    renderLogin();
+    fireEvent.click(await screen.findByRole('button', { name: zh.auth.wechat }));
+    const sheet = (await screen.findByRole('heading', { name: zh.auth.wechatTitle })).closest('dialog') as HTMLDialogElement;
+    expect(bodyOf(fetchMock, '/api/auth/wechat/ticket')).toBeNull();
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.inviteForNew}`)), { target: { value: 'INV-2026' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: zh.auth.showQr }));
+    await within(sheet).findByAltText(zh.auth.wechatQrAlt);
+    expect(bodyOf(fetchMock, '/api/auth/wechat/ticket')).toEqual({ kind: 'login', invite_code: 'INV-2026' });
+  });
+
+  it('slice 2-A: ?error=<code> from a failed QQ / Apple redirect (119 / 121 / 122) shows the mapped notice once and leaves the URL (?next kept)', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({}) });
+    renderLogin('/login?error=invalid_grant&next=%2Fbank');
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', zh.errors.invalidGrant);
+    expect(screen.queryByText('invalid_grant')).toBeNull(); // never the raw code
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?next=%2Fbank')); // replaced: a reload or a back navigation will not repeat it
+    expect(screen.getByRole('alert').textContent).toBe(zh.errors.invalidGrant); // the notice stays while the page is open
+    expect(screen.getByRole('link', { name: zh.auth.register }).getAttribute('href')).toBe('/register?next=%2Fbank'); // ?next survived the cleanup
+  });
+
+  it('slice 2-A: in invite mode QQ / Apple open the invite step instead of navigating at once; the continue link carries the code, the skip link does not', async () => {
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({ registration_mode: 'invite', qq_enabled: true, apple_enabled: true }) });
+    renderLogin('/login?next=%2Fbank');
+    const row = await screen.findByRole('group', { name: zh.auth.thirdParty });
+    expect(within(row).queryByRole('link', { name: zh.auth.qq })).toBeNull();
+    fireEvent.click(within(row).getByRole('button', { name: zh.auth.qq }));
+    const sheet = (await screen.findByRole('heading', { name: zh.auth.qqTitle })).closest('dialog') as HTMLDialogElement;
+    fireEvent.change(within(sheet).getByLabelText(new RegExp(`^${zh.auth.inviteForNew}`)), { target: { value: ' INV-2026 ' } });
+    expect(within(sheet).getByRole('link', { name: zh.auth.inviteContinue }).getAttribute('href')).toBe('/api/auth/qq/start?kind=login&invite_code=INV-2026&next=%2Fbank');
+    expect(within(sheet).getByRole('link', { name: zh.auth.skipInvite }).getAttribute('href')).toBe('/api/auth/qq/start?kind=login&next=%2Fbank');
+  });
+
+  it(
+    'slice 2-A: a confirmed WeChat ticket installs the session through applyAuth and the guest guard redirects to ?next',
+    async () => {
+      let confirmed = false;
+      const fetchMock = mockFetch({
+        '/api/auth/me': () => (confirmed ? me() : unauthorized()),
+        '/api/health': health({ registration_mode: 'verified', wechat_enabled: true }),
+        '/api/auth/wechat/ticket': wechatTicket,
+        [`/api/auth/wechat/ticket/${WX_TICKET}`]: () => {
+          confirmed = true; // the session cookie came with this poll
+          return json(201, { status: 'confirmed', user, settings, created: true });
+        },
+      });
+      renderLogin('/login?next=%2Fbank');
+      fireEvent.click(await screen.findByRole('button', { name: zh.auth.wechat }));
+      await screen.findByAltText(zh.auth.wechatQrAlt);
+      expect(await screen.findByText('bank-page', {}, { timeout: 4000 })).toBeTruthy(); // the first poll comes after WECHAT_POLL_MS (2 s)
+      expect(fetchMock.mock.calls.filter(([u]) => String(u) === '/api/auth/me')).toHaveLength(2); // bootstrap + applyAuth
+    },
+    8000,
+  );
 });

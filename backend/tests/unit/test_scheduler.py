@@ -674,8 +674,26 @@ def test_hourly_gc(settings, seeded):
     # sms.sent.* kv counters (sms_budget): older than two days go, the rest stay
     for key in ("sms.sent.2026-10-11", "sms.sent.2026-10-11T23", "sms.sent.2026-10-12", "sms.sent.2026-10-13T22", "sms.sent.2026-10-14", "sms.sent.2026-10-14T00"):
         db.kv_set(conn, key, "3")
+    # wechat_tickets (0020, slice 2-A): expired or consumed more than a day ago → gone; a live ticket, a ticket expired an hour ago and a
+    # ticket consumed an hour ago stay (the login_codes rule — the audit trail of a login / binding)
+    conn.executemany(
+        "INSERT INTO wechat_tickets(id, ticket_hash, poll_hash, kind, status, user_id, created_at, expires_at, consumed_at) VALUES (?, ?, 'po', 'login', ?, ?, '2026-10-12T00:00:00Z', ?, ?)",
+        [
+            (1, "th1", "pending", None, "2026-10-12T00:03:00Z", None),  # expired two days ago → gone
+            (2, "th2", "pending", None, "2026-10-14T01:02:00Z", None),  # live → kept
+            (3, "th3", "consumed", uid, "2026-10-14T01:02:00Z", "2026-10-12T23:59:00Z"),  # consumed more than a day ago (unexpired: a long clock skew) → gone
+            (4, "th4", "consumed", uid, "2026-10-14T00:03:00Z", "2026-10-14T00:01:00Z"),  # consumed an hour ago (and expired since) → kept a day (audit)
+            (5, "th5", "pending", None, "2026-10-14T00:03:00Z", None),  # expired an hour ago → kept until a day has passed
+        ],
+    )
+    # the one-time OAuth grants (kv `oauth_grant:<exp iso>:<hash>`, slice 2-A): a passed expiry goes (strictly before now — one expiring
+    # right now is still redeemable for this second), a future one stays; other keys untouched
+    for key in ("oauth_grant:2026-10-14T00:59:59Z:aaaa", "oauth_grant:2026-10-14T01:00:00Z:bbbb", "oauth_grant:2026-10-14T01:00:30Z:cccc", "oauth_state:2026-10-13T00:00:00Z:x"):
+        db.kv_set(conn, key, "{}")
     now = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
     assert tick(conn, settings, now).gc is True
+    assert [r[0] for r in conn.execute("SELECT id FROM wechat_tickets ORDER BY id")] == [2, 4, 5]
+    assert [r[0] for r in conn.execute("SELECT key FROM kv WHERE key LIKE 'oauth_%' ORDER BY key")] == ["oauth_grant:2026-10-14T01:00:00Z:bbbb", "oauth_grant:2026-10-14T01:00:30Z:cccc", "oauth_state:2026-10-13T00:00:00Z:x"]
     assert [r[0] for r in conn.execute("SELECT token_hash FROM sessions")] == ["live"]
     assert [r[0] for r in conn.execute("SELECT key FROM auth_throttle")] == ["login:user:bob"]  # still locked out → kept
     assert [r[0] for r in conn.execute("SELECT id FROM login_codes ORDER BY id")] == [2, 5, 6]

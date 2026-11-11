@@ -10,7 +10,7 @@ import ForgotPasswordPage from './ForgotPasswordPage';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const unauthorized = () => json(401, { error: { code: 'unauthorized', message: '' } });
 const health = (over: Record<string, unknown>) => () =>
-  json(200, { status: 'ok', version: '0.1.0', registration_mode: 'verified', needs_setup: false, sms_enabled: true, email_enabled: false, captcha: false, time: '2026-10-14T00:00:00Z', ...over });
+  json(200, { status: 'ok', version: '0.1.0', registration_mode: 'verified', needs_setup: false, sms_enabled: true, email_enabled: false, captcha: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false, time: '2026-10-14T00:00:00Z', ...over });
 
 function mockFetch(routes: Record<string, (init?: RequestInit) => Response>) {
   const fn = vi.fn<typeof fetch>((input, init) => {

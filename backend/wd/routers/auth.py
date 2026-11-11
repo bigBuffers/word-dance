@@ -92,9 +92,19 @@ def resolve_identifier(conn: sqlite3.Connection, identifier: str) -> dict[str, A
     return None
 
 
-def server_flags(conn: sqlite3.Connection, cfg: Settings, *, sms_sender: object | None = None) -> dict[str, Any]:
+def server_flags(
+    conn: sqlite3.Connection,
+    cfg: Settings,
+    *,
+    sms_sender: object | None = None,
+    wechat: object | None = None,
+    qq: object | None = None,
+    apple: object | None = None,
+) -> dict[str, Any]:
     """API.md §9 ``ServerFlags`` (``needs_setup`` mirrors ``GET /api/health``). ``sms_sender`` is ``app.state.sms``: a sender
-    installed next to an ``off`` provider (tests) still means phone codes can be sent."""
+    installed next to an ``off`` provider (tests) still means phone codes can be sent. The slice 2-A flags are
+    ``cfg.<provider>_configured or cfg.auth_fake_providers`` (API.md §3.3); like the SMS rule, a client installed on ``app.state.wechat`` /
+    ``qq`` / ``apple`` next to an unconfigured provider (the tests' fakes) counts too — in production the three are equivalent."""
     users = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
     ai_enabled = cfg.ai_enabled and db.kv_get(conn, "claude.enabled", "1") != "0"
     return {
@@ -108,6 +118,10 @@ def server_flags(conn: sqlite3.Connection, cfg: Settings, *, sms_sender: object 
         "audio": cfg.audio_provider_effective != "off",  # GET /media/audio serves clips (API.md 76)
         "audio_key": audio.voice_key(cfg),  # provider + voice fingerprint: a switched voice is a new clip URL for the browser cache
         "sms_enabled": bool(cfg.sms_configured or sms_sender is not None),  # phone verification codes can be sent (endpoints 80, 85)
+        # third-party sign-in (slice 2-A): the login page's 「其他方式登录」 row and the settings 绑定 rows
+        "wechat_enabled": bool(cfg.wechat_configured or cfg.auth_fake_providers or wechat is not None),  # endpoints 112–116
+        "qq_enabled": bool(cfg.qq_configured or cfg.auth_fake_providers or qq is not None),  # 118 / 119
+        "apple_enabled": bool(cfg.apple_configured or cfg.auth_fake_providers or apple is not None),  # 120 / 121
     }
 
 
@@ -212,7 +226,14 @@ def me(request: Request, user: dict[str, Any] = Depends(current_user), conn: sql
     return {
         "user": security.user_dto_for(conn, user, now=now),
         "settings": security.settings_dto(conn, int(user["id"])),
-        "server": server_flags(conn, cfg, sms_sender=getattr(request.app.state, "sms", None)),
+        "server": server_flags(
+            conn,
+            cfg,
+            sms_sender=getattr(request.app.state, "sms", None),
+            wechat=getattr(request.app.state, "wechat", None),
+            qq=getattr(request.app.state, "qq", None),
+            apple=getattr(request.app.state, "apple", None),
+        ),
         "counters": counters(conn, int(user["id"]), to_iso(now)),
         "session": session_info(conn, user, now),
     }

@@ -14,13 +14,13 @@ import AdminPage from './AdminPage';
 const ISO = '2026-11-10T08:00:00Z';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-const admin: User = { id: 1, username: 'root', display_name: 'root', email: 'root@example.com', email_verified: true, role: 'admin', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: 'adult', account_kind: 'learner', is_child: false, needs_profile_prompt: false };
+const admin: User = { id: 1, username: 'root', display_name: 'root', email: 'root@example.com', email_verified: true, role: 'admin', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: 'adult', account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [] };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: true, updated_at: ISO,
 };
-const me = () => json(200, { user: admin, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
+const me = () => json(200, { user: admin, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
 
 const overview: AdminOverview = {
   users: { total: 12, active_7d: 5 },
@@ -160,11 +160,11 @@ describe('AdminPage', () => {
   });
 
   it('a 409 identity_taken on restore is a toast and the row stays', async () => {
-    mockFetch({ ...baseRoutes(), '/api/admin/identities/7/restore': () => json(409, { error: { code: 'identity_taken', message: '' } }) });
+    mockFetch({ ...baseRoutes(), '/api/admin/identities/7/restore': () => json(409, { error: { code: 'identity_taken', message: 'the number is live elsewhere' } }) });
     renderAdmin();
     const { card, row } = await openDisputedCard();
     fireEvent.click(within(row).getByRole('button', { name: zh.admin.restore }));
-    expect(await screen.findByText(zh.errors.identityTaken)).toBeTruthy();
+    expect(await screen.findByText('the number is live elsewhere')).toBeTruthy(); // identity_taken shows the server's wording (it names the identity)
     expect(within(card).getByText('138****8001')).toBeTruthy();
     expect(screen.queryByText(zh.admin.restored)).toBeNull();
   });

@@ -46,11 +46,11 @@ function me(user: Partial<User> = {}): MeResponse {
       phone_masked: null,
       needs_profile: false,
       age_band: null,
-      account_kind: 'learner', is_child: false, needs_profile_prompt: false,
+      account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [],
       ...user,
     },
     settings,
-    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false, audio: true, audio_key: 'k1a2b3c4', sms_enabled: false },
+    server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: true, needs_setup: false, audio: true, audio_key: 'k1a2b3c4', sms_enabled: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false },
     counters: { suggestions_open: 2, attention: 1 },
     session: { guardian: null, gate_until: null },
   };

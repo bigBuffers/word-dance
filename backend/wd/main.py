@@ -42,9 +42,12 @@ from . import __version__, audio, dance, db, security
 from .ai import ledger
 from .clock import Clock, SystemClock, now_iso
 from .config import Settings, ensure_dirs
+from .delivery.apple import apple_keys_from_settings
 from .delivery.mailer import mailer_from_settings
+from .delivery.qq import qq_client_from_settings
 from .delivery.sms import sms_sender_from_settings
-from .deps import SESSION_COOKIE, csrf_violation
+from .delivery.wechat import wechat_client_from_settings
+from .deps import CSRF_EXEMPT_PATHS, SESSION_COOKIE, csrf_violation
 from .errors import ApiError, error_response, install_handlers
 from .jobs import lease, queue, registry
 from .jobs.registry import JobContext
@@ -59,7 +62,10 @@ from .routers import (
     audio as audio_router,
     auth,
     auth_codes,
+    auth_fake,
     auth_family,
+    auth_oauth,
+    auth_wechat,
     bank,
     demo,
     guardian,
@@ -87,6 +93,9 @@ ROUTERS = (
     account,
     guardian,  # 1-B: /api/guardian/* (94–103)
     auth_family,  # 1-B: /api/auth/switch/*, /api/auth/child-login (104–107)
+    auth_wechat,  # 2-A: /api/auth/wechat/* (112–116) — dark until WD_WECHAT_* is set
+    auth_oauth,  # 2-A: /api/auth/qq/*, /api/auth/apple/*, /api/auth/oauth/finish (118–122) — dark until WD_QQ_* / WD_APPLE_* is set
+    # auth_fake (the dev fake consent pages) is included by create_app only when cfg.auth_fake_providers
     demo,
     onboarding,
     settings_router,
@@ -201,7 +210,7 @@ class WdMiddleware:
             if content_length and content_length.isdigit() and int(content_length) > cfg.max_body_bytes:
                 await respond(error_response("payload_too_large", details={"max_bytes": cfg.max_body_bytes}))
                 return
-            if is_api:
+            if is_api and path not in CSRF_EXEMPT_PATHS:  # the Apple form_post callback (121) carries no header; its signed state is the check
                 reason = csrf_violation(method, scope.get("scheme", "http"), headers, cfg)
                 if reason:
                     await respond(error_response("csrf_rejected", details={"reason": reason}))
@@ -530,14 +539,30 @@ def startup(app: FastAPI) -> None:
         else:
             log.info("pronunciation clips: provider %s (WD_AUDIO_PROVIDER=%s, cache cap %d MB)", cfg.audio_provider_effective, cfg.audio_provider, cfg.audio_cache_mb, extra={"event": "audio_provider"})
         app.state.audio_warm_up = audio.warm_up_async(cfg)  # `say -v ?` and the voice probes (1–3 s) on a daemon thread: before the first tap, never on its request
+
+        def third_party(configured: bool) -> str:  # slice 2-A: `fake` under WD_AUTH_FAKE_PROVIDERS (dev), else the provider's own state
+            return "fake" if cfg.auth_fake_providers and not configured else ("on" if configured else "off")
+
         log.info(
-            "sign-in channels: sms %s, mail %s, captcha %s, registration %s",
+            "sign-in channels: sms %s, mail %s, captcha %s, registration %s, wechat %s, qq %s, apple %s",
             cfg.sms_provider,
             cfg.mail_provider if cfg.email_configured else "off",
             cfg.captcha,
             cfg.registration_mode,
+            third_party(cfg.wechat_configured),
+            third_party(cfg.qq_configured),
+            third_party(cfg.apple_configured),
             extra={"event": "sms_provider"},
         )
+        oauth_callbacks = [name for name, url in (("WD_QQ_CALLBACK_URL", cfg.qq_callback_url), ("WD_APPLE_CALLBACK_URL", cfg.apple_callback_url)) if url]
+        if oauth_callbacks and not cfg.public_url:
+            # the QQ / Apple callback may live on the filed relay domain (DEPLOY §7.1); without WD_PUBLIC_URL endpoint 122's URL is built from
+            # the callback REQUEST's origin — the relay's, where the SPA does not live and which the relay does not forward — so the grant expires unused
+            log.warning(
+                "%s set but WD_PUBLIC_URL is empty: the finish hop of /api/auth/oauth/finish (122) will be built from the callback request's origin — behind the relay host that is the relay's domain, not the SPA's; set WD_PUBLIC_URL to the application's own https address",
+                " / ".join(oauth_callbacks),
+                extra={"event": "oauth_public_url_missing"},
+            )
         log.info(
             "AI provider mode %s (fallback: %s)",
             cfg.ai_provider,
@@ -600,6 +625,11 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None, 
     app.state.lease_waiter = None
     app.state.mailer = mailer_from_settings(cfg)
     app.state.sms = sms_sender_from_settings(cfg)  # None while WD_SMS_PROVIDER=off → 409 sms_unconfigured (API.md 80 / 85); tests swap in RecordingSmsSender
+    # third-party sign-in (slice 2-A, API.md §3.3): None while the provider is off → 409 provider_unconfigured; the Fake* doubles under
+    # WD_AUTH_FAKE_PROVIDERS=1 (dev only); tests swap in FakeWechatClient / FakeQQClient / FakeAppleKeys like RecordingSmsSender
+    app.state.wechat = wechat_client_from_settings(cfg)
+    app.state.qq = qq_client_from_settings(cfg)
+    app.state.apple = apple_keys_from_settings(cfg)
     if cfg.smoke_mock_http:  # WD_SMOKE_MOCK_HTTP=1 (dev only): fixture-backed httpx transport, nothing leaves the box
         from . import smoke_mock
 
@@ -607,6 +637,8 @@ def create_app(settings: Settings | None = None, *, clock: Clock | None = None, 
     install_handlers(app)
     for module in ROUTERS:
         app.include_router(module.router)
+    if cfg.auth_fake_providers:  # the fake QQ / Apple consent pages (routers/auth_fake.py) exist only on a dev box that asked for them
+        app.include_router(auth_fake.router)
     _mount_spa(app, cfg)
     app.add_middleware(WdMiddleware, appstate=app.state)
     return app

@@ -1,0 +1,29 @@
+<view class="page">
+  <view wx:if="{{phase === 'loading'}}" class="card"><view class="muted">正在核对…</view></view>
+
+  <view wx:elif="{{phase === 'confirm'}}" class="card">
+    <view class="title">{{info.kind === 'bind' ? '绑定微信' : '登录单词之舞'}}</view>
+    <view class="muted" wx:if="{{info.kind === 'bind'}}">网页上的账号「{{info.bind_display_name}}」想绑定这个微信。</view>
+    <view class="muted" wx:else>网页上有人正在用这个微信登录，请确认是你本人。</view>
+    <view class="rows">
+      <view class="row"><text class="label">设备</text><text class="value">{{info.web_ua_summary}}</text></view>
+      <view class="row"><text class="label">IP</text><text class="value">{{info.web_ip_masked}}</text></view>
+      <view class="row"><text class="label">时间</text><text class="value">{{createdAtText}}</text></view>
+    </view>
+    <view class="state {{canConfirm ? '' : 'state-warn'}}">{{accountText}}</view>
+    <button class="btn btn-primary" disabled="{{!canConfirm || busy}}" loading="{{busy}}" bindtap="accept">确认</button>
+    <button class="btn btn-plain" disabled="{{busy}}" bindtap="cancel">取消</button>
+  </view>
+
+  <view wx:elif="{{phase === 'done'}}" class="card result">
+    <view class="big">{{doneTitle}}</view>
+    <view class="muted">{{doneText}}</view>
+    <button class="btn btn-plain" bindtap="home">返回首页</button>
+  </view>
+
+  <view wx:else class="card result">
+    <view class="big">无法继续</view>
+    <view class="muted">{{errorText}}</view>
+    <button class="btn btn-plain" bindtap="home">返回首页</button>
+  </view>
+</view>

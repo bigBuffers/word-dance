@@ -24,6 +24,7 @@ export type AgeBand = 'u14' | '14plus' | 'adult';   // users.age_band — the le
 export type CodeChannel = 'phone' | 'email';         // login_codes.channel (endpoints 80, 81, 85)
 export type IdentityProvider = 'phone' | 'wechat_mini' | 'qq' | 'apple';   // identities.provider — only `phone` is issued in slice 1-A
 export type AccountKind = 'learner' | 'guardian';   // users.account_kind (slice 1-B) — a guardian creates, switches into and manages child accounts (endpoints 94–105)
+export type ThirdPartyProvider = 'wechat_mini' | 'qq' | 'apple';   // identities.provider values of slice 2-A (phone is 1-A's); subject = openid / openid / Apple sub, never shown
 
 export interface ApiError { error: { code: string; message: string; details?: Record<string, unknown> } }
 export interface Page<T> { items: T[]; page: number; page_size: number; total: number }
@@ -38,6 +39,7 @@ export interface User {
   account_kind: AccountKind;            // 'guardian' unlocks 我的孩子 (endpoints 94–104); chosen at /welcome step 0 (89), the legacy prompt (110) or by a claim (109)
   is_child: boolean;                    // users.guardian_user_id IS NOT NULL — a child account: account / identity changes only through the guardian (403 guardian_required on 6–10, 85–89, 104, 108–111)
   needs_profile_prompt: boolean;        // an account that has not declared its kind / age band (null age_band, no placeholder username, not a child — pre-1-A accounts and password registrations alike) and was not snoozed in the last 30 days (111); the SPA shows 「补充信息」 once per sitting
+  providers: ThirdPartyProvider[];      // the third-party identities bound to the account (sorted); the settings page shows 绑定 / 解绑 per provider (117)
 }
 export interface ServerFlags {
   version: string; registration_mode: 'open' | 'invite' | 'closed' | 'verified'; email_configured: boolean;
@@ -46,12 +48,33 @@ export interface ServerFlags {
   audio: boolean;                       // GET /media/audio serves pronunciation clips (WD_AUDIO_PROVIDER is not off; endpoint 76) — the fallback for devices without an English voice
   audio_key: string;                    // fingerprint of the provider + voice behind endpoint 76 (empty without a provider): the client appends it to clip URLs as `v`, so a switched voice is a new URL for the browser cache
   sms_enabled: boolean;                 // WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
+  wechat_enabled: boolean;              // the WeChat mini-program bridge is configured (endpoints 112–116) — the login page shows 微信 and settings offers 绑定微信
+  qq_enabled: boolean;                  // QQ 互联 login is configured (118 / 119)
+  apple_enabled: boolean;               // Sign in with Apple (web redirect flow) is configured (120 / 121)
 }
 export interface Counters { suggestions_open: number; attention: number }   // GET /api/auth/me → badges
 export interface SessionInfo {
   guardian: { id: number; display_name: string } | null;   // the guardian who switched this device into a child account (sessions.actor_user_id, endpoint 104); the SPA shows 「切回家长」 → 105
   gate_until: string | null;            // a guardian's own session: until when the 家长门 is passed (sessions.guardian_gate_at + 10 min, endpoints 102 / 105); null = not passed / not a guardian
 }
+export interface WechatTicket { ticket: string; pairing_code: string; expires_in_s: number; qr_url: string }   // endpoint 112: the 26-char scene of the 小程序码 (also the poll path), the 6-digit pairing code for the mobile path, the PNG URL (114)
+export interface WechatTicketStatus {   // endpoint 113 (polled every 2 s with the wd_wxt cookie)
+  status: 'pending' | 'scanned' | 'confirmed' | 'cancelled' | 'expired';
+  user: User | null;                    // confirmed: the signed-in / bound account (the session cookie came with this response for a login ticket)
+  settings: Settings | null;            // confirmed login tickets only
+  created: boolean | null;              // confirmed login tickets: the account was created by this confirmation (→ /welcome)
+}
+export interface WechatScanInfo {       // endpoint 115 (the mini program's confirmation page)
+  mp_token: string;                     // proves the scan to endpoint 116 (5 minutes)
+  kind: 'login' | 'bind';
+  account: 'bound' | 'new' | 'closed' | 'self' | 'other';   // login: this WeChat has an account / would create one / registration closed; bind: already bound to this account / bound to another account / free
+  bind_display_name: string | null;     // kind=bind: the account that asked for the binding
+  web_ip_masked: string;                // the initiating browser, e.g. 203.0.113.*
+  web_ua_summary: string;               // e.g. Chrome · macOS
+  created_at: string;
+  expires_in_s: number;
+}
+export interface WechatConfirmResult { status: 'confirmed' | 'cancelled'; created: boolean }   // endpoint 116
 export interface CaptchaChallenge { id: string; image: string; exp: number; sig: string; expires_in_s: number }   // endpoint 79: `image` is a PNG data: URI; the client returns id/exp/sig with the digits it read
 export interface CodeSendResponse { sent: boolean; expires_in_s: number }   // endpoints 9, 80, 82, 85, 90 — always `sent: true`; identical for known and unknown targets
 export interface StaleChallenge {

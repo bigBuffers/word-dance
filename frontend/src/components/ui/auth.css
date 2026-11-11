@@ -262,6 +262,104 @@
   font-size: var(--text-sm);
 }
 
+/* ---------- third-party sign-in (slice 2-A): the row under the form and the WeChat ticket block ---------- */
+.third-party {
+  margin-top: var(--space-4);
+}
+
+/* 「其他方式登录」 between two rules */
+.third-party__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.third-party__label::before,
+.third-party__label::after {
+  content: "";
+  flex: 1 1 0;
+  border-top: 1px solid var(--line);
+}
+
+.third-party__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.third-party__buttons .btn {
+  flex: 1 1 8em;
+}
+
+.wechat-signin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  text-align: center;
+}
+
+.wechat-signin__qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff; /* the mini-program code is scanned, so it stays on white in dark mode too */
+}
+
+.wechat-signin__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.wechat-signin__pair {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--line);
+}
+
+/* 配对码 123 456 */
+.wechat-signin__code {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.wechat-signin__code strong {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.wechat-signin__status {
+  margin: 0;
+  min-height: 1.5em;
+  line-height: 1.5;
+}
+
+.wechat-signin__status:empty {
+  display: none;
+}
+
+.wechat-signin__status--error {
+  color: var(--again-ink);
+}
+
 @media (min-width: 480px) {
   .auth__radios {
     flex-direction: row;

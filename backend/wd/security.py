@@ -15,7 +15,8 @@
   doubling every further 5 failures, max 24 h, reset on success.
   :func:`verify_account_password` gives the password re-checks of API.md 7–8 their own budget (10 per 15 min per
   user) and :func:`throttle_mutation` is DESIGN §10's 300 mutations/min per user (called from ``deps.current_user``).
-* **Invite codes**: shown once, stored as ``sha256``; consumed atomically with the SCHEMA.sql UPDATE.
+* **Invite codes**: shown once, stored as ``sha256``; consumed atomically with the SCHEMA.sql UPDATE (:func:`invite_valid` is the
+  read-only check of a code a WeChat login ticket carries until its confirmation consumes it, API.md 112 / 116).
 * **Verification codes** (``login_codes``, AUTH_SIGNUP_DESIGN §5.1 / API.md §3.1): 6 digits, :data:`LOGIN_CODE_TTL_S` (10 min),
   :data:`LOGIN_CODE_MAX_ATTEMPTS` (5), ``code_hash = HMAC-SHA256(WD_SECRET_KEY, code:channel:target:purpose)``; a new code voids
   the older unused codes of its (channel, target, purpose); :func:`verify_login_code` only checks — the lookup, the compare and the
@@ -28,7 +29,7 @@
 * :func:`is_safe_https_url`: the webhook host check (https, no raw IPs, no local names).
 * Row → DTO helpers (:func:`user_dto` / :func:`user_dto_for` with ``has_password`` / ``phone_masked`` / ``needs_profile`` / ``age_band`` and,
   slice 1-B, ``account_kind`` / ``is_child`` / ``needs_profile_prompt`` — the last one needs ``now`` for the 30-day snooze of the legacy
-  prompt, API.md §9.1) and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults, inside the caller's
+  prompt, API.md §9.1 — and, slice 2-A, ``providers``: the bound WeChat / QQ / Apple identities, ``third_party.providers_of``) and :func:`create_user` (user + ``user_settings`` with ``next_push_at`` from the defaults, inside the caller's
   ``BEGIN IMMEDIATE``; the child columns of ``wd.family.create_child`` join the same INSERT; :func:`placeholder_username` +
   :func:`unusable_password_hash` for a code-created account) shared by the routers.
 * CLI ``create-admin | set-password | promote | demote | invite | unlock | sms-probe`` (:func:`register_cli`, DEPLOY §9).
@@ -53,7 +54,7 @@ import sys
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 import bcrypt
@@ -503,6 +504,18 @@ def consume_invite(conn: sqlite3.Connection, code: str, now: datetime) -> bool:
     return cur.rowcount == 1
 
 
+def invite_valid(conn: sqlite3.Connection, code: str, now: datetime) -> bool:
+    """Read-only twin of :func:`consume_invite`: True while ``code`` names an invite with uses left that has not expired — the check a
+    WeChat login ticket runs at creation (API.md 112); the confirmation (116) consumes the code for real, so it can still fail there."""
+    if not normalise_invite_code(code):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM invite_codes WHERE code_hash = ? AND uses < max_uses AND (expires_at IS NULL OR expires_at > ?)",
+        (hash_invite_code(code), to_iso(now)),
+    ).fetchone()
+    return row is not None
+
+
 def list_invites(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute("SELECT id, max_uses, uses, expires_at, note, created_at, created_by FROM invite_codes ORDER BY id DESC").fetchall()
     return [
@@ -832,14 +845,15 @@ def needs_profile_prompt(row: Mapping[str, Any], now: datetime | None) -> bool:
     return prompted is None or parse_iso(str(prompted)) <= now - timedelta(days=PROFILE_PROMPT_SNOOZE_DAYS)
 
 
-def user_dto(row: Mapping[str, Any], *, phone: str | None = None, now: datetime | None = None) -> dict[str, Any]:
+def user_dto(row: Mapping[str, Any], *, phone: str | None = None, providers: Iterable[str] = (), now: datetime | None = None) -> dict[str, Any]:
     """API.md §9 ``User`` from a ``users`` row (``display_name`` defaults to the username).
 
     ``has_password`` = ``password_set_at IS NOT NULL`` (0018; false for a code-created account until endpoint 89 / 7 sets one),
     ``phone_masked`` = the live phone identity passed as ``phone`` (E.164; :func:`user_dto_for` looks it up), ``needs_profile`` =
     a code-created account (placeholder username) that has not declared its age band yet (endpoint 89), ``age_band`` as declared;
     slice 1-B: ``account_kind`` (``learner`` for a row without the column), ``is_child`` = ``guardian_user_id IS NOT NULL`` and
-    ``needs_profile_prompt`` (:func:`needs_profile_prompt`; always False without ``now``).
+    ``needs_profile_prompt`` (:func:`needs_profile_prompt`; always False without ``now``); slice 2-A: ``providers`` = the bound third-party
+    identities passed in (``third_party.providers_of``, sorted; :func:`user_dto_for` looks them up) — ``[]`` without one.
     """
     username = row["username"]
     return {
@@ -858,19 +872,25 @@ def user_dto(row: Mapping[str, Any], *, phone: str | None = None, now: datetime 
         "account_kind": _column(row, "account_kind") or "learner",
         "is_child": _column(row, "guardian_user_id") is not None,
         "needs_profile_prompt": needs_profile_prompt(row, now),
+        "providers": list(providers),
     }
 
 
 def user_dto_for(conn: sqlite3.Connection, row: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
-    """:func:`user_dto` with the live phone identity looked up (``phone_masked`` filled) — the form every ``{user}`` response uses;
-    routers pass ``now`` so ``needs_profile_prompt`` is computed."""
-    identity = phone_identity(conn, int(row["id"]))
-    return user_dto(row, phone=str(identity["subject"]) if identity else None, now=now)
+    """:func:`user_dto` with the live phone identity (``phone_masked``) and the third-party identities (``providers``, ONE extra SELECT)
+    looked up — the form every ``{user}`` response uses; routers pass ``now`` so ``needs_profile_prompt`` is computed."""
+    from .third_party import providers_of  # third_party imports this module (create_user, consume_invite …): resolve the cycle at call time
+
+    uid = int(row["id"])
+    identity = phone_identity(conn, uid)
+    return user_dto(row, phone=str(identity["subject"]) if identity else None, providers=providers_of(conn, uid), now=now)
 
 
-def admin_user_dto(row: Mapping[str, Any], *, bank_size: int, streak_days: int, phone: str | None = None, now: datetime | None = None) -> dict[str, Any]:
-    """API.md §9 ``AdminUser``."""
-    dto = user_dto(row, phone=phone, now=now)
+def admin_user_dto(
+    row: Mapping[str, Any], *, bank_size: int, streak_days: int, phone: str | None = None, providers: Iterable[str] = (), now: datetime | None = None
+) -> dict[str, Any]:
+    """API.md §9 ``AdminUser`` (``providers`` passed through to :func:`user_dto`)."""
+    dto = user_dto(row, phone=phone, providers=providers, now=now)
     dto.update(
         {
             "is_active": bool(int(row["is_active"])),

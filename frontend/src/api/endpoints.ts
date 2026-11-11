@@ -1,9 +1,11 @@
-// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–111; 76 `GET /media/audio`
-// builds its URLs in audio/serverAudio.ts and has no wrapper). FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded
+// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–122; 76 `GET /media/audio`
+// builds its URLs in audio/serverAudio.ts and has no wrapper; 114 is the `<img src>` of `WechatTicket.qr_url`; the redirect
+// endpoints 118–122 are plain `<a href>` navigations — `oauthStartUrl` builds 118 / 120 —, so they have no wrapper either and
+// are listed under `// #N —` comments to keep the numbering visible). FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded
 // by `// #N METHOD /path` so coverage is checked mechanically by endpoints.test.ts (52 / 53 / 78 are URL builders for
 // `<img>`). DTOs come from ./types (API.md §9); request bodies and query shapes that API.md defines only in prose are
 // declared here. GET wrappers accept an optional `AbortSignal` as their last argument so `useApi` can cancel stale requests.
-import { api, requestText } from './client';
+import { api, buildQuery, requestText } from './client';
 import type {
   AccountKind,
   AddResponse,
@@ -53,11 +55,16 @@ import type {
   Suggestion,
   SuggestionResult,
   SystemEvent,
+  ThirdPartyProvider,
   TodayResponse,
   User,
   UserState,
   UserWord,
   WebhookTestReason,
+  WechatConfirmResult,
+  WechatScanInfo,
+  WechatTicket,
+  WechatTicketStatus,
   WordBrief,
   WordDetail,
   BatchSummary,
@@ -70,7 +77,9 @@ import type {
 /**
  * Endpoint 1. `status:'degraded'` comes with HTTP 503 (thrown as ApiError), so a resolved value is always `ok`.
  * `sms_enabled` / `email_enabled` decide which code sign-in entries the login page offers (API.md §3.1), `captcha` whether
- * a public code send (80, 90) must carry a `CaptchaToken` from endpoint 79.
+ * a public code send (80, 90) must carry a `CaptchaToken` from endpoint 79. `wechat_enabled` / `qq_enabled` / `apple_enabled`
+ * (slice 2-A, API.md §3.3) decide which third-party entries the login page's `ThirdPartyRow` offers — all false on a server
+ * without the provider credentials, and then nothing of slice 2-A is visible.
  */
 export interface HealthResponse {
   status: 'ok' | 'degraded';
@@ -80,6 +89,9 @@ export interface HealthResponse {
   sms_enabled: boolean;
   email_enabled: boolean;
   captcha: boolean;
+  wechat_enabled: boolean;
+  qq_enabled: boolean;
+  apple_enabled: boolean;
   time: string;
 }
 export interface RegisterBody {
@@ -258,6 +270,31 @@ export interface DeclareBody {
   account_kind: AccountKind;
   age_band: Exclude<AgeBand, 'u14'>;
 }
+// ---- third-party sign-in (slice 2-A, API.md §3.3, docs/AUTH_SIGNUP_DESIGN.md §5.3) ----
+/** Endpoint 112. `kind:'bind'` needs a session (the ticket binds WeChat to it); `invite_code` only for a login ticket in `invite` mode (consumed at the confirmation). */
+export interface WechatTicketBody {
+  kind: 'login' | 'bind';
+  invite_code?: string;
+}
+/** Endpoint 115 — posted by the mini program, never by the SPA (documented for the shape): exactly one of `ticket` (the 26-char scene) / `pairing_code` (6 digits). */
+export interface WechatScanBody {
+  js_code: string;
+  ticket?: string;
+  pairing_code?: string;
+}
+/** Endpoint 116 — posted by the mini program, never by the SPA: the `mp_token` of endpoint 115 confirms (`accept: true`) or cancels the ticket. */
+export interface WechatConfirmBody {
+  mp_token: string;
+  ticket: string;
+  accept: boolean;
+}
+/** Endpoint 117: the endpoint-87 one-of — exactly one of `password` / `code` (a `reauth` code of endpoint 85). */
+export interface IdentityUnbindBody {
+  password?: string;
+  code?: string;
+}
+/** The two redirect-flow providers of 118 / 120 (`wechat_mini` goes through the ticket bridge instead). */
+export type OAuthProvider = Extract<ThirdPartyProvider, 'qq' | 'apple'>;
 export type ExportFormat = 'csv' | 'json';
 export interface OnboardingBody {
   stages: Stage[];
@@ -637,6 +674,38 @@ export const claimGuardian = (body: GuardianClaimBody) => api.post<{ user: User 
 export const declareAccount = (body: DeclareBody) => api.post<{ user: User }>('/api/account/declare', body);
 // #111 POST /api/account/declare/skip
 export const skipDeclare = () => api.post<void>('/api/account/declare/skip');
+
+// ---------------------------------------------------------------------------------------------------
+// §3.3 Third-party sign-in (slice 2-A, docs/AUTH_SIGNUP_DESIGN.md §5.3) — dark until the owner configures a provider:
+// the SPA shows an entry only while its `HealthResponse` / `ServerFlags` flag is true
+// ---------------------------------------------------------------------------------------------------
+
+// #112 POST /api/auth/wechat/ticket
+export const createWechatTicket = (body: WechatTicketBody) => api.post<WechatTicket>('/api/auth/wechat/ticket', body);
+// #113 GET /api/auth/wechat/ticket/{ticket} — polled every 2 s with the `wd_wxt` cookie (same-origin credentials as every call); a 404 means expired / consumed
+export const pollWechatTicket = (ticket: string, signal?: AbortSignal) => api.get<WechatTicketStatus>(`/api/auth/wechat/ticket/${seg(ticket)}`, undefined, signal);
+// #114 — GET /api/auth/wechat/ticket/{ticket}/qr: the mini-program code PNG, loaded by `<img src={WechatTicket.qr_url}>` (the poll cookie rides along); no wrapper
+// #115 POST /api/auth/wechat/scan — the mini program's call (miniprogram/utils/api.js), never the SPA's; the wrapper documents the shape
+export const scanWechatTicket = (body: WechatScanBody) => api.post<WechatScanInfo>('/api/auth/wechat/scan', body);
+// #116 POST /api/auth/wechat/confirm — the mini program's call, never the SPA's (the SPA learns the outcome from the poll, 113)
+export const confirmWechatTicket = (body: WechatConfirmBody) => api.post<WechatConfirmResult>('/api/auth/wechat/confirm', body);
+// #117 DELETE /api/account/identities/{provider}
+export const unbindIdentity = (provider: ThirdPartyProvider, body: IdentityUnbindBody) => api.delete<{ user: User }>(`/api/account/identities/${seg(provider)}`, body);
+// #118 — GET /api/auth/qq/start?kind=login|bind&invite_code=&next=: a navigation link (302 to QQ Connect), built by `oauthStartUrl('qq', …)`;
+//        `invite_code` only for a login in `invite` registration mode (a new account needs it, an existing binding does not — `ThirdPartyRow`'s invite step)
+// #119 — GET /api/auth/qq/callback: QQ's redirect target (code → openid → one-time grant → 302 to 122); never called by the SPA
+// #120 — GET /api/auth/apple/start?kind&invite_code&next: a navigation link (302 to Apple), built by `oauthStartUrl('apple', …)` (same `invite_code` rule)
+// #121 — POST /api/auth/apple/callback: Apple's `form_post` target (id_token → sub → grant → 302 to 122); never called by the SPA
+// #122 — GET /api/auth/oauth/finish?grant=: the grant becomes the session cookie on this origin, then a 302 to `next` / `/welcome` / `/settings?bound=<provider>`;
+//        a failure lands on `/login?error=<code>` or `/settings?error=<code>`, which the pages show through `errorMessageForCode`
+/**
+ * URL of endpoint 118 / 120 for a plain `<a href>` (the browser follows the 302 to the provider; the result returns through
+ * 119 / 121 → 122 as a full-page navigation, so there is nothing to await). `next` is a same-origin path to land on after a
+ * login; the bind flow passes `/settings`. `inviteCode` (login only, `invite` registration mode) is sent trimmed and omitted
+ * when empty — the whole flow must run in the browser that opened this link (the `wd_oauth` cookie of /start is required at /finish).
+ */
+export const oauthStartUrl = (provider: OAuthProvider, kind: 'login' | 'bind', next?: string | null, inviteCode?: string | null) =>
+  `/api/auth/${provider}/start${buildQuery({ kind, invite_code: inviteCode?.trim() || undefined, next: next || undefined })}`;
 
 // ---------------------------------------------------------------------------------------------------
 // §4 Settings

@@ -36,7 +36,16 @@ Validation rules:
   read at call time); ``WD_SMS_DAILY_CAP`` / ``WD_SMS_HOURLY_CAP`` are 0–100000 (0 = the cap is already reached),
   ``WD_CODE_IP_HOURLY`` 1–100000, ``WD_PHONE_STALE_DAYS`` 1–3650, ``WD_CAPTCHA`` ``on`` / ``off`` (the image captcha gates only
   the public code sends, endpoints 80 / 90) and ``WD_AI_USER_DAILY_WORDS`` 0–100000 (0 = unlimited; the per-user AI quota
-  public sign-up relies on). An unchanged ``.env`` keeps today's behaviour: every default is the pre-0018 one.
+  public sign-up relies on). An unchanged ``.env`` keeps today's behaviour: every default is the pre-0018 one;
+* third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, API.md §3.3, slice 2-A — everything ships dark): ``WD_WECHAT_APPID`` needs
+  ``WD_WECHAT_SECRET_FILE`` (``Settings.wechat_configured``), ``WD_QQ_APPID`` needs ``WD_QQ_KEY_FILE`` and ``WD_QQ_CALLBACK_URL``
+  (``qq_configured``), ``WD_APPLE_CLIENT_ID`` needs ``WD_APPLE_CALLBACK_URL`` (``apple_configured``) — an appid without its secret
+  file / callback is a :class:`ConfigError` like ``aliyun_verify`` without its key; the two secret FILES follow the
+  ``WD_ALIYUN_ACCESS_KEY_SECRET_FILE`` rule (must exist and be readable at startup, group/other-readable warns, the first line is read
+  at call time and never lands in ``Settings``); the two callback URLs must be ``https://`` (``http://`` only under ``WD_DEV=1``);
+  ``WD_WECHAT_ENV`` is ``release`` / ``trial`` / ``develop``; ``WD_AUTH_FAKE_PROVIDERS=1`` (the fake WeChat / QQ / Apple clients and the
+  fake consent routes) refuses to start without ``WD_DEV=1``. Nothing here is a secret for ``GET /api/admin/config`` — the paths are
+  shown, the files' contents never read into Settings (``SECRET_KEYS`` unchanged).
 """
 
 from __future__ import annotations
@@ -66,6 +75,8 @@ SMTP_TLS_MODES = ("starttls", "ssl", "none")
 SMS_PROVIDERS = ("off", "aliyun_verify")  # aliyun_verify = Aliyun 号码认证 SendSmsVerifyCode (delivery/sms.py)
 MAIL_PROVIDERS = ("smtp", "aliyun_dm")  # aliyun_dm = Aliyun DirectMail SingleSendMail with the WD_ALIYUN_* key and WD_SMTP_FROM as the sender
 CAPTCHA_MODES = ("on", "off")  # the self-hosted image captcha in front of the public code sends (endpoints 79, 80, 90)
+# third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, slice 2-A)
+WECHAT_ENVS = ("release", "trial", "develop")  # WD_WECHAT_ENV — the `env_version` of the 小程序码 (develop / trial while the mini program is unpublished)
 COOKIE_SECURE_MODES = ("auto", "1", "0")
 IMAGE_PROVIDERS = ("wikimedia", "openverse", "pixabay", "pexels")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -232,6 +243,18 @@ class Settings:
     code_ip_hourly: int = 20  # verification-code sends per client IP per hour (endpoints 80, 85, 90)
     phone_stale_days: int = 90  # a phone identity unused this long needs a second factor at code login (the stale-phone challenge)
     captcha: str = "on"  # on | off — the image captcha in front of the public code sends when no session exists (tests set off)
+    # --- third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, API.md §3.3 — slice 2-A, dark until the owner sets them) ---
+    wechat_appid: str = ""  # the mini program's AppID; with wechat_secret_file turns the WeChat bridge on (endpoints 112–116)
+    wechat_secret_file: str = ""  # 0600 file whose first line is the AppSecret, read at call time (delivery/wechat.py)
+    wechat_env: str = "release"  # release | trial | develop — the env_version of the 小程序码 (endpoint 114)
+    wechat_page: str = "pages/confirm/confirm"  # the mini-program page the 小程序码 opens
+    qq_appid: str = ""  # QQ 互联 网站应用 APP ID; with qq_key_file + qq_callback_url turns QQ login on (118 / 119)
+    qq_key_file: str = ""  # 0600 file whose first line is the APP Key
+    qq_callback_url: str = ""  # the registered callback, https://<filed domain>/api/auth/qq/callback (the relay host proxies it here)
+    apple_client_id: str = ""  # the Services ID (web); with apple_callback_url turns Sign in with Apple on (120 / 121)
+    apple_app_id: str = ""  # the iOS bundle id, also accepted as `aud` — read but unused until the iOS Capacitor plugin exists
+    apple_callback_url: str = ""  # https://<host>/api/auth/apple/callback, registered as a Return URL (must be https)
+    auth_fake_providers: bool = False  # dev only (WD_DEV=1): the fake WeChat / QQ / Apple clients + the fake consent routes; the three flags read true
     # --- logging / backups / misc ---------------------------------------------------
     log_level: str = "INFO"
     log_format: str = "json"
@@ -277,6 +300,23 @@ class Settings:
         """Phone verification codes can be sent: ``WD_SMS_PROVIDER`` is not ``off`` (``from_env`` refused to start without the
         provider's key id, secret file and signature, so no further check is needed here)."""
         return self.sms_provider != "off"
+
+    @property
+    def wechat_configured(self) -> bool:
+        """The WeChat mini-program bridge (API.md 112–116) is on: ``WD_WECHAT_APPID`` and ``WD_WECHAT_SECRET_FILE`` are both set
+        (``from_env`` refused an appid without the file). The fake providers of ``WD_AUTH_FAKE_PROVIDERS`` are NOT counted here —
+        ``ServerFlags.wechat_enabled`` is ``wechat_configured or auth_fake_providers``."""
+        return bool(self.wechat_appid and self.wechat_secret_file)
+
+    @property
+    def qq_configured(self) -> bool:
+        """QQ 互联 login (API.md 118 / 119) is on: ``WD_QQ_APPID``, ``WD_QQ_KEY_FILE`` and ``WD_QQ_CALLBACK_URL`` are all set."""
+        return bool(self.qq_appid and self.qq_key_file and self.qq_callback_url)
+
+    @property
+    def apple_configured(self) -> bool:
+        """Sign in with Apple, web redirect flow (API.md 120 / 121), is on: ``WD_APPLE_CLIENT_ID`` and ``WD_APPLE_CALLBACK_URL`` are set."""
+        return bool(self.apple_client_id and self.apple_callback_url)
 
     @property
     def fallback_configured(self) -> bool:
@@ -609,6 +649,56 @@ class Settings:
             # the DirectMail AccountName is the address part of WD_SMTP_FROM; a bare display name would only fail inside create_app
             raise ConfigError('WD_MAIL_PROVIDER=aliyun_dm needs WD_SMTP_FROM to contain the DirectMail sender address, e.g. "word-Dance <noreply@mail.example.com>"')
 
+        # third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, slice 2-A): the same startup-time preconditions as the SMS provider —
+        # an appid without its secret file / callback would otherwise surface as 502 provider_error on the first scan / callback
+        dev = flag("WD_DEV", False)
+
+        def secret_file(name: str) -> str:
+            """A 0600 secret file path (the WD_ALIYUN_ACCESS_KEY_SECRET_FILE rule): must exist and be readable now; the first line is
+            read at call time by the delivery module; group/other-readable only warns."""
+            path_text = text(name, "")
+            if not path_text:
+                return ""
+            path = Path(path_text).expanduser()
+            if not path.is_file():
+                raise ConfigError(f"{name} must name an existing regular file, got {path_text!r}")
+            if not os.access(path, os.R_OK):
+                raise ConfigError(f"{name} is not readable by this user: {path_text!r}")
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if mode & 0o077:
+                log.warning("%s %s is readable by group/others (mode %o); chmod 600 it", name, path_text, mode)
+            return path_text
+
+        def callback_url(name: str) -> str:
+            """A registered OAuth callback: https:// with a host (http:// only under WD_DEV=1 — the fake consent flow on a laptop)."""
+            url = text(name, "").strip()
+            if not url:
+                return ""
+            lower = url.lower()
+            if not lower.startswith(("http://", "https://")) or origin_of(url) is None:
+                raise ConfigError(f"{name} must be an https:// URL naming a host, got {url!r}")
+            if lower.startswith("http://") and not dev:
+                raise ConfigError(f"{name} must start with https:// (http:// is accepted only with WD_DEV=1), got {url!r}")
+            return url
+
+        wechat_appid = text("WD_WECHAT_APPID", "")
+        wechat_secret_file = secret_file("WD_WECHAT_SECRET_FILE")
+        if wechat_appid and not wechat_secret_file:
+            raise ConfigError("WD_WECHAT_APPID needs WD_WECHAT_SECRET_FILE (a 0600 file whose first line is the mini program's AppSecret)")
+        qq_appid = text("WD_QQ_APPID", "")
+        qq_key_file = secret_file("WD_QQ_KEY_FILE")
+        qq_callback_url = callback_url("WD_QQ_CALLBACK_URL")
+        if qq_appid and not (qq_key_file and qq_callback_url):
+            raise ConfigError("WD_QQ_APPID needs WD_QQ_KEY_FILE (a 0600 file whose first line is the APP Key) and WD_QQ_CALLBACK_URL (the registered callback)")
+        apple_client_id = text("WD_APPLE_CLIENT_ID", "")
+        apple_callback_url = callback_url("WD_APPLE_CALLBACK_URL")
+        if apple_client_id and not apple_callback_url:
+            raise ConfigError("WD_APPLE_CLIENT_ID needs WD_APPLE_CALLBACK_URL (the Return URL registered for the Services ID)")
+        auth_fake_providers = flag("WD_AUTH_FAKE_PROVIDERS", False)
+        if auth_fake_providers and not dev:
+            # unlike WD_SMOKE_MOCK_HTTP (ignored with a warning) this is refused: the fake consent pages would sign anyone in as anyone
+            raise ConfigError("WD_AUTH_FAKE_PROVIDERS=1 needs WD_DEV=1 (a production instance never installs the fake WeChat / QQ / Apple providers)")
+
         return cls(
             data_dir=data_dir,
             db_path=db_path,
@@ -619,7 +709,7 @@ class Settings:
             frontend_dist=frontend_dist,
             trust_proxy=flag("WD_TRUST_PROXY", False),
             cookie_secure=choice("WD_COOKIE_SECURE", "auto", COOKIE_SECURE_MODES),
-            dev=flag("WD_DEV", False),
+            dev=dev,
             secret_key=secret_key,
             tz=tz,
             registration_mode=choice("WD_REGISTRATION_MODE", "invite", REGISTRATION_MODES),
@@ -714,6 +804,17 @@ class Settings:
             code_ip_hourly=integer("WD_CODE_IP_HOURLY", 20, 1, 100_000),
             phone_stale_days=integer("WD_PHONE_STALE_DAYS", 90, 1, 3650),
             captcha=choice("WD_CAPTCHA", "on", CAPTCHA_MODES),
+            wechat_appid=wechat_appid,
+            wechat_secret_file=wechat_secret_file,
+            wechat_env=choice("WD_WECHAT_ENV", "release", WECHAT_ENVS),
+            wechat_page=text("WD_WECHAT_PAGE", "pages/confirm/confirm"),
+            qq_appid=qq_appid,
+            qq_key_file=qq_key_file,
+            qq_callback_url=qq_callback_url,
+            apple_client_id=apple_client_id,
+            apple_app_id=text("WD_APPLE_APP_ID", ""),
+            apple_callback_url=apple_callback_url,
+            auth_fake_providers=auth_fake_providers,
             log_level=log_level,
             log_format=choice("WD_LOG_FORMAT", "json", LOG_FORMATS),
             log_file=text("WD_LOG_FILE", ""),

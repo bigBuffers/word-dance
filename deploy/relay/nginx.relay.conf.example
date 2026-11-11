@@ -1,0 +1,97 @@
+# deploy/relay/nginx.relay.conf.example — the mainland relay host of slice 2-A (DEPLOY §7.1, deploy/relay/README.md).
+#
+# Replace RELAY-DOMAIN with the filed (备案) domain and TOKYO-HOST with the host name of the word-Dance server (the Caddy / nginx
+# front of deploy/install.sh, serving https with a valid certificate). Only the third-party sign-in paths cross to that server;
+# everything else is the static product page in /var/www/relay (index.html next to this file). AI endpoints, the SPA, media and
+# the rest of /api are NOT forwarded — a request for them gets the product page (location /) and nothing leaves the mainland host.
+#
+# Certificates: certbot --nginx -d RELAY-DOMAIN (the paths below are what it writes).
+#
+# Logging: nginx's default `combined` format writes the whole request line, query string included — for the QQ callback (119) that
+# is `?code=<one-time QQ code>&state=<signed state>`, which must never land on disk. The `relay` format below logs the method and the
+# path only (`$uri` carries no query string), no body, no User-Agent, no Referer. `log_format` lives in the http context: this file is
+# included from `http {}` by sites-enabled, so a top-level directive here is right; inside `server {}` nginx refuses it.
+
+log_format relay '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent';
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name RELAY-DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name RELAY-DOMAIN;
+
+    ssl_certificate     /etc/letsencrypt/live/RELAY-DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/RELAY-DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 64k;       # the forwarded requests are small JSON bodies and Apple's form post; nothing else is accepted
+    server_tokens off;
+    access_log /var/log/nginx/relay.access.log relay;   # the `relay` format above: method, path, status — no query string (QQ's code / state), no body (README §5)
+    error_log  /var/log/nginx/relay.error.log;
+
+    # ---- the only paths that cross to the application server (API.md §3.3) -----------------------------------------------
+    # 112–116: the WeChat mini-program bridge (the mini program's server domain must be this filed domain)
+    location /api/auth/wechat/ {
+        proxy_pass https://TOKYO-HOST;
+        proxy_set_header Host TOKYO-HOST;
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_read_timeout 15s;
+        proxy_connect_timeout 10s;
+    }
+    # 119: QQ 互联 redirects the browser here (WD_QQ_CALLBACK_URL); the answer is a 302 to the application's own origin (122)
+    location = /api/auth/qq/callback {
+        proxy_pass https://TOKYO-HOST;
+        proxy_set_header Host TOKYO-HOST;
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_read_timeout 15s;
+        proxy_connect_timeout 10s;
+    }
+    # 121: Apple's form_post — only when the Return URL was registered on this domain (WD_APPLE_CALLBACK_URL); same 302 hop
+    location = /api/auth/apple/callback {
+        proxy_pass https://TOKYO-HOST;
+        proxy_set_header Host TOKYO-HOST;
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_read_timeout 15s;
+        proxy_connect_timeout 10s;
+    }
+    # 1: liveness, so an external monitor of the relay sees the application's health through it (no user data)
+    location = /api/health {
+        proxy_pass https://TOKYO-HOST;
+        proxy_set_header Host TOKYO-HOST;
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_http_version 1.1;
+        proxy_read_timeout 10s;
+        proxy_connect_timeout 5s;
+    }
+
+    # ---- everything else: the static product page (name, one paragraph, the two filing numbers) --------------------------
+    location / {
+        root /var/www/relay;
+        index index.html;
+        try_files $uri /index.html;
+        add_header Cache-Control "public, max-age=3600";
+        add_header X-Content-Type-Options nosniff;
+        add_header Referrer-Policy same-origin;
+        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+    }
+}

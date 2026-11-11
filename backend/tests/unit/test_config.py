@@ -533,3 +533,129 @@ def test_split_with_a_learner_kind_removed_warns_that_learner_input_reaches_clau
     with caplog.at_level(logging.WARNING, logger="wd.config"):
         Settings.from_env({**FALLBACK_ENV, "WD_AI_PROVIDER": "split"})
     assert not [r for r in caplog.records if "reaches Claude" in r.getMessage()]  # the default list exposes nothing
+
+
+# ------------------------------------------------------------------ third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, DEPLOY §4, slice 2-A)
+def _secret_file(tmp_path: Path, name: str, mode: int = 0o600) -> str:
+    path = tmp_path / name
+    path.write_text("not-a-real-secret\n", encoding="utf-8")
+    path.chmod(mode)
+    return str(path)
+
+
+def test_third_party_defaults_are_dark():
+    """An unchanged .env: no provider configured, the three flags off, the mini-program defaults, no fakes — nothing changes for users."""
+    cfg = Settings.from_env({})
+    assert (cfg.wechat_appid, cfg.wechat_secret_file, cfg.wechat_env, cfg.wechat_page) == ("", "", "release", "pages/confirm/confirm")
+    assert (cfg.qq_appid, cfg.qq_key_file, cfg.qq_callback_url) == ("", "", "")
+    assert (cfg.apple_client_id, cfg.apple_app_id, cfg.apple_callback_url) == ("", "", "")
+    assert cfg.auth_fake_providers is False
+    assert (cfg.wechat_configured, cfg.qq_configured, cfg.apple_configured) == (False, False, False)
+    entries = {e["key"]: e for e in cfg.entries()}
+    for key, value in (("WD_WECHAT_APPID", ""), ("WD_WECHAT_SECRET_FILE", ""), ("WD_WECHAT_ENV", "release"), ("WD_WECHAT_PAGE", "pages/confirm/confirm"), ("WD_QQ_APPID", ""), ("WD_QQ_KEY_FILE", ""),
+                       ("WD_QQ_CALLBACK_URL", ""), ("WD_APPLE_CLIENT_ID", ""), ("WD_APPLE_APP_ID", ""), ("WD_APPLE_CALLBACK_URL", ""), ("WD_AUTH_FAKE_PROVIDERS", "0")):
+        assert entries[key] == {"key": key, "value": value, "source": "default"}, key
+
+
+def test_wechat_needs_appid_and_secret_file(tmp_path: Path):
+    """`WD_WECHAT_APPID` without `WD_WECHAT_SECRET_FILE` refuses to start (the `aliyun_verify` rule); the file alone switches nothing on; the
+    pair sets `wechat_configured`; the path is shown by GET /api/admin/config (not a secret), the content never read into Settings."""
+    secret = _secret_file(tmp_path, "wechat.secret")
+    with pytest.raises(ConfigError, match="WD_WECHAT_APPID needs WD_WECHAT_SECRET_FILE"):
+        Settings.from_env({"WD_WECHAT_APPID": "wx0000000000000000"})
+    alone = Settings.from_env({"WD_WECHAT_SECRET_FILE": secret})
+    assert alone.wechat_configured is False and alone.wechat_secret_file == secret
+    cfg = Settings.from_env({"WD_WECHAT_APPID": "wx0000000000000000", "WD_WECHAT_SECRET_FILE": secret, "WD_WECHAT_ENV": "trial", "WD_WECHAT_PAGE": "pages/x/x"})
+    assert cfg.wechat_configured is True and (cfg.wechat_appid, cfg.wechat_env, cfg.wechat_page) == ("wx0000000000000000", "trial", "pages/x/x")
+    assert cfg.qq_configured is False and cfg.apple_configured is False
+    entries = {e["key"]: e["value"] for e in cfg.entries()}
+    assert entries["WD_WECHAT_SECRET_FILE"] == secret and entries["WD_WECHAT_APPID"] == "wx0000000000000000"
+    assert "not-a-real-secret" not in repr(cfg)
+    for env in (["release"], ["trial"], ["develop"]):
+        assert Settings.from_env({"WD_WECHAT_ENV": env[0]}).wechat_env == env[0]
+    with pytest.raises(ConfigError, match="WD_WECHAT_ENV"):
+        Settings.from_env({"WD_WECHAT_ENV": "production"})
+
+
+def test_third_party_secret_files_follow_the_key_file_rule(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """`WD_WECHAT_SECRET_FILE` / `WD_QQ_KEY_FILE` are validated like `WD_ALIYUN_ACCESS_KEY_SECRET_FILE`: an existing readable regular file at
+    startup (a ConfigError naming the variable and the path otherwise); a group/other-readable mode only warns (`chmod 600`)."""
+    for name in ("WD_WECHAT_SECRET_FILE", "WD_QQ_KEY_FILE"):
+        missing = tmp_path / f"{name}.missing"
+        with pytest.raises(ConfigError, match=re.escape(str(missing))):
+            Settings.from_env({name: str(missing)})
+        with pytest.raises(ConfigError, match=name):
+            Settings.from_env({name: str(tmp_path)})  # a directory
+        locked = tmp_path / f"{name}.locked"
+        locked.write_text("k\n", encoding="utf-8")
+        locked.chmod(0o000)
+        try:
+            if os.geteuid() != 0:
+                with pytest.raises(ConfigError, match="not readable"):
+                    Settings.from_env({name: str(locked)})
+        finally:
+            locked.chmod(0o600)
+        loose = _secret_file(tmp_path, f"{name}.loose", 0o644)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="wd.config"):
+            assert getattr(Settings.from_env({name: loose}), name[len("WD_") :].lower()) == loose
+        assert any("chmod 600" in r.getMessage() and loose in r.getMessage() and name in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_qq_needs_appid_key_file_and_callback(tmp_path: Path):
+    key = _secret_file(tmp_path, "qq.key")
+    full = {"WD_QQ_APPID": "101000000", "WD_QQ_KEY_FILE": key, "WD_QQ_CALLBACK_URL": "https://relay.example.cn/api/auth/qq/callback"}
+    with pytest.raises(ConfigError) as e:
+        Settings.from_env({"WD_QQ_APPID": "101000000"})
+    assert all(name in str(e.value) for name in ("WD_QQ_APPID", "WD_QQ_KEY_FILE", "WD_QQ_CALLBACK_URL"))
+    for missing in ("WD_QQ_KEY_FILE", "WD_QQ_CALLBACK_URL"):
+        with pytest.raises(ConfigError, match="WD_QQ_APPID needs"):
+            Settings.from_env({k: v for k, v in full.items() if k != missing})
+    cfg = Settings.from_env(full)
+    assert cfg.qq_configured is True and (cfg.qq_appid, cfg.qq_key_file, cfg.qq_callback_url) == ("101000000", key, full["WD_QQ_CALLBACK_URL"])
+    assert cfg.wechat_configured is False and cfg.apple_configured is False
+    # the key file and the callback alone switch nothing on
+    assert Settings.from_env({k: v for k, v in full.items() if k != "WD_QQ_APPID"}).qq_configured is False
+
+
+def test_apple_needs_client_id_and_callback():
+    with pytest.raises(ConfigError, match="WD_APPLE_CLIENT_ID needs WD_APPLE_CALLBACK_URL"):
+        Settings.from_env({"WD_APPLE_CLIENT_ID": "com.worddance.web"})
+    cfg = Settings.from_env({"WD_APPLE_CLIENT_ID": "com.worddance.web", "WD_APPLE_CALLBACK_URL": "https://words.example.com/api/auth/apple/callback", "WD_APPLE_APP_ID": "com.worddance.app"})
+    assert cfg.apple_configured is True and cfg.apple_app_id == "com.worddance.app"
+    assert Settings.from_env({"WD_APPLE_CALLBACK_URL": "https://words.example.com/api/auth/apple/callback"}).apple_configured is False  # the callback alone
+    assert Settings.from_env({"WD_APPLE_APP_ID": "com.worddance.app"}).apple_configured is False  # the bundle id is read but unused until the iOS plugin
+
+
+@pytest.mark.parametrize("name", ["WD_QQ_CALLBACK_URL", "WD_APPLE_CALLBACK_URL"])
+def test_callback_urls_must_be_https_outside_dev(name: str):
+    """The registered callbacks are `https://` with a host; `http://` is accepted only with WD_DEV=1 (the fake consent flow on a laptop)."""
+    with pytest.raises(ConfigError, match=f"{name} must start with https://"):
+        Settings.from_env({name: "http://relay.example.cn/api/auth/x/callback"})
+    for bad in ("relay.example.cn/api/auth/x/callback", "ftp://relay.example.cn/x", "https://", "https:///api/auth/x"):
+        with pytest.raises(ConfigError, match=name):
+            Settings.from_env({name: bad})
+    assert getattr(Settings.from_env({name: "https://relay.example.cn/api/auth/x/callback"}), name[len("WD_") :].lower()) == "https://relay.example.cn/api/auth/x/callback"
+    assert getattr(Settings.from_env({name: "http://localhost:8010/api/auth/x/callback", "WD_DEV": "1"}), name[len("WD_") :].lower()) == "http://localhost:8010/api/auth/x/callback"
+    assert getattr(Settings.from_env({name: " https://relay.example.cn/cb "}), name[len("WD_") :].lower()) == "https://relay.example.cn/cb"  # trimmed
+
+
+def test_auth_fake_providers_need_dev():
+    """`WD_AUTH_FAKE_PROVIDERS=1` without `WD_DEV=1` is a ConfigError (not a silent ignore like WD_SMOKE_MOCK_HTTP: the fake consent pages
+    would sign anyone in as anyone); with WD_DEV=1 the flag is set while the three `*_configured` stay false — ServerFlags adds the fakes."""
+    with pytest.raises(ConfigError, match="WD_AUTH_FAKE_PROVIDERS=1 needs WD_DEV=1"):
+        Settings.from_env({"WD_AUTH_FAKE_PROVIDERS": "1"})
+    assert Settings.from_env({"WD_AUTH_FAKE_PROVIDERS": "0"}).auth_fake_providers is False
+    cfg = Settings.from_env({"WD_AUTH_FAKE_PROVIDERS": "1", "WD_DEV": "1"})
+    assert cfg.auth_fake_providers is True and cfg.dev is True
+    assert (cfg.wechat_configured, cfg.qq_configured, cfg.apple_configured) == (False, False, False)
+    assert {e["key"]: e["value"] for e in cfg.entries()}["WD_AUTH_FAKE_PROVIDERS"] == "1"
+    with pytest.raises(ConfigError, match="WD_AUTH_FAKE_PROVIDERS"):
+        Settings.from_env({"WD_AUTH_FAKE_PROVIDERS": "maybe", "WD_DEV": "1"})
+
+
+def test_third_party_variables_are_not_secret_keys():
+    """Only the files' CONTENTS are secrets, which never enter Settings; every 2-A variable is shown verbatim by GET /api/admin/config."""
+    from wd.config import SECRET_KEYS
+
+    assert not {k for k in SECRET_KEYS if k.startswith(("WD_WECHAT_", "WD_QQ_", "WD_APPLE_", "WD_AUTH_FAKE"))}

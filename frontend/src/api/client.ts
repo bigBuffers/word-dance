@@ -247,7 +247,9 @@ export function errorMessage(e: unknown): string {
     case 'second_factor_required':
       return z.secondFactorRequired;
     case 'identity_taken':
-      return z.identityTaken;
+      // the code alone does not say WHICH identity: the server's envelope names it (「该手机号 / 该微信 / 该 QQ / 该 Apple 账号已绑定其他账号」);
+      // a bare code (the `?error=` query of the QQ / Apple redirects, API.md 119 / 121 / 122) reads the neutral copy
+      return e.message || z.identityTakenGeneric;
     case 'last_login_method':
       return z.lastLoginMethod;
     case 'sms_unconfigured':
@@ -273,7 +275,25 @@ export function errorMessage(e: unknown): string {
       return z.guardianFactorsRequired;
     case 'has_children':
       return z.hasChildren;
+    // third-party sign-in (API.md §1.1, slice 2-A)
+    case 'provider_unconfigured':
+      return z.providerUnconfigured;
+    case 'invalid_identity_token':
+      return z.invalidIdentityToken;
+    case 'invalid_grant':
+      return z.invalidGrant;
+    case 'provider_error':
+      return z.providerError;
     default:
       return e.message || z.server;
   }
+}
+
+/**
+ * `errorMessage` for an error code that arrived without an envelope — the `?error=<code>` query the QQ / Apple redirects
+ * (API.md 119 / 121 / 122) hand the SPA on `/login` and `/settings`. Unknown codes read as the generic server copy, and
+ * `identity_taken` as `zh.errors.identityTakenGeneric` (no envelope, so no provider-specific wording).
+ */
+export function errorMessageForCode(code: string): string {
+  return errorMessage(new ApiError(code, 0, ''));
 }

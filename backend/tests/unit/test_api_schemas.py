@@ -21,8 +21,9 @@ def test_every_model_forbids_extra_fields():
 
 
 def test_endpoint_catalogue_covers_api_md_section_2():
-    # endpoint 4 (logout → 204), 52/53/76/78 (media files) have no JSON body; every other number 1..111 is present (94–111: slice 1-B)
-    expected = set(range(1, 112)) - {4, 52, 53, 76, 78}
+    # endpoint 4 (logout → 204), 52/53/76/78 (media files), 114 (the 小程序码 PNG) and 118–122 (the OAuth redirects) have no JSON body; every
+    # other number 1..122 is present (94–111: slice 1-B; 112, 113, 115, 116, 117: slice 2-A)
+    expected = set(range(1, 123)) - {4, 52, 53, 76, 78, 114, 118, 119, 120, 121, 122}
     assert set(ENDPOINT_MODELS) == expected
     for num, (req, resp) in ENDPOINT_MODELS.items():
         assert resp is not None and issubclass(resp, BaseModel), num
@@ -229,9 +230,9 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.DanceSemantic.model_fields) == {"primitive", "params"} and set(schemas.DanceParams.model_fields) == {"n", "color"}
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}
     # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md; API.md §9)
-    assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band", "account_kind", "is_child", "needs_profile_prompt"}
-    assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "sms_enabled"}
-    assert set(schemas.HealthResponse.model_fields) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "time"}
+    assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band", "account_kind", "is_child", "needs_profile_prompt", "providers"}
+    assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "sms_enabled", "wechat_enabled", "qq_enabled", "apple_enabled"}
+    assert set(schemas.HealthResponse.model_fields) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "wechat_enabled", "qq_enabled", "apple_enabled", "time"}
     assert set(schemas.StaleChallenge.model_fields) == {"token", "display_name_masked", "since", "can_password", "can_email", "email_masked"}
     assert set(schemas.CodeLoginResponse.model_fields) == {"user", "settings", "created", "challenge"}
     assert set(schemas.SmsUsage.model_fields) == {"provider", "sent_today", "daily_cap", "sent_hour", "hourly_cap", "registration_open"} and "sms" in schemas.AdminOverview.model_fields
@@ -342,3 +343,69 @@ def test_family_contract_models_follow_plan_1b():
     assert ENDPOINT_MODELS[102] == (schemas.GateRequest, schemas.GateResponse) and ENDPOINT_MODELS[104] == (None, schemas.AuthResponse) and ENDPOINT_MODELS[105] == (schemas.SwitchBackRequest, schemas.AuthResponse)
     assert ENDPOINT_MODELS[106] == (schemas.SwitchCodeRequest, schemas.CodeSendResponse) and ENDPOINT_MODELS[107] == (schemas.ChildLoginRequest, schemas.AuthResponse) and ENDPOINT_MODELS[108] == (schemas.GuardianClaimCodeRequest, schemas.CodeSendResponse)
     assert ENDPOINT_MODELS[109] == (schemas.GuardianClaimRequest, schemas.UserResponse) and ENDPOINT_MODELS[110] == (schemas.DeclareRequest, schemas.UserResponse)
+
+
+def test_third_party_contract_models_follow_plan_2a():
+    """Slice 2-A (third-party sign-in, API.md §3.3 / §9 / §2 rows 112–122): `ThirdPartyProvider` in the §9 order, `User.providers` (a list of
+    those values; defaulted to [] ONLY until security.user_dto emits the key — a required field would 500 every {user} response of the merged
+    1-A / 1-B code), the three `ServerFlags` / `HealthResponse` flags required (routers/auth.server_flags and routers/health always send
+    them), the four WeChat DTOs' field sets, the request bodies (the exactly-one rule of 115 landing on `details.fields.body`), the 117 body
+    inheriting the 87 one-of, and the ENDPOINT_MODELS rows."""
+    assert list(typing.get_args(schemas.ThirdPartyProvider)) == ["wechat_mini", "qq", "apple"]
+    assert list(typing.get_args(schemas.WechatTicketKind)) == ["login", "bind"]
+    assert list(typing.get_args(schemas.WechatTicketState)) == ["pending", "scanned", "confirmed", "cancelled", "expired"]
+    assert list(typing.get_args(schemas.WechatScanAccount)) == ["bound", "new", "closed", "self", "other"]
+    # User.providers: a required list of ThirdPartyProvider (the server always sends it), unknown providers refused
+    providers = schemas.User.model_fields["providers"]
+    assert providers.is_required()  # security.user_dto always emits the list
+    base = dict(id=1, username="u", display_name="u", email=None, email_verified=False, role="user", onboarding_state="pending", created_at="2026-10-14T00:00:00Z", has_password=False,
+                phone_masked=None, needs_profile=True, age_band=None, account_kind="learner", is_child=False, needs_profile_prompt=False)
+    assert schemas.User(**base, providers=[]).providers == [] and schemas.User(**base, providers=["qq", "wechat_mini"]).providers == ["qq", "wechat_mini"]
+    with pytest.raises(ValidationError):
+        schemas.User(**base)  # the list is required: a server that omitted it would be a contract break, not a silent []
+    with pytest.raises(ValidationError):
+        schemas.User(**base, providers=["phone"])
+    assert all(schemas.ServerFlags.model_fields[f].is_required() and schemas.HealthResponse.model_fields[f].is_required() for f in ("wechat_enabled", "qq_enabled", "apple_enabled"))
+    # the WeChat DTOs (API.md §9, verbatim in types.ts)
+    assert list(schemas.WechatTicket.model_fields) == ["ticket", "pairing_code", "expires_in_s", "qr_url"]
+    assert list(schemas.WechatTicketStatus.model_fields) == ["status", "user", "settings", "created"]
+    assert list(schemas.WechatScanInfo.model_fields) == ["mp_token", "kind", "account", "bind_display_name", "web_ip_masked", "web_ua_summary", "created_at", "expires_in_s"]
+    assert list(schemas.WechatConfirmResult.model_fields) == ["status", "created"]
+    assert all(schemas.WechatTicketStatus.model_fields[f].is_required() for f in ("user", "settings", "created"))  # nullable, never omitted
+    assert schemas.WechatTicketStatus(status="expired", user=None, settings=None, created=None).status == "expired"
+    with pytest.raises(ValidationError):
+        schemas.WechatTicketStatus(status="consumed", user=None, settings=None, created=None)
+    assert schemas.WechatConfirmResult(status="cancelled", created=False).created is False
+    # request bodies
+    assert list(schemas.WechatTicketRequest.model_fields) == ["kind", "invite_code"]
+    assert schemas.WechatTicketRequest(kind="login").invite_code is None and schemas.WechatTicketRequest(kind="bind", invite_code=" ").invite_code is None
+    assert schemas.WechatTicketRequest(kind="login", invite_code=" ABC123 ").invite_code == "ABC123"
+    with pytest.raises(ValidationError):
+        schemas.WechatTicketRequest(kind="scan")
+    assert list(schemas.WechatScanRequest.model_fields) == ["js_code", "ticket", "pairing_code"]
+    ticket = "a" * 26
+    assert schemas.WechatScanRequest(js_code="c", ticket=ticket).pairing_code is None
+    assert schemas.WechatScanRequest(js_code="c", pairing_code="123456").ticket is None
+    for bad in ({"js_code": "c"}, {"js_code": "c", "ticket": ticket, "pairing_code": "123456"}, {"js_code": "", "ticket": ticket}, {"js_code": "c" * 129, "ticket": ticket},
+                {"js_code": "c", "ticket": "A" * 26}, {"js_code": "c", "ticket": "a" * 25}, {"js_code": "c", "ticket": "1" * 26}, {"js_code": "c", "pairing_code": "12345"}, {"js_code": "c", "pairing_code": "12345a"}):
+        with pytest.raises(ValidationError):
+            schemas.WechatScanRequest(**bad)
+    with pytest.raises(ValidationError) as e:
+        schemas.WechatScanRequest(js_code="c")
+    assert [tuple(err["loc"]) for err in e.value.errors()] == [()] and schemas.WECHAT_SCAN_ONE_OF_ZH == "请提供小程序码场景值或配对码" and schemas.WECHAT_SCAN_ONE_OF_ZH in str(e.value)
+    assert list(schemas.WechatConfirmRequest.model_fields) == ["mp_token", "ticket", "accept"]
+    assert schemas.WechatConfirmRequest(mp_token="1.abc", ticket=ticket, accept=True).accept is True
+    for bad in ({"mp_token": "", "ticket": ticket, "accept": True}, {"mp_token": "t", "ticket": "", "accept": True}, {"mp_token": "t", "ticket": ticket}, {"mp_token": "t", "ticket": ticket, "accept": "yes please"}):
+        with pytest.raises(ValidationError):
+            schemas.WechatConfirmRequest(**bad)
+    # 117: the 87 one-of under its own name (a subclass, so the validator cannot drift)
+    assert issubclass(schemas.IdentityUnbindRequest, schemas.PhoneUnbindRequest) and set(schemas.IdentityUnbindRequest.model_fields) == {"password", "code"}
+    assert schemas.IdentityUnbindRequest(code="123456").password is None and schemas.IdentityUnbindRequest(password="p").code is None
+    for bad in ({}, {"password": "p", "code": "123456"}, {"code": "12345"}):
+        with pytest.raises(ValidationError):
+            schemas.IdentityUnbindRequest(**bad)
+    # the §2 rows
+    assert ENDPOINT_MODELS[112] == (schemas.WechatTicketRequest, schemas.WechatTicket) and ENDPOINT_MODELS[113] == (None, schemas.WechatTicketStatus)
+    assert ENDPOINT_MODELS[115] == (schemas.WechatScanRequest, schemas.WechatScanInfo) and ENDPOINT_MODELS[116] == (schemas.WechatConfirmRequest, schemas.WechatConfirmResult)
+    assert ENDPOINT_MODELS[117] == (schemas.IdentityUnbindRequest, schemas.UserResponse)
+    assert ENDPOINT_MODELS[87] == (schemas.PhoneUnbindRequest, schemas.UserResponse)  # 87 keeps its own name

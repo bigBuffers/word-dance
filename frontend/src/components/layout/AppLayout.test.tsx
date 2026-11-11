@@ -12,7 +12,7 @@ import { AppLayout, PASSWORD_BANNER_PREF, hasUngradedItems, resetTodayBadge, set
 const ISO = '2026-10-14T00:00:00Z';
 
 const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_open: 2, attention: 1 }, session: SessionInfo = { guardian: null, gate_until: null }): MeResponse => ({
-  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, ...over },
+  user: { id: 1, username: 'alice', display_name: 'Alice', email: null, email_verified: false, role: 'user', onboarding_state: 'done', created_at: ISO, has_password: true, phone_masked: null, needs_profile: false, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [], ...over },
   settings: {
     timezone: 'Asia/Shanghai',
     push_time: '08:00',
@@ -34,7 +34,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
     email_verified: false,
     updated_at: ISO,
   },
-  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false },
+  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false },
   counters,
   session,
 });

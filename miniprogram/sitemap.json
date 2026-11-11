@@ -1,0 +1,13 @@
+{
+  "desc": "只收录首页；配对与确认页是登录流程的一部分，不收录。",
+  "rules": [
+    {
+      "action": "allow",
+      "page": "pages/index/index"
+    },
+    {
+      "action": "disallow",
+      "page": "*"
+    }
+  ]
+}

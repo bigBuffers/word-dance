@@ -41,9 +41,14 @@ designed):
   ``sessions.guardian_gate_at`` are appended last (nullable TEXT, no default), ``family_codes`` exists with its three indexes, the
   ``users`` / ``sessions`` row counts are unchanged; when the file ran here both columns are NULL everywhere and the table is empty;
   the ``kind`` CHECK and the ``user_id`` FK probes are rejected;
+* 0020 (whenever ``schema_migrations`` holds 20; docs/AUTH_SIGNUP_DESIGN.md §5.3, slice 2-A): ``wechat_tickets`` exists with its 18 columns
+  in file order, its two indexes (``ix_wechat_tickets_pair`` partial on ``pair_hash IS NOT NULL``, ``ix_wechat_tickets_expires``), ``status``
+  defaulting to ``'pending'`` and ``created_account`` to 0; no other table gained a column and ``users`` / ``sessions`` / ``identities`` keep
+  their rows; when the file ran here the table is empty; the ``kind`` / ``status`` CHECKs and the ``bind_user_id`` / ``user_id`` FK probes are
+  rejected, a pending login ticket is storable;
 * the ``wd check db`` stage invariants hold on the migrated copy and, from 0014, the four learning-order lines
   (``learn_order.check_lines`` — the same code ``wd check db`` runs); a second run applies nothing; an empty database
-  migrates from 0001 to the same version with 29 tables and the ``v_bank`` view;
+  migrates from 0001 to the same version with 30 tables and the ``v_bank`` view;
 * informational: elapsed time, page / freelist counts and file size (PLAN §8 step 9 runs ``ANALYZE`` + ``VACUUM`` afterwards).
 
 The script is self-contained apart from the ``wd`` package (``.venv/bin/python -I`` keeps the script directory off
@@ -69,10 +74,15 @@ from wd.diag import LEARN_ORDER_INVARIANTS_FROM_VERSION, STAGE_INVARIANTS, STAGE
 from wd.schemas import STAGE_ORDER
 from wd.services import learn_order
 
-EXPECTED_TABLE_COUNT = 29  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26; 0018 adds identities + login_codes → 28; 0019 adds family_codes → 29
+EXPECTED_TABLE_COUNT = 30  # TASKS P0 acceptance: 25 tables + the v_bank view, unchanged by 0008–0015 (rebuilds in place, 0014 / 0015 add columns); 0016 adds word_dances → 26; 0018 adds identities + login_codes → 28; 0019 adds family_codes → 29; 0020 adds wechat_tickets → 30
 USERS_0018_COLUMNS = ("password_set_at", "account_kind", "guardian_user_id", "age_band", "age_declared_at", "age_declared_ip", "guardian_consent_at", "guardian_pin_hash")  # 0018, file order
 INDEXES_0018 = frozenset({"ux_identities_live", "ux_identities_user_provider", "ix_identities_user", "ix_login_codes_live", "ix_login_codes_user", "ix_login_codes_expires", "ix_sessions_actor"})
 INDEXES_0019 = frozenset({"ix_family_codes_hash", "ix_family_codes_user", "ix_family_codes_expires"})  # 0019
+INDEXES_0020 = frozenset({"ix_wechat_tickets_pair", "ix_wechat_tickets_expires"})  # 0020
+WECHAT_TICKETS_COLUMNS = (  # 0020, file order
+    "id", "ticket_hash", "pair_hash", "poll_hash", "kind", "status", "bind_user_id", "invite_code", "openid", "user_id", "created_account",
+    "web_ip", "web_ua", "created_at", "expires_at", "scanned_at", "confirmed_at", "consumed_at",
+)
 BOOKKEEPING_TABLES = frozenset({"schema_migrations", "kv", "system_events"})  # the only tables a migration may grow/shrink
 STAGE_COLUMNS = tuple(f"stage_{code}" for code in STAGE_ORDER)  # the 0011 column order (seed.SEED_COLUMNS order)
 WORD_IMAGES_META_COLUMNS = ("prompt_version", "model", "text_free", "eval_json")  # 0012
@@ -485,6 +495,39 @@ def check_0019(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
     rep.check("family_codes.user_id FK (unknown user rejected)", ok, detail[:60])
 
 
+def check_0020(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """wechat_tickets created — the WeChat login bridge of slice 2-A (docs/AUTH_SIGNUP_DESIGN.md §5.3, docs/releases/2026-11-auth-third-party.md;
+    mirrors backend/tests/unit/test_db_0020.py on the operator's copy). One table and two indexes, no ADD COLUMN, no data step."""
+    rep.check("wechat_tickets present", "wechat_tickets" in db.table_names(conn))
+    cols = [c["name"] for c in columns(conn, "wechat_tickets")]
+    rep.check("wechat_tickets: the 18 columns in file order", tuple(cols) == WECHAT_TICKETS_COLUMNS, f"{len(cols)} columns: {cols}")
+    status = next((c for c in columns(conn, "wechat_tickets") if c["name"] == "status"), None)
+    rep.check("wechat_tickets.status TEXT NOT NULL DEFAULT 'pending'", status is not None and status["notnull"] == 1 and str(status["dflt_value"]) == "'pending'", str(tuple(status)) if status else "missing")
+    created = next((c for c in columns(conn, "wechat_tickets") if c["name"] == "created_account"), None)
+    rep.check("wechat_tickets.created_account INTEGER NOT NULL DEFAULT 0", created is not None and created["notnull"] == 1 and str(created["dflt_value"]) == "0", str(tuple(created)) if created else "missing")
+    idx = index_names(conn, "wechat_tickets")
+    rep.check("0020 indexes present", INDEXES_0020 <= idx, ", ".join(sorted(INDEXES_0020 - idx)) or "all present")
+    pair_sql = str(scalar(conn, "SELECT COALESCE((SELECT sql FROM sqlite_master WHERE name = 'ix_wechat_tickets_pair'), '')"))
+    rep.check("ix_wechat_tickets_pair is partial (pair_hash IS NOT NULL)", "WHERE pair_hash IS NOT NULL" in pair_sql, pair_sql[:80])
+    for table in ("users", "sessions", "identities"):
+        n = int(scalar(conn, f"SELECT COUNT(*) FROM {table}"))
+        rep.check(f"{table} row count unchanged (no rebuild, no ADD COLUMN)", n == before["counts"].get(table, n), f"{n} rows")
+    users_cols = [c["name"] for c in columns(conn, "users")]
+    rep.check("users gained no column in 0020 (profile_prompted_at still last)", users_cols[-1] == "profile_prompted_at", str(users_cols[-2:]))
+    if ran_here:
+        rep.check("wechat_tickets empty right after the file", int(scalar(conn, "SELECT COUNT(*) FROM wechat_tickets")) == 0)
+    ok, detail = rejected(conn, "INSERT INTO wechat_tickets(ticket_hash, poll_hash, kind, created_at, expires_at) VALUES ('rehearsal-th', 'rehearsal-po', 'pair', '2099-01-01T00:00:00Z', '2099-01-01T00:03:00Z')")
+    rep.check("wechat_tickets.kind CHECK", ok, detail[:60])
+    ok, detail = rejected(conn, "INSERT INTO wechat_tickets(ticket_hash, poll_hash, kind, status, created_at, expires_at) VALUES ('rehearsal-th', 'rehearsal-po', 'login', 'expired', '2099-01-01T00:00:00Z', '2099-01-01T00:03:00Z')")
+    rep.check("wechat_tickets.status CHECK (expired is computed, never stored)", ok, detail[:60])
+    ok, detail = rejected(conn, "INSERT INTO wechat_tickets(ticket_hash, poll_hash, kind, bind_user_id, created_at, expires_at) VALUES ('rehearsal-th', 'rehearsal-po', 'bind', 999999999, '2099-01-01T00:00:00Z', '2099-01-01T00:03:00Z')")
+    rep.check("wechat_tickets.bind_user_id FK (unknown user rejected)", ok, detail[:60])
+    ok, detail = rejected(conn, "INSERT INTO wechat_tickets(ticket_hash, poll_hash, kind, user_id, created_at, expires_at) VALUES ('rehearsal-th', 'rehearsal-po', 'login', 999999999, '2099-01-01T00:00:00Z', '2099-01-01T00:03:00Z')")
+    rep.check("wechat_tickets.user_id FK (unknown user rejected)", ok, detail[:60])
+    ok, detail = accepted(conn, "INSERT INTO wechat_tickets(ticket_hash, pair_hash, poll_hash, kind, web_ip, web_ua, created_at, expires_at) VALUES ('rehearsal-th', 'rehearsal-ph', 'rehearsal-po', 'login', '203.0.113.7', 'UA', '2099-01-01T00:00:00Z', '2099-01-01T00:03:00Z')")
+    rep.check("a pending login ticket is storable (status defaults to pending)", ok, detail[:60])
+
+
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
     """words.learn_rank, the learning order recomputed on the copy (DESIGN §2.9; docs/analysis/2026-11-06-learn-order/DESIGN.md)."""
     cols = {r["name"]: r for r in columns(conn, "words")}
@@ -638,6 +681,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0019(rep, conn, before, ran_here=19 in applied_versions)
         else:
             rep.skip("0019 checks", "not recorded in schema_migrations")
+        if 20 in recorded:
+            check_0020(rep, conn, before, ran_here=20 in applied_versions)
+        else:
+            rep.skip("0020 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

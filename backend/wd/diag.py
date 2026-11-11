@@ -254,8 +254,22 @@ def check_smtp(cfg: Settings, connect: Callable[[str, int, float], None] | None 
     return CheckResult("smtp", True, [*lines, "TCP connect: ok"])
 
 
+def third_party_state(cfg: Settings, configured: bool) -> str:
+    """``on`` / ``off`` for a third-party sign-in provider (slice 2-A), ``fake`` when the dev fakes stand in for an unconfigured one
+    (``WD_AUTH_FAKE_PROVIDERS=1`` — the same word ``main.startup``'s ``sign-in channels:`` line uses)."""
+    if configured:
+        return "on"
+    return "fake" if cfg.auth_fake_providers else "off"
+
+
 def check_providers(cfg: Settings, conn: sqlite3.Connection | None) -> CheckResult:
-    lines = [f"images: {'enabled' if cfg.images_enabled else 'disabled'}", f"chain: {', '.join(cfg.image_providers) or '-'}", f"svg via claude: {'1' if cfg.svg_via_claude else '0'} (sub-cap ${cfg.ai_svg_daily_budget_usd:.2f}/day)"]
+    lines = [
+        f"images: {'enabled' if cfg.images_enabled else 'disabled'}",
+        f"chain: {', '.join(cfg.image_providers) or '-'}",
+        f"svg via claude: {'1' if cfg.svg_via_claude else '0'} (sub-cap ${cfg.ai_svg_daily_budget_usd:.2f}/day)",
+        # third-party sign-in (API.md §3.3, DEPLOY §4 WD_WECHAT_* / WD_QQ_* / WD_APPLE_*): what the login page offers; `on` needs the variables set
+        f"third-party sign-in: wechat {third_party_state(cfg, cfg.wechat_configured)}, qq {third_party_state(cfg, cfg.qq_configured)}, apple {third_party_state(cfg, cfg.apple_configured)}",
+    ]
     ok = True
     if conn is not None:
         for provider in cfg.image_providers:
@@ -406,6 +420,7 @@ __all__ = [
     "check_claude",
     "check_db",
     "check_providers",
+    "third_party_state",
     "check_smtp",
     "collect_stats",
     "register_cli",

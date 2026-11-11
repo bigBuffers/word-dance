@@ -1,8 +1,10 @@
 """``GET /api/health`` — API.md endpoint 1 (Phase 0, fully implemented; needs only db + config).
 
-``200 {status:"ok", version, registration_mode, needs_setup, sms_enabled, email_enabled, captcha, time}``; ``503 {status:"degraded"}``
-when the database is unreachable. ``needs_setup`` is true while the ``users`` table is empty (no admin exists yet); the three
-channel flags tell the login page which sign-in entries to offer (docs/AUTH_SIGNUP_DESIGN.md §5.2).
+``200 {status:"ok", version, registration_mode, needs_setup, sms_enabled, email_enabled, captcha, wechat_enabled, qq_enabled,
+apple_enabled, time}``; ``503 {status:"degraded"}`` when the database is unreachable. ``needs_setup`` is true while the ``users`` table
+is empty (no admin exists yet); the channel flags tell the login page which sign-in entries to offer (docs/AUTH_SIGNUP_DESIGN.md §5.2) —
+the three third-party flags (slice 2-A, §5.3) are ``Settings.<provider>_configured or auth_fake_providers``, or a client installed on
+``app.state`` next to an unconfigured provider (the tests' fakes), exactly as ``routers/auth.server_flags`` computes them.
 """
 
 from __future__ import annotations
@@ -44,5 +46,8 @@ def health(request: Request):
         sms_enabled=bool(cfg.sms_configured or getattr(request.app.state, "sms", None) is not None),  # a sender installed next to an `off` provider (tests) counts
         email_enabled=cfg.email_configured,
         captcha=cfg.captcha == "on",
+        wechat_enabled=bool(cfg.wechat_configured or cfg.auth_fake_providers or getattr(request.app.state, "wechat", None) is not None),
+        qq_enabled=bool(cfg.qq_configured or cfg.auth_fake_providers or getattr(request.app.state, "qq", None) is not None),
+        apple_enabled=bool(cfg.apple_configured or cfg.auth_fake_providers or getattr(request.app.state, "apple", None) is not None),
         time=now_iso(clock),
     )

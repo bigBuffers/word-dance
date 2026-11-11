@@ -8,11 +8,14 @@ describe('endpoints.ts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('declares a numbered wrapper for every catalogue entry 1–111 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders)', () => {
+  it('declares a numbered wrapper for every catalogue entry 1–122 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders; 114 is an <img src>, 118–122 are navigation links)', () => {
     const numbers = [...source.matchAll(/^\/\/ #(\d+) (GET|POST|PUT|PATCH|DELETE) (\/\S+)/gm)].map((m) => Number(m[1]));
-    const expected = Array.from({ length: 111 }, (_, i) => i + 1).filter((n) => n !== 76);
+    const withoutWrapper = new Set([76, 114, 118, 119, 120, 121, 122]);
+    const expected = Array.from({ length: 122 }, (_, i) => i + 1).filter((n) => !withoutWrapper.has(n));
     expect([...numbers].sort((a, b) => a - b)).toEqual(expected);
     expect(new Set(numbers).size).toBe(numbers.length);
+    // the wrapper-less entries stay visible under `// #N —` comments so the numbering has no gaps
+    for (const n of [114, 118, 119, 120, 121, 122]) expect(source).toMatch(new RegExp(`^// #${n} — (GET|POST) /`, 'm'));
   });
 
   it('uses the catalogue methods and paths', async () => {
@@ -64,6 +67,12 @@ describe('endpoints.ts', () => {
     await endpoints.declareAccount({ account_kind: 'guardian', age_band: 'adult' });
     await endpoints.skipDeclare();
     await endpoints.deleteAccount({ code: '123456', delete_children: true });
+    // third-party sign-in (slice 2-A, API.md §3.3)
+    await endpoints.createWechatTicket({ kind: 'login', invite_code: 'INV-2026' });
+    await endpoints.pollWechatTicket('abcdefghijklmnopqrstuvwxyz');
+    await endpoints.unbindIdentity('wechat_mini', { password: 'pw' });
+    await endpoints.scanWechatTicket({ js_code: 'js-code', pairing_code: '123456' }); // the mini program's calls (115 / 116), documented here, never made by the SPA
+    await endpoints.confirmWechatTicket({ mp_token: 'tok', ticket: 'abcdefghijklmnopqrstuvwxyz', accept: true });
 
     const probeBodies = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/admin/ai/probe')).map(([, init]) => init?.body);
     expect(probeBodies).toEqual([JSON.stringify({ provider: 'claude' }), JSON.stringify({ provider: 'fallback' })]);
@@ -113,6 +122,11 @@ describe('endpoints.ts', () => {
       'POST /api/account/declare',
       'POST /api/account/declare/skip',
       'DELETE /api/account',
+      'POST /api/auth/wechat/ticket',
+      'GET /api/auth/wechat/ticket/abcdefghijklmnopqrstuvwxyz',
+      'DELETE /api/account/identities/wechat_mini',
+      'POST /api/auth/wechat/scan',
+      'POST /api/auth/wechat/confirm',
     ]);
     expect(fetchMock.mock.calls[13]?.[1]?.body).toBe(JSON.stringify({ paused: true }));
     expect(fetchMock.mock.calls[11]?.[1]?.body).toBe(JSON.stringify({ password: 'pw' }));
@@ -120,6 +134,9 @@ describe('endpoints.ts', () => {
     expect(fetchMock.mock.calls[35]?.[1]?.body).toBeUndefined(); // #104 has no body
     expect(fetchMock.mock.calls[36]?.[1]?.body).toBe(JSON.stringify({ code: '123456' })); // #105 carries the gate factor
     expect(fetchMock.mock.calls[43]?.[1]?.body).toBe(JSON.stringify({ code: '123456', delete_children: true })); // #8 with delete_children
+    expect(fetchMock.mock.calls[44]?.[1]?.body).toBe(JSON.stringify({ kind: 'login', invite_code: 'INV-2026' })); // #112
+    expect(fetchMock.mock.calls[45]?.[1]?.credentials).toBe('same-origin'); // #113 rides on the wd_wxt cookie like every call
+    expect(fetchMock.mock.calls[46]?.[1]?.body).toBe(JSON.stringify({ password: 'pw' })); // #117 the endpoint-87 one-of
   });
 
   it('builds media and export URLs', () => {
@@ -127,6 +144,15 @@ describe('endpoints.ts', () => {
     expect(endpoints.demoCardUrl(5)).toBe('/media/demo/5.svg');
     expect(endpoints.mediaImageUrl('ab/ab12.jpg')).toBe('/media/images/ab/ab12.jpg');
     expect(endpoints.exportAccountUrl('json')).toBe('/api/account/export?format=json');
+  });
+
+  it('builds the redirect-flow links of endpoints 118 / 120 (plain <a href>, the result comes back through 119 / 121 → 122)', () => {
+    expect(endpoints.oauthStartUrl('qq', 'login')).toBe('/api/auth/qq/start?kind=login');
+    expect(endpoints.oauthStartUrl('qq', 'login', '/bank')).toBe('/api/auth/qq/start?kind=login&next=%2Fbank');
+    expect(endpoints.oauthStartUrl('apple', 'bind', '/settings')).toBe('/api/auth/apple/start?kind=bind&next=%2Fsettings');
+    expect(endpoints.oauthStartUrl('apple', 'login', null)).toBe('/api/auth/apple/start?kind=login'); // an empty next is omitted
+    expect(endpoints.oauthStartUrl('qq', 'login', '/bank', ' INV-2026 ')).toBe('/api/auth/qq/start?kind=login&invite_code=INV-2026&next=%2Fbank'); // invite mode: the trimmed code
+    expect(endpoints.oauthStartUrl('qq', 'login', null, '  ')).toBe('/api/auth/qq/start?kind=login'); // a blank code is omitted (an existing binding needs none)
   });
 
   it('importPayloadFromJsonExport keeps {version, words} and drops review_logs', () => {

@@ -15,7 +15,7 @@ const ISO = '2026-11-10T08:00:00Z';
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const guardian: User = {
   id: 1, username: 'mom', display_name: 'Mom', email: 'mom@example.com', email_verified: true, role: 'user', onboarding_state: 'done', created_at: ISO,
-  has_password: true, phone_masked: '138****8000', needs_profile: false, age_band: 'adult', account_kind: 'guardian', is_child: false, needs_profile_prompt: false,
+  has_password: true, phone_masked: '138****8000', needs_profile: false, age_band: 'adult', account_kind: 'guardian', is_child: false, needs_profile_prompt: false, providers: [],
 };
 const child: User = { ...guardian, id: 4, username: 'u_tao00001', display_name: 'Tao', email: null, email_verified: false, has_password: false, phone_masked: null, age_band: 'u14', account_kind: 'learner', is_child: true };
 const settings: Settings = {
@@ -23,7 +23,7 @@ const settings: Settings = {
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: true, updated_at: ISO,
 };
-const server: ServerFlags = { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true };
+const server: ServerFlags = { version: '0.1.0', registration_mode: 'verified', email_configured: true, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false };
 
 let me: User;
 let calls: { method: string; path: string; body: Record<string, unknown> | null }[];

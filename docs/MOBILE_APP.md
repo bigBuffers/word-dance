@@ -194,6 +194,7 @@ Xcode 里：选 App target → Signing & Capabilities → 勾 Automatically mana
 - 提醒是非精确闹钟（设计如此，见 §6.2 D）：Android 12+ 保证一小时内送达，通常几分钟，省电模式下更久；精确模式会把用户弹进系统设置页，所以不用。
 - iOS 的本地通知只在用户打开过 App 并授权后生效；系统升级或换机后要再开一次 App。
 - 远程壳在没网时只显示「连不上服务器」页，没有离线学习。
+- 「通过 Apple 登录」的 iOS 原生插件（Capacitor 的 Sign in with Apple）推迟到 iOS 壳真正存在之后（PLAN_2A 决定 D6）；网页版的 Apple 登录（`GET /api/auth/apple/start` → 苹果 → `POST /api/auth/apple/callback` → `/api/auth/oauth/finish`，API.md 120–122）已经有了，但**壳里不显示** QQ / Apple 入口：这两条网页重定向流程会在系统浏览器里打开授权页，回调也落在那里，壳内 WebView 拿不到会话；壳里只保留微信的配对码路径（用户自己打开微信小程序输入配对码，网页轮询完成登录）。iOS 壳因此在原生 Apple 登录插件做出来之前没有任何第三方入口（App Store 4.8 要求有微信 / QQ 就得有 Apple），Android 壳只有微信。
 
 ## 9. 费用汇总
 

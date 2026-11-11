@@ -59,6 +59,12 @@ IdentityProvider = Literal["phone", "wechat_mini", "qq", "apple"]  # identities.
 AccountKind = Literal["learner", "guardian"]  # users.account_kind (slice 1-B) — a guardian creates, switches into and manages child accounts (endpoints 94–105)
 GUARDIAN_ADULT_ZH = "家长请选择「我是成人」"  # endpoints 89 / 110: a guardian declares the `adult` band (details.fields.age_band)
 GATE_ONE_OF_ZH = "PIN、密码和验证码必须且只能提供一个"  # the 家长门 bodies of endpoints 102 / 105 (details.fields.body)
+# third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, API.md §3.3 — slice 2-A)
+ThirdPartyProvider = Literal["wechat_mini", "qq", "apple"]  # identities.provider values of slice 2-A (phone is 1-A's); subject = openid / openid / Apple sub, never shown
+WechatTicketKind = Literal["login", "bind"]  # wechat_tickets.kind (endpoints 112 / 115)
+WechatTicketState = Literal["pending", "scanned", "confirmed", "cancelled", "expired"]  # WechatTicketStatus.status (113; `expired` is computed from expires_at, `consumed` rows answer 404)
+WechatScanAccount = Literal["bound", "new", "closed", "self", "other"]  # WechatScanInfo.account (115)
+WECHAT_SCAN_ONE_OF_ZH = "请提供小程序码场景值或配对码"  # endpoint 115: exactly one of ticket / pairing_code (details.fields.body)
 
 # The stage enum lives HERE and nowhere else (DESIGN §0.3, API.md §9.1): seed.py, services/*, ai/prewarm.py and the
 # frontend's StageChips mirror this tuple (scripts/check_contract.py diffs the Stage/StageIndex unions against types.ts
@@ -149,6 +155,10 @@ class HealthResponse(Model):
     sms_enabled: bool  # Settings.sms_configured — the login page shows the 手机号 entry (endpoints 80, 81)
     email_enabled: bool  # Settings.email_configured — the 邮箱 entry
     captcha: bool  # WD_CAPTCHA=on — the public code sends need a captcha token (endpoint 79)
+    # third-party sign-in (slice 2-A): Settings.<provider>_configured or auth_fake_providers — the login page's 「其他方式登录」 row
+    wechat_enabled: bool  # the WeChat mini-program bridge (endpoints 112–116)
+    qq_enabled: bool  # QQ 互联 login (118 / 119)
+    apple_enabled: bool  # Sign in with Apple, web redirect flow (120 / 121)
     time: str
 
 
@@ -176,6 +186,7 @@ class User(Model):
     account_kind: AccountKind  # 'guardian' unlocks 我的孩子 (endpoints 94–104); chosen at /welcome step 0 (89), the legacy prompt (110) or by a claim (109)
     is_child: bool  # users.guardian_user_id IS NOT NULL — account / identity changes only through the guardian (403 guardian_required, API.md §1)
     needs_profile_prompt: bool  # a pre-1-A account that has not declared its kind / age band and was not snoozed in the last 30 days (111; API.md §9.1)
+    providers: list[ThirdPartyProvider]  # the third-party identities bound to the account (sorted) — security.user_dto always emits it (third_party.providers_of)
 
 
 class ServerFlags(Model):
@@ -189,6 +200,10 @@ class ServerFlags(Model):
     audio: bool
     audio_key: str  # fingerprint of the provider + voice behind GET /media/audio (empty without a provider): the client appends it to clip URLs
     sms_enabled: bool  # WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
+    # third-party sign-in (slice 2-A): Settings.<provider>_configured or auth_fake_providers (routers/auth.server_flags)
+    wechat_enabled: bool  # the WeChat mini-program bridge is configured (endpoints 112–116) — the login page shows 微信, settings offers 绑定微信
+    qq_enabled: bool  # QQ 互联 login is configured (118 / 119)
+    apple_enabled: bool  # Sign in with Apple (web redirect flow) is configured (120 / 121)
 
 
 class Counters(Model):
@@ -235,6 +250,51 @@ class Settings(Model):
     next_push_at: str | None
     email_verified: bool
     updated_at: str
+
+
+# ------------------------------------------------ third-party sign-in: the WeChat bridge DTOs (API.md §3.3 / §9, slice 2-A)
+class WechatTicket(Model):
+    """Endpoint 112 (201): the 26-char scene of the 小程序码 (also the poll path of 113 / 114), the 6-digit pairing code for the mobile
+    path, the seconds the ticket lives (180) and the PNG URL (114). The poll secret travels in the HttpOnly cookie ``wd_wxt``."""
+
+    ticket: str
+    pairing_code: str
+    expires_in_s: int
+    qr_url: str
+
+
+class WechatTicketStatus(Model):
+    """Endpoint 113 (polled every 2 s with the ``wd_wxt`` cookie): ``user`` / ``settings`` / ``created`` are set only for a confirmed
+    ticket — a login ticket brings the session cookie with the same response (201 when the account was created), a bind ticket
+    ``user`` = the bound account with ``settings`` null and ``created`` false."""
+
+    status: WechatTicketState
+    user: User | None
+    settings: Settings | None
+    created: bool | None
+
+
+class WechatScanInfo(Model):
+    """Endpoint 115 (the mini program's confirmation page): ``mp_token`` proves the scan to endpoint 116 for 5 minutes; ``account``
+    tells the page what confirming would do (login: ``bound`` / ``new`` / ``closed``; bind: ``self`` / ``other`` / ``new``); the
+    initiating browser is described by its masked IP (``203.0.113.*``) and a UA summary (``Chrome · macOS``)."""
+
+    mp_token: str
+    kind: WechatTicketKind
+    account: WechatScanAccount
+    bind_display_name: str | None
+    web_ip_masked: str
+    web_ua_summary: str
+    created_at: str
+    expires_in_s: int
+
+
+class WechatConfirmResult(Model):
+    """Endpoint 116: the mini program's confirm / cancel outcome (``created`` = the confirmation created the account). The mini
+    program never receives a session — the web poll (113) does."""
+
+    status: Literal["confirmed", "cancelled"]
+    created: bool
 
 
 def validate_username(v: str) -> str:
@@ -547,6 +607,12 @@ class PhoneUnbindRequest(Model):
         return self
 
 
+class IdentityUnbindRequest(PhoneUnbindRequest):
+    """Endpoint 117 (``DELETE /api/account/identities/{provider}``, slice 2-A): unbind a WeChat / QQ / Apple identity after the endpoint-7
+    re-authentication — the 87 one-of (``password`` or a ``reauth`` code of 85, never both, never neither), inherited unchanged so the
+    two bodies cannot drift; the distinct name keeps the OpenAPI schema and API.md readable."""
+
+
 class PhoneRebindRequest(Model):
     """Endpoint 88: replace the bound phone — a ``rebind_phone`` code on the old number and a ``bind_phone`` code on the new one."""
 
@@ -854,6 +920,47 @@ class DeclareRequest(Model):
 
 
 ExportFormat = Literal["csv", "json"]
+
+
+# ------------------------------------------- third-party sign-in: the WeChat bridge request bodies (API.md §3.3, slice 2-A)
+class WechatTicketRequest(Model):
+    """Endpoint 112: ``kind`` ``login`` (public; the SPA's login page) or ``bind`` (a session, not a child); ``invite_code`` only for a
+    login ticket in ``invite`` registration mode (validated at creation, consumed by the confirmation — 116). Blank → None like the
+    endpoint 2 / 81 bodies."""
+
+    kind: WechatTicketKind
+    invite_code: str | None = None
+
+    @field_validator("invite_code")
+    @classmethod
+    def _invite(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        return v or None
+
+
+class WechatScanRequest(Model):
+    """Endpoint 115 (the mini program): its ``wx.login`` ``js_code`` plus exactly one of the 小程序码 scene (``ticket``, 26 base32
+    chars) or the 6-digit ``pairing_code`` typed by the user — neither or both → 400 ``validation_error`` on ``details.fields.body``."""
+
+    js_code: str = Field(min_length=1, max_length=128)
+    ticket: str | None = Field(default=None, pattern=r"^[a-z2-7]{26}$")
+    pairing_code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _one_of(self) -> "WechatScanRequest":
+        if (self.ticket is None) == (self.pairing_code is None):
+            raise ValueError(WECHAT_SCAN_ONE_OF_ZH)
+        return self
+
+
+class WechatConfirmRequest(Model):
+    """Endpoint 116 (the mini program): the ``mp_token`` of 115, the ticket it was issued for and the decision (``accept`` false = 取消).
+    The token is verified against the ticket row and its openid by the router (401 ``invalid_identity_token``), so the body carries
+    only length caps."""
+
+    mp_token: str = Field(min_length=1, max_length=256)
+    ticket: str = Field(min_length=1, max_length=64)
+    accept: bool
 
 
 class ExportWordRow(Model):
@@ -2159,4 +2266,10 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     109: (GuardianClaimRequest, UserResponse),
     110: (DeclareRequest, UserResponse),
     111: (None, EmptyResponse),
+    # third-party sign-in (docs/AUTH_SIGNUP_DESIGN.md §5.3, slice 2-A); 114 is a PNG and 118–122 are redirects — no JSON model
+    112: (WechatTicketRequest, WechatTicket),
+    113: (None, WechatTicketStatus),
+    115: (WechatScanRequest, WechatScanInfo),
+    116: (WechatConfirmRequest, WechatConfirmResult),
+    117: (IdentityUnbindRequest, UserResponse),
 }

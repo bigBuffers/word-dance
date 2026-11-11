@@ -19,8 +19,36 @@ def test_health_ok_needs_setup_true_on_empty_users(client: TestClient):
     assert body["status"] == "ok" and body["needs_setup"] is True
     assert body["version"] == __version__ and body["registration_mode"] == "open"
     assert body["time"] == "2026-10-14T00:00:00Z"  # frozen clock
-    assert set(body) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "time"}
+    assert set(body) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "wechat_enabled", "qq_enabled", "apple_enabled", "time"}
     assert body["sms_enabled"] is False and body["email_enabled"] is False and body["captcha"] is False  # the test env: no providers, WD_CAPTCHA=off
+    assert (body["wechat_enabled"], body["qq_enabled"], body["apple_enabled"]) == (False, False, False)  # slice 2-A ships dark: no WD_WECHAT_* / WD_QQ_* / WD_APPLE_*, no fakes
+
+
+def test_health_third_party_flags_follow_the_fakes_and_installed_clients(settings, frozen_clock):
+    """The three slice 2-A flags are `Settings.<provider>_configured or auth_fake_providers` — or, like `sms_enabled`, a client installed on
+    `app.state` next to an unconfigured provider (the tests' fakes); `/api/auth/me` reports the same values (routers/auth.server_flags)."""
+    from dataclasses import replace
+
+    from wd.delivery.apple import FakeAppleKeys
+    from wd.delivery.qq import FakeQQClient
+    from wd.delivery.wechat import FakeWechatClient
+    from wd.main import create_app
+
+    app = create_app(replace(settings, dev=True, auth_fake_providers=True), clock=frozen_clock, configure_logs=False)
+    assert isinstance(app.state.wechat, FakeWechatClient) and isinstance(app.state.qq, FakeQQClient) and isinstance(app.state.apple, FakeAppleKeys)
+    with TestClient(app) as c:
+        body = c.get("/api/health").json()
+        assert (body["wechat_enabled"], body["qq_enabled"], body["apple_enabled"]) == (True, True, True)
+    app = create_app(settings, clock=frozen_clock, configure_logs=False)
+    assert app.state.wechat is None and app.state.qq is None and app.state.apple is None  # the factories return None while the providers are off
+    app.state.qq = FakeQQClient()  # the integration-test pattern: swap a fake in next to an `off` provider
+    with TestClient(app) as c:
+        c.headers["X-WD-Request"] = "1"
+        body = c.get("/api/health").json()
+        assert (body["wechat_enabled"], body["qq_enabled"], body["apple_enabled"]) == (False, True, False)
+        assert c.post("/api/auth/register", json={"username": "alice", "password": "Passw0rd!xyz"}).status_code == 201
+        server = c.get("/api/auth/me").json()["server"]
+        assert (server["wechat_enabled"], server["qq_enabled"], server["apple_enabled"]) == (False, True, False)
 
 
 def test_health_needs_setup_false_once_a_user_exists(client: TestClient, settings):
@@ -75,6 +103,15 @@ def test_csrf_header_is_required_on_mutations(raw_client: TestClient):
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "csrf_rejected"
     assert raw_client.get("/api/health").status_code == 200  # GET never needs it
+    # the one exemption by path (API.md §1 / 121, deps.CSRF_EXEMPT_PATHS): Apple's form_post lands without the header and with a foreign
+    # Origin — the middleware lets exactly that path through (the endpoint itself verifies the signed state); its siblings keep the rule
+    from wd.deps import CSRF_EXEMPT_PATHS
+
+    assert CSRF_EXEMPT_PATHS == frozenset({"/api/auth/apple/callback"})
+    r = raw_client.post("/api/auth/apple/callback", data={"state": "x", "id_token": "y"}, headers={"Origin": "https://appleid.apple.com"})
+    assert r.status_code != 403, r.text
+    assert raw_client.post("/api/auth/apple/start", headers={"Origin": "https://appleid.apple.com"}).json()["error"]["code"] == "csrf_rejected"
+    assert raw_client.post("/api/auth/apple/callback/x").json()["error"]["code"] == "csrf_rejected"
 
 
 def test_csrf_origin_must_match_host_or_public_url(client: TestClient):
@@ -221,7 +258,7 @@ def test_lifespan_migrated_db_and_public_url_guess(client: TestClient, settings)
     c = db.connect(settings.db_path)
     try:
         assert db.current_version(c) == db.list_migration_files()[-1].version  # every shipped file applied by the lifespan
-        assert len(db.table_names(c)) == 29  # 0019 adds family_codes
+        assert len(db.table_names(c)) == 30  # 0019 adds family_codes, 0020 wechat_tickets
         guess = db.kv_get(c, "public_url_guess")
         assert guess is None or guess.startswith("http://") and guess.endswith(f":{settings.port}")
         assert db.kv_get(c, "seed_version") == hashlib.sha256(settings.seed_path.read_bytes()).hexdigest()  # lifespan imported WD_SEED_PATH via wd.seed (WP1)

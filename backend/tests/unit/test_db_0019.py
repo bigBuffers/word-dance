@@ -81,7 +81,7 @@ def test_0019_adds_family_codes_and_the_two_columns(settings, tmp_path: Path):
         assert c.execute("SELECT guardian_user_id, account_kind FROM users WHERE id = 3").fetchone()[:] == (2, "learner")  # the 1-A columns untouched
         assert c.execute("SELECT actor_user_id FROM sessions WHERE token_hash = 't2'").fetchone()[0] == 2
         # the table, empty, with its three indexes
-        assert set(db.table_names(c)) == before_tables | {"family_codes"}
+        assert set(db.table_names(c)) == before_tables | {"family_codes", "wechat_tickets"}  # 0020 rides along
         assert c.execute("SELECT COUNT(*) FROM family_codes").fetchone()[0] == 0
         indexes = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'family_codes' AND name NOT LIKE 'sqlite_autoindex%'")}
         assert indexes == INDEXES_0019

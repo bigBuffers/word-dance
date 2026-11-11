@@ -555,7 +555,7 @@ def test_create_user_writes_settings_with_next_push_at(conn: sqlite3.Connection)
     user = security.load_user(conn, uid)
     assert user["role"] == "user" and user["onboarding_state"] == "pending" and user["created_at"] == to_iso(NOW)
     dto = security.user_dto(user)
-    assert dto == {"id": uid, "username": "张三", "display_name": "张三", "email": None, "email_verified": False, "role": "user", "onboarding_state": "pending", "created_at": "2026-10-14T00:00:00Z", "has_password": True, "phone_masked": None, "needs_profile": False, "age_band": None, "account_kind": "learner", "is_child": False, "needs_profile_prompt": False}
+    assert dto == {"id": uid, "username": "张三", "display_name": "张三", "email": None, "email_verified": False, "role": "user", "onboarding_state": "pending", "created_at": "2026-10-14T00:00:00Z", "has_password": True, "phone_masked": None, "needs_profile": False, "age_band": None, "account_kind": "learner", "is_child": False, "needs_profile_prompt": False, "providers": []}
     # the legacy 「补充信息」 prompt (API.md §9.1, slice 1-B): only with `now`, never for a declared / child / placeholder account, snoozed 30 days
     assert security.user_dto(user, now=NOW)["needs_profile_prompt"] is True
     conn.execute("UPDATE users SET profile_prompted_at = ? WHERE id = ?", (to_iso(NOW), uid))

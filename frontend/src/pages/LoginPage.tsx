@@ -8,10 +8,16 @@
 // `GET /api/demo` through `useApi`, hidden on any error or an empty list so a server without the endpoint shows nothing.
 // Slice 1-B: under the form the link `zh.auth.haveChildCode` → /child-login (a child's device signs in with the guardian's
 // 8-digit code, API.md 107), hidden while `needs_setup`.
+// Slice 2-A (API.md §3.3): under the form the `ThirdPartyRow` — WeChat opens the `WechatSignIn` sheet, whose confirmed poll
+// carries the session (→ `applyAuth`); QQ / Apple are links to the redirect endpoints 118 / 120 with `?next` (in `invite` mode
+// behind the row's invite step, which adds `invite_code`) —, hidden while `needs_setup` or while no provider flag is on (and the
+// row's platform rule hides QQ / Apple in the native shell); `?error=<code>` from the QQ / Apple redirects (119 / 121 / 122) shows
+// an `auth__notice` through `errorMessageForCode` once — the code is kept in state and the param leaves the URL (`replace`), like
+// the settings page does, so a reload or a back navigation does not repeat a stale error.
 // A successful sign-in sets the session in AuthContext and <RequireGuest/> redirects to `?next=` (or /today).
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { errorMessage } from '@/api/client';
+import { errorMessage, errorMessageForCode } from '@/api/client';
 import * as endpoints from '@/api/endpoints';
 import type { CodeChannel } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
@@ -21,6 +27,9 @@ import { Button } from '@/components/ui/Button';
 import { CodeSignIn } from '@/components/ui/CodeSignIn';
 import { Field } from '@/components/ui/Field';
 import { Segmented } from '@/components/ui/Segmented';
+import { Sheet } from '@/components/ui/Sheet';
+import { ThirdPartyRow } from '@/components/ui/ThirdPartyRow';
+import { WechatSignIn } from '@/components/ui/WechatSignIn';
 import { WordHeader } from '@/components/word/WordHeader';
 import { useApi } from '@/hooks/useApi';
 import { usePageTitle } from '@/hooks/usePageTitle';
@@ -77,9 +86,11 @@ function LoginDemo() {
 
 export default function LoginPage() {
   usePageTitle(zh.auth.login);
-  const { login, health, refreshHealth } = useAuth();
-  const [params] = useSearchParams();
+  const { login, health, refreshHealth, applyAuth, refresh } = useAuth();
+  const [params, setParams] = useSearchParams();
   const [entryChoice, setEntryChoice] = useState<Entry | null>(null);
+  const [wechatOpen, setWechatOpen] = useState(false);
+  const [oauthError, setOauthError] = useState<string | null>(null); // the code of a failed QQ / Apple redirect flow, shown once
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +99,16 @@ export default function LoginPage() {
   useEffect(() => {
     if (!health) void refreshHealth();
   }, [health, refreshHealth]);
+
+  // a failed QQ / Apple redirect flow (API.md 119 / 121 / 122) lands here with `?error=<code>`: keep the code, drop the param
+  useEffect(() => {
+    const code = params.get('error');
+    if (code === null) return;
+    setOauthError(code);
+    const rest = new URLSearchParams(params);
+    rest.delete('error');
+    setParams(rest, { replace: true });
+  }, [params, setParams]);
 
   const needsSetup = health?.needs_setup === true;
   const registrationVisible = needsSetup || health?.registration_mode !== 'closed';
@@ -126,6 +147,11 @@ export default function LoginPage() {
       {resetDone && (
         <div className="auth__notice" role="status">
           {zh.auth.resetDone}
+        </div>
+      )}
+      {oauthError && (
+        <div className="auth__notice" role="alert">
+          {errorMessageForCode(oauthError)}
         </div>
       )}
       {needsSetup && (
@@ -175,6 +201,8 @@ export default function LoginPage() {
       ) : (
         <CodeSignIn key={entry} channels={[entry]} captcha={health?.captcha === true} registrationMode={health?.registration_mode} submitLabel={registrationVisible ? zh.auth.loginOrRegister : zh.auth.login} />
       )}
+      {/* slice 2-A: the providers the server offers (nothing on a server without credentials); the first admin signs up with a password, so the row waits like the code entries */}
+      {!needsSetup && <ThirdPartyRow flags={health} next={next} registrationMode={health?.registration_mode} onWechat={() => setWechatOpen(true)} />}
       {!needsSetup && registrationVisible && (
         <p className="auth__hint muted">
           {zh.auth.noAccount} <Link to={registerTo}>{zh.auth.register}</Link>
@@ -191,6 +219,20 @@ export default function LoginPage() {
         <a href={legalUrls.privacy}>{zh.auth.privacyLink}</a>
         <a href={legalUrls.children}>{zh.auth.childrenLink}</a>
       </p>
+      <Sheet open={wechatOpen} onClose={() => setWechatOpen(false)} title={zh.auth.wechatTitle}>
+        {wechatOpen && (
+          <WechatSignIn
+            kind="login"
+            registrationMode={health?.registration_mode}
+            onDone={async (user, _created, settings) => {
+              // the session cookie came with the confirmed poll: install it like every sign-in and let the guest guard redirect to ?next
+              // (an account the confirmation created has needs_profile and reaches /welcome step 0 through the onboarding guard)
+              if (settings) await applyAuth({ user, settings });
+              else await refresh().catch(() => undefined);
+            }}
+          />
+        )}
+      </Sheet>
     </section>
   );
 }
