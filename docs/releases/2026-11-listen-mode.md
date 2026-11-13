@@ -3,7 +3,7 @@
 基线 `main @ bba38fd`（schema 20，本次不变）；本次发布 = 今日页多一个入口「磨耳朵」，进入 `/listen` 后自动把今天的词一个接一个读出来：**跟着听**（单词 → 中文意思 → 例句 → 例句中文）和**听写**（只读单词、留时间写、播完对答案）。你说的「默写模式」在界面上叫「听写」。
 设计契约是 `docs/LISTEN_MODE_DESIGN.md`（§3 产品规格、§4 接口；实现时和评审后的修订都已回写，文中标「修订」），接口契约 `docs/API.md` 76（`GET /media/audio` 多一个 `accent=zh-CN`）/ 新接口 123 `GET /api/today/playlist` / §9 `ServerFlags.audio_zh`、`ListenItem`、`ListenPlaylist` / §9.1，前端契约 `docs/FRONTEND.md` §2 / §5.3 / §5.9 / §6.4 / §8，配置 `docs/DEPLOY.md` §4 `WD_AUDIO_SAY_VOICE_ZH`，架构 `docs/DESIGN.md` §6.6，故障表 `docs/ops.md`，手测清单 `docs/qa-study.md` §8。
 **没有迁移**、没有新依赖、不花 AI 预算、不动词库与已生成的内容。后端**要重启**，前端**要出新快照**；`.env` 不用改；平板和手机上的 App 不用重装（壳加载的是线上站点）。
-状态（2026-11-12 深夜）：代码在工作区 `/Users/sqin/word-dance/.claude/worktrees/listen-mode`（分支 `listen-mode`），门禁全绿，**还没有提交，也没有上线**——线上检出 `/Users/sqin/word-dance` 一个字节都没动。独立评审确认的 16 处问题（3 处中等、13 处轻微）和真机浏览器实测发现的 1 处（重启后头几秒的 `audio_zh`）已经改完 16 处，剩下 1 处（iPhone 上点击之外的设备朗读）按决定只记为已知限制（第 6 节）；设计稿 §1 的 D1–D6 等你确认。
+状态：**已上线**（2026-11-13 09:02，提交 `ea444c8`，前端快照 `frontend-releases/ea444c8`，服务重启约 2 秒；上线记录见第 7 节）。上线前的状态（2026-11-12 深夜）：代码在工作区 `/Users/sqin/word-dance/.claude/worktrees/listen-mode`（分支 `listen-mode`），门禁全绿；独立评审确认的 16 处问题（3 处中等、13 处轻微）和浏览器实测发现的 1 处（重启后头几秒的 `audio_zh`）改完 16 处，剩下 1 处（iPhone 上点击之外的设备朗读）按决定只记为已知限制（第 6 节）。
 2026-11-13：sqin 确认「用磨耳朵 上线」（按钮名定为「磨耳朵」，其余按默认值），按第 4 节执行；上线记录见文末。
 
 ---
@@ -46,6 +46,8 @@
 - **没有跑的**：任何真机（平板、手机）。手测清单 `docs/qa-study.md` §8。
 
 ## 4 上线步骤（Mac launchd；提交 → 合入线上检出 → 前端快照 → 重启；无迁移）
+
+> 本节写于上线之前，2026-11-13 已按它执行完（第 7 节），留作记录。命令块里带行尾注释：这台 Mac 的交互式 zsh 没有开 `interactivecomments`，手工粘贴前先执行 `setopt interactivecomments`，或去掉 `#` 之后的部分。
 
 这次和以往不同的地方：改动**不在线上检出里**。它还没有提交，放在工作区 `/Users/sqin/word-dance/.claude/worktrees/listen-mode`（分支 `listen-mode`，和 `main` 同在 `bba38fd`）；线上服务跑的是 `/Users/sqin/word-dance`（分支 `main`）。`main` 比 `origin/main` 超前 44 个提交，`listen-mode` 只在本机，所以**不是 `git pull`**（它只会答 Already up to date，然后重启的还是旧代码），而是在线上检出里把本地分支快进合并进来——**那一刻线上的文件才变**。下面的命令可以原样粘贴；每一段开头都重新写了三个变量，换终端也不会丢：`W` 工作区、`L` 线上检出、`D` 数据目录。
 
@@ -94,16 +96,21 @@
 
 ## 5 回滚
 
+下面这段不带注释，可以直接粘贴到终端（上线后的核查在交互式 zsh 里模拟过：检出干净时依次完成；检出里有没提交的改动时 git 拒绝、后面都不执行并打印提示）。旧代码是 `bba38fd`，旧前端快照是 `frontend-releases/e5eb5e6`（`1da0653` 和 `bba38fd` 没有改前端，所以快照名不是 `bba38fd`）。
+
 ```sh
-L=/Users/sqin/word-dance; D=/Users/sqin/word-dance-data
-PREV=$(cat $D/frontend.prev); echo $PREV; ls -d $D/$PREV   # 上线第 3 步记下的旧快照（frontend-releases/<旧 sha>），目录还在
-cd $L && git checkout bba38fd                                # 线上检出回到上线前的代码（分离 HEAD；main 仍指着新提交，重新上线时 git checkout main）
-ln -sfn $PREV $D/frontend.tmp && python3 -c "import os; os.rename('$D/frontend.tmp','$D/frontend')"
-launchctl kickstart -k gui/$(id -u)/com.word-dance.server
-curl -s --noproxy '*' http://127.0.0.1:8000/api/health && curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/today/playlist   # ok；404 = 已是旧代码
+L=/Users/sqin/word-dance; D=/Users/sqin/word-dance-data; PREV=frontend-releases/e5eb5e6
+cat $D/frontend.prev; git -C $L status --short
+cd $L && test -f $D/$PREV/index.html && git checkout bba38fd && ln -sfn $PREV $D/frontend.tmp && python3 -c "import os; os.rename('$D/frontend.tmp','$D/frontend')" && launchctl kickstart -k gui/$(id -u)/com.word-dance.server || echo 'ROLLBACK NOT COMPLETED, service NOT restarted: fix the error above, then rerun this line'
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do sleep 1; curl -sf --noproxy '*' http://127.0.0.1:8000/api/health && break; done; echo
+git -C $L log --oneline -1 | cut -c1-50; readlink $D/frontend; curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/today/playlist
 ```
 
-没有迁移，没有数据风险：`audio/` 里多出来的中文片段只是缓存，留着无害（受 `WD_AUDIO_CACHE_MB` 上限管，最久没播的先清）；设备上的 `localStorage['wd.listen']` 留着无害；`audio_key` 会再变一次（浏览器再重新下载一遍发音片段）；`.env` 里如果写了 `WD_AUDIO_SAY_VOICE_ZH`，旧代码不认识这个变量、也不会因为它拒绝启动。只在第 3 步合并之后、第 4 步重启之前想反悔：上面的命令去掉 `launchctl` 那一行即可（`git checkout bba38fd`，软链指回 `$PREV`），不用重启。`$D/frontend.prev` 只是一行文本，确认不回滚之后可以删。
+期望输出：第 2 行打印 `frontend-releases/e5eb5e6`，`git status` 没有输出；第 3 行是 git 的分离 HEAD 提示；第 4 行一两秒内打印健康检查的 JSON；第 5 行依次是 `bba38fd test(audio)…`、`frontend-releases/e5eb5e6`、`404`（`401` 说明后端还是新代码）。第 3 行是一条 `&&` 链，哪一步失败后面都不执行，改掉原因后重跑这一行即可。
+
+回滚之后：线上检出处于分离 HEAD（`main` 仍指着新提交），本文件和设计稿在线上检出里看不到了，可以在工作区 `/Users/sqin/word-dance/.claude/worktrees/listen-mode/docs/releases/2026-11-listen-mode.md` 里看，或 `git -C /Users/sqin/word-dance show main:docs/releases/2026-11-listen-mode.md`。**原样重新上线**（不用重新构建）：`cd /Users/sqin/word-dance && git checkout main`，然后 `ln -sfn frontend-releases/ea444c8 /Users/sqin/word-dance-data/frontend.tmp && python3 -c "import os; os.rename('/Users/sqin/word-dance-data/frontend.tmp','/Users/sqin/word-dance-data/frontend')" && launchctl kickstart -k gui/$(id -u)/com.word-dance.server`。**修了再上**：改动在工作区里做并提交，`cd /Users/sqin/word-dance && git checkout main && git merge --ff-only listen-mode`，再从第 4 节第 3 步的 `SHA=` 那一行往下做（新的 SHA、新的快照目录；不要对已存在的快照目录再执行 `mv`）。不要在分离 HEAD 的线上检出里提交。
+
+没有迁移，没有数据风险：`audio/` 里多出来的中文片段只是缓存，留着无害（受 `WD_AUDIO_CACHE_MB` 上限管，最久没播的先清）；设备上的 `localStorage['wd.listen']` 留着无害；`audio_key` 会再变一次（浏览器再重新下载一遍发音片段）；`.env` 里如果写了 `WD_AUDIO_SAY_VOICE_ZH`，旧代码不认识这个变量、也不会因为它拒绝启动。只在第 3 步合并之后、第 4 步重启之前想反悔：上面的命令去掉 `launchctl` 那一行即可（`git checkout bba38fd`，软链指回 `$PREV`），不用重启。`$D/frontend.prev` 只是一行文本（上线第 3 步写的，再执行一次那一步会被覆盖，所以上面的回滚命令直接写死了旧快照名），确认不回滚之后可以删；`frontend-releases/e5eb5e6` 在平板上确认无误之前先留着。
 
 ## 6 未决（不阻塞）
 
@@ -121,3 +128,27 @@ curl -s --noproxy '*' http://127.0.0.1:8000/api/health && curl -s --noproxy '*' 
 - **`scripts/smoke.py` 的中文那一步**在 `say -v '?'` 本身读不出来的机器上会报「`audio_zh` 为真而中文答 503」（那种机器上英文那一步已经先失败了）；这台 Mac 上两处新增都跑过（第 3 节）。
 - **与本次无关、但门禁里会碰到的**：`integration/test_worker.py::test_worker_threads_start_stop_join` 会连真实的 Wikimedia，在办公室网络 TLS 被重置时偶发失败（这一轮的全量里没有出现）；vitest 会通过 `node_modules` 软链把结果缓存写到线上检出的 `frontend/node_modules/.vite/vitest/`（只是缓存，11-06 起就在）。
 - **本期不做**（设计稿 §8）：计入学习统计或连续天数、听写批改与错词回写、昨天的词汇 / 任意词表的磨耳朵、语速选项、循环播放、睡眠定时、APK 改动。`README.md` 的功能列表和 `manifest.webmanifest` 的快捷方式也还没有提到磨耳朵。
+
+## 7 上线记录（2026-11-13，Mac，sqin：「用磨耳朵 上线」）
+
+| 时间 | 事件 |
+|---|---|
+| 09:01 | 上线前检查：线上检出干净（`bba38fd`）；服务健康；全库预生成的两个看守脚本已结束，`.env` 里 `TEMPORARY` 0 行；队列里只有 2 个顺延到月底的 `consolidate_bank`，没有在跑的任务；当前快照 `frontend-releases/e5eb5e6`（含 3 个 APK） |
+| 09:01:47 | 在工作区提交 `ea444c8`（67 个文件，+5833 / −124） |
+| 09:02:09 | 线上检出 `git merge --ff-only listen-mode`（`bba38fd` → `ea444c8`） |
+| 09:02:12 | 前端快照构建完成（`index` 350.58 kB / gzip 115.63 kB，`ListenPage` 是独立的懒加载块），3 个 APK 从旧快照照抄 |
+| 09:02:25 | `frontend` 软链切到 `frontend-releases/ea444c8`（旧值记在 `frontend.prev`） |
+| 09:02:26 | `launchctl kickstart`；约 2 秒后 `/api/health` 正常（新进程 pid 42633） |
+| 09:02:29–31 | 语音解析：en-US `Ava (Premium)`、en-GB `Serena (Premium)`、zh-CN `Tingting` |
+
+**核对过的**（主会话 + 一轮独立的只读核查）：只有一个 `wd serve` 进程，跑的是新代码（`GET /api/today/playlist` 未登录 401，旧代码是 404；日志里有只属于新代码的 `audio_voice_zh` 事件）；重启之后的日志没有 WARNING / ERROR；新快照 93 个文件，90 个非 APK 文件逐个经 HTTP 取回与磁盘一致、与提交前门禁构建的产物逐字节相同，入口包引用的 75 个分块都在，3 个 APK 与旧快照逐字节相同且可下载；`/listen`、`/today` 返回页面外壳，响应头（缓存、CSP）与之前一致；`.env` 未动，schema 仍为 20，没有写迁移前快照，launchd 配置未动，7 个登录会话都还有效（不用重新登录）；线上检出和工作区都干净、同在 `ea444c8`。回滚路径的核查结论是可用（第 5 节已换成核查给出的可直接粘贴的版本）。
+
+**还没做的**：
+- **带登录的实际使用**还没有发生过（核查不登录线上账号）：`/api/auth/me` 里的 `audio_zh`、播放列表的 200、一条真实的中文片段，都要等第一次真正打开「磨耳朵」。
+- **真机三项**（`docs/qa-study.md` §8）：平板 APK 里中文是否出声、连播是否不用再点、熄屏后的表现。
+- 上线前已经打开着的页面要重新打开 App 或刷新才有「磨耳朵」（和以往每次换快照一样）。
+
+**核查顺带发现的旧问题（不是这次上线造成的）**：
+- **发音缓存缺了一大块**：11-12 的全库音频预生成需要约 1.72 GB，而 `WD_AUDIO_CACHE_MB` 是 1500，最早生成的 25,208 条被清掉了，正好是小学词：小学词头两种口音命中 0 / 596，en-US 整体约 52 %，en-GB 约 90 %。对使用的影响是每条第一次播放要现合成（约 0.5 秒，之后进缓存），磨耳朵照常能用，只是每段前面多一点停顿。补齐的办法：把上限调到 3000 左右（英文全集约 1.86 GB，再给中文留余量）、重启、重跑 `wd audio-prewarm`。**搬到 Linux 服务器（只读 `cache` 提供方）之前必须先补齐**，否则缺的片段在那边是 503。等 sqin 决定。
+- AI 月度预算里「整理生词库」一类已用完（上限 40 美元，已花 72.68），两个用户的夜间整理顺延到 12 月 1 日；磨耳朵不花 AI 预算。
+- launchd 实际生效的退出等待是 60 秒，plist 里写的是 300 秒（原因未查明；这次关停不到 1 秒，没有影响）。
