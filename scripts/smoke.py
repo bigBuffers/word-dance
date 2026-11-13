@@ -6,10 +6,12 @@ Boots a throwaway word-Dance instance and walks the whole product once against t
     health needs_setup:true → register alice (no invite code → admin) → needs_setup:false → invite → register bob
     → onboarding (gate 409 before completion) → stages → vocab → mark → bank/add "abandoned, children\\nubiquitous；bases"
     → worker-once (lookup → content → image) → content + image ready for abandon and ubiquitous (Wikimedia fixture
-    photos: image/jpeg + fixture attribution, abandon's the CC0 one) → today/build → tick
+    photos: image/jpeg + fixture attribution, abandon's the CC0 one) → today/build → tick → 磨耳朵 playlist (the batch's
+    study words as a voice reads them, read-only)
     → grade every kind incl. an in-batch screen 不熟悉 (second row) → master → restore (snapshot back) → master again
     → re-add via unfamiliar (times_added 2) → export → import into bob → history/stats → admin overview
     (today_usd > 0 with the fake; with_photo + with_claude_svg + card_only == with_content) → pronunciation clip
+    (English, and Chinese with accent=zh-CN where the host's `say` has a Chinese voice)
     → third-party sign-in with the dev fakes (WD_AUTH_FAKE_PROVIDERS=1, slice 2-A): health flags → WeChat bridge
     (ticket → scan → confirm → poll = session, providers ['wechat_mini']; 89 wants a password; unbind the last way in → 409;
     with a password → unbind 200) → QQ (start → fake consent → callback → finish → session) → Apple (start → fake consent
@@ -505,6 +507,16 @@ def run_scenario(s: Smoke) -> None:
         expect(all(i["image"]["kind"] in ("photo", "svg", "card") for i in batch["items"]), "items without image meta")
         ids["items"] = batch["items"]
 
+    with s.step("磨耳朵: GET /api/today/playlist → the batch's study words in order, one row each, with what a voice says; no side effects"):
+        playlist = alice.get("/api/today/playlist")
+        expect(playlist["batch_id"] == ids["batch"] and playlist["local_date"] == ids["local_date"], f"playlist of batch {playlist['batch_id']} on {playlist['local_date']}")
+        study = sorted((i for i in ids["items"] if i["kind"] != "screen"), key=lambda i: i["position"])
+        expect([i["item_id"] for i in playlist["items"]] == [i["item_id"] for i in study], "the playlist is not the batch's review / new / extra rows in position order")
+        expect(all(i["spoken_en"] and i["done"] is False for i in playlist["items"]), "a headword without a spoken form, or an item done before any grade")
+        expect(any(i["gloss_zh"] and i["sentence_en"] and i["sentence_zh"] for i in playlist["items"]), "no word with a gloss, a sentence and its translation although the batch has content")
+        expect(alice.get("/api/today/playlist") == playlist, "GET /api/today/playlist changed between two calls")
+        expect(alice.get("/api/today")["batch"]["counts"] == batch["counts"], "listening changed the batch counts")
+
     def item_of(kind: str, used: set[int]) -> dict:
         for i in ids["items"]:
             if i["kind"] == kind and i["result"] is None and i["item_id"] not in used:
@@ -698,6 +710,18 @@ def run_scenario(s: Smoke) -> None:
             expect(me["server"]["audio"] is False, "server.audio true although the endpoint answers 503")
             expect(alice.error_code() == "audio_unavailable" and alice.last.json()["error"]["details"].get("reason") == "off", f"503 {alice.last.text[:200]}")
         alice.get("/media/audio", params={"text": "-ish"}, expect_status=400)
+        expect(alice.error_code() == "validation_error", f"code {alice.error_code()}")
+        # 磨耳朵's Chinese clips (accent=zh-CN): `say` with a Chinese voice — Tingting ships with macOS —, 503 failed / off without one
+        alice.get("/media/audio", params={"text": "今晚的月亮很亮。", "accent": "zh-CN"}, expect_status=(200, 503))
+        chinese = alice.last
+        flags = alice.get("/api/auth/me")["server"]  # read after the request: it settles the Chinese voice if the warm-up had not yet
+        if chinese.status_code == 200:
+            expect(flags["audio_zh"] is True, "server.audio_zh false although a Chinese clip was served")
+            expect(chinese.headers.get("content-type", "").startswith("audio/") and len(chinese.content) >= 256, f"Chinese clip: {chinese.headers.get('content-type')!r}, {len(chinese.content)} bytes")
+        else:
+            expect(flags["audio_zh"] is False, "server.audio_zh true although Chinese answers 503")
+            expect(chinese.json()["error"]["code"] == "audio_unavailable" and chinese.json()["error"]["details"].get("reason") in ("off", "failed"), f"503 {chinese.text[:200]}")
+        alice.get("/media/audio", params={"text": "moon", "accent": "zh-CN"}, expect_status=400)  # no Han character: that is an English accent's text
         expect(alice.error_code() == "validation_error", f"code {alice.error_code()}")
 
     # ------------------------------------------------------------------ third-party sign-in (slice 2-A, the dev fakes)

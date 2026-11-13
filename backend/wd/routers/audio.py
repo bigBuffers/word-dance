@@ -2,8 +2,10 @@
 files: the ``/api/*`` middleware stamps ``Cache-Control: no-store`` on every API answer, and a clip must be cacheable.
 
 Query ``text`` (≤ 300 chars: Latin letters, digits, the punctuation of an English sentence — ``wd.audio.TEXT_RE``) and
-``accent`` (``en-US`` default | ``en-GB``). Session cookie required — any logged-in user, the 推荐词 of the welcome screening
-speak too. A cache hit costs nothing; a miss counts against ``audio:user:<id>`` (``SYNTH_PER_MINUTE``) and synthesises through
+``accent`` (``en-US`` default | ``en-GB`` | ``zh-CN`` — the Chinese gloss and translated sentence 磨耳朵 reads out, endpoint 123:
+the text then follows ``wd.audio.ZH_TEXT_RE`` and needs a Han character, and without a Chinese voice — any provider but ``say``, or
+a Mac that has none — the answer is 503 ``failed`` / ``missing`` before any budget is spent). Session cookie required — any
+logged-in user, the 推荐词 of the welcome screening speak too. A cache hit costs nothing; a miss counts against ``audio:user:<id>`` (``SYNTH_PER_MINUTE``) and synthesises through
 the configured provider — except under the read-only ``cache`` provider, where a miss is 503 ``missing`` at once (event
 ``audio_clip_missing`` at INFO, nothing to protect). Answers ``audio/mp4`` (``say``) or ``audio/mpeg`` (``youdao``, ``bailian``) with ``Cache-Control: private,
 max-age=604800`` (the clip for a text changes only when the operator switches provider or voice; a week bounds how long a
@@ -43,11 +45,12 @@ def pronunciation(
     conn: sqlite3.Connection = Depends(get_db),
 ):
     cfg = request.app.state.settings
-    if accent not in audio.ACCENTS:
-        raise ApiError("validation_error", details={"fields": {"accent": "只支持 en-US 或 en-GB"}})
-    spoken = audio.normalize_text(text)
+    if accent not in audio.LANGS:
+        raise ApiError("validation_error", details={"fields": {"accent": "只支持 en-US、en-GB 或 zh-CN"}})
+    spoken = audio.normalize_text(text, accent)
     if spoken is None:
-        raise ApiError("validation_error", details={"fields": {"text": f"1–{audio.MAX_TEXT_CHARS} 个英文字母、数字或常见标点"}})
+        hint = f"1–{audio.MAX_TEXT_CHARS} 个字符，需含汉字" if accent == audio.ZH else f"1–{audio.MAX_TEXT_CHARS} 个英文字母、数字或常见标点"
+        raise ApiError("validation_error", details={"fields": {"text": hint}})
     if audio.provider_for(cfg) == "off":
         raise ApiError("audio_unavailable", details={"reason": "off"})
     try:

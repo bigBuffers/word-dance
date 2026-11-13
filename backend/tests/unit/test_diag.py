@@ -373,3 +373,18 @@ def test_check_providers_names_the_pronunciation_provider_and_the_bailian_key_fi
     result = diag.check_providers(cfg, None)
     assert not result.ok and any("key file missing" in line for line in result.lines) and any("wd audio-probe" in line for line in result.lines)
     assert "sk-test-key" not in result.render()
+
+
+def test_check_providers_says_where_chinese_clips_come_from_and_never_fails_for_them(settings, test_env):
+    """磨耳朵 reads Chinese through `accent=zh-CN` (API.md 76 / 123): `say` only so far. The line is configuration — this check spawns no
+    `say`; `wd audio-voices` probes the voice — and a Mac without a Chinese voice, like a provider without Chinese clips, is not a FAIL."""
+    assert not any(line.startswith("audio zh-CN") for line in diag.check_providers(settings, None).lines)  # provider off: nothing to say
+    say = diag.check_providers(Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "say"}), None)
+    assert say.ok and "audio zh-CN: say, the best installed zh_CN voice (WD_AUDIO_SAY_VOICE_ZH unset) — `wd audio-voices` shows whether it speaks; none = 磨耳朵 reads the English only" in say.lines
+    named = diag.check_providers(Settings.from_env({**test_env, "WD_AUDIO_PROVIDER": "say", "WD_AUDIO_SAY_VOICE_ZH": "Lili (Premium)"}), None)
+    assert named.ok and any(line.startswith("audio zh-CN: say, WD_AUDIO_SAY_VOICE_ZH=Lili (Premium) — ") for line in named.lines)
+    for env in ({"WD_AUDIO_PROVIDER": "youdao"}, {"WD_AUDIO_PROVIDER": "cache", "WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium);en-GB=Serena (Premium)"}):
+        result = diag.check_providers(Settings.from_env({**test_env, **env}), None)
+        provider = env["WD_AUDIO_PROVIDER"]
+        assert result.ok and f"audio zh-CN: none — {provider} has no Chinese clips yet (only say speaks Chinese; 磨耳朵 uses the device's own Chinese voice)" in result.lines
+        assert result.lines.index(f"audio: {provider} (WD_AUDIO_PROVIDER={provider})") + 1 == result.lines.index(next(line for line in result.lines if line.startswith("audio zh-CN")))

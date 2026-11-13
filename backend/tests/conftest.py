@@ -86,17 +86,27 @@ def data_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def fake_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], dict[str, Path]]]:
+def fake_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., dict[str, Path]]]:
     """Installs `say` / `afconvert` stand-ins for wd.audio (tests call it with a `say -v ?` listing). `say -v ?` prints the
     listing; `say -v V -o X` writes `V:<stdin>` to X when V is a listed name and `fallback:<stdin>` otherwise — like the real
     say, which exits 0 and substitutes one fixed voice for every name it cannot resolve — and appends `V|<stdin>` to calls.log
-    (the voice probes of wd.audio appear there as `…|hello`); `afconvert` copies its input to its output padded past
-    MIN_CLIP_BYTES. The paths are patched into wd.audio; its voice and cache accounting are reset before and after."""
+    (the voice probes of wd.audio appear there as `…|hello`, the Chinese ones as `…|你好，世界`); `afconvert` copies its input to
+    its output padded past MIN_CLIP_BYTES. The paths are patched into wd.audio; its voice and cache accounting are reset before
+    and after.
+
+    Chinese text (a Han character on stdin) behaves as measured on macOS 26: the voice that speaks — V, or the substitute for an
+    unlisted name — writes `<speaker>:<stdin>` padded past SILENT_AIFF_BYTES when its listing row says `zh_…`, and any other
+    voice a 4608-byte header-only AIFF of silence, exit 0 either way. `fallback=NAME` (a listed voice) makes that voice the
+    substitute for unknown names, its output byte for byte — a zh-CN system, where `say` falls back to Tingting. `noisy=(NAME, …)`
+    names voices that are not Chinese and write a clip of that size for Chinese text all the same — the classic en_US voices
+    (Fred, Albert, Kathy) do: 8–11 s of noise where the newer ones write silence."""
     from wd import audio
 
-    def install(listing_text: str) -> dict[str, Path]:
+    def install(listing_text: str, fallback: str = "fallback", noisy: tuple[str, ...] = ()) -> dict[str, Path]:
         listing = tmp_path / "voices.txt"
         listing.write_text(listing_text, encoding="utf-8")
+        loud = tmp_path / "noisy.txt"
+        loud.write_text("".join(f"{name}\n" for name in noisy), encoding="utf-8")
         calls = tmp_path / "calls.log"
         say = tmp_path / "say"
         say.write_text(
@@ -104,7 +114,12 @@ def fake_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callab
             f'if [ "$1" = "-v" ] && [ "$2" = "?" ]; then cat "{listing}"; exit 0; fi\n'
             'while [ $# -gt 0 ]; do case "$1" in -v) voice=$2; shift;; -o) out=$2; shift;; esac; shift; done\n'
             "text=$(cat)\n"
-            f'if grep -q -F -- "$voice " "{listing}"; then printf \'%s:%s\' "$voice" "$text" > "$out"; else printf \'fallback:%s\' "$text" > "$out"; fi\n'
+            f'if grep -q -F -- "$voice " "{listing}"; then speaker=$voice; else speaker=\'{fallback}\'; fi\n'
+            # a Han character = a UTF-8 lead byte E4–E9 (the accented Latin letters and typographic punctuation of English lead with C3–E2)
+            "if printf '%s' \"$text\" | LC_ALL=C grep -q \"$(printf '[\\344-\\351]')\"; then\n"
+            f'  if grep -F -- "$speaker " "{listing}" | grep -q " zh_" || grep -q -x -F -- "$speaker" "{loud}"; then {{ printf \'%s:%s\' "$speaker" "$text"; head -c 9000 /dev/zero; }} > "$out"\n'
+            '  else head -c 4608 /dev/zero > "$out"; fi\n'
+            'else printf \'%s:%s\' "$speaker" "$text" > "$out"; fi\n'
             f'printf \'%s|%s\\n\' "$voice" "$text" >> "{calls}"\n',
             encoding="utf-8",
         )

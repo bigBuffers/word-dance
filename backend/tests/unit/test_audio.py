@@ -2,7 +2,10 @@
 content-addressed cache and its size cap, the `say`, `youdao` and `bailian` (阿里云百炼 cloud TTS, through an httpx.MockTransport in
 front of both of its clients) providers against fakes, the synthesis slots and waiters, the allow-listed child environment, the
 `auto` provider resolution, the startup warm-up, the periodic re-count of the cache and the `wd audio-prewarm` / `wd audio-voices` /
-`wd audio-probe` commands (DEPLOY §9)."""
+`wd audio-probe` commands (DEPLOY §9); and the Chinese clips of 磨耳朵 (`accent=zh-CN`): their text rule, the voice choice by tier
+that never crosses languages, the size probe on a system whose fallback voice is the Chinese voice, the override that must be a
+listed Chinese voice, the floor that keeps silence out of the cache, the settled "no Chinese voice", `speaks_zh` (optimistic until
+the voice is resolved, never running `say`) and the other providers' `missing` / `failed`."""
 
 from __future__ import annotations
 
@@ -49,14 +52,20 @@ def make_settings(test_env: dict[str, str], **overrides: str) -> Settings:
 
 
 def calls(fakes: dict[str, Path]) -> list[str]:
-    """`voice|text` of every synthesis the fake `say` ran (the voice probes excluded)."""
+    """`voice|text` of every synthesis the fake `say` ran (the voice probes — the English and the Chinese one — excluded)."""
     lines = fakes["calls"].read_text(encoding="utf-8").splitlines() if fakes["calls"].exists() else []
-    return [c for c in lines if not c.endswith("|" + audio.PROBE_TEXT)]
+    return [c for c in lines if not c.endswith(("|" + audio.PROBE_TEXT, "|" + audio.ZH_PROBE_TEXT))]
 
 
 def probes(fakes: dict[str, Path]) -> list[str]:
     lines = fakes["calls"].read_text(encoding="utf-8").splitlines() if fakes["calls"].exists() else []
     return [c.split("|", 1)[0] for c in lines if c.endswith("|" + audio.PROBE_TEXT)]
+
+
+def zh_probes(fakes: dict[str, Path]) -> list[str]:
+    """The voices asked to speak ZH_PROBE_TEXT (say_speaks_zh), in order."""
+    lines = fakes["calls"].read_text(encoding="utf-8").splitlines() if fakes["calls"].exists() else []
+    return [c.split("|", 1)[0] for c in lines if c.endswith("|" + audio.ZH_PROBE_TEXT)]
 
 
 # ------------------------------------------------------------------------------------------- text rule
@@ -604,7 +613,7 @@ def test_voice_key_fingerprints_the_provider_and_the_resolved_voices(test_env: d
     audio.warm_up(cfg)
     after = audio.voice_key(cfg)
     assert re.fullmatch(r"[0-9a-f]{8}", after) and after != before and audio.voice_key(cfg) == after
-    assert after == hashlib.sha256(b"say\n\nAva (Premium)\nStephanie (Premium)").hexdigest()[:8]
+    assert after == hashlib.sha256(b"say\n\nAva (Premium)\nStephanie (Premium)\nTing-Ting").hexdigest()[:8]  # the two accents, then the Chinese voice (LISTING has one)
     assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE="Samantha")) not in (before, after)  # an override is another key even before it resolves
     assert audio.voice_key(make_settings(test_env, WD_AUDIO_PROVIDER="youdao")) == hashlib.sha256(b"youdao").hexdigest()[:8]
 
@@ -1116,3 +1125,376 @@ def test_cli_audio_voices_probe_and_prewarm_with_bailian(test_env: dict[str, str
     assert cli.main(["audio-prewarm"]) == 0
     out = capsys.readouterr().out
     assert "10 clip(s) planned: 2 cached, 8 to synthesise" in out and "≈ 127 characters to send" in out and "audio-prewarm: 8 clip(s) made" in out and len(seen) == 20
+
+
+# ------------------------------------------------------------- Chinese clips (accent zh-CN: 磨耳朵, API.md 76 / 123)
+ZH_LISTING = """Binbin (Enhanced)   zh_CN    # 你好！我叫彬彬。
+Daniel              en_GB    # Hello! My name is Daniel.
+Eddy (中文（中国大陆）)     zh_CN    # 你好！我叫Eddy。
+Lili                zh_CN    # 你好！我叫莉莉。
+Lili (Enhanced)     zh_CN    # 你好！我叫莉莉。
+Meijia              zh_TW    # 你好，我叫美佳。
+Samantha            en_US    # Hello! My name is Samantha.
+Tingting            zh_CN    # 你好！我叫婷婷。
+Yu-shu (Premium)    zh_CN    # 你好！我叫语舒。
+"""
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("月亮", "月亮"),
+        ("好", "好"),
+        ("分享，共用", "分享，共用"),
+        ("  今晚的月亮　很亮。 ", "今晚的月亮 很亮。"),  # the ideographic space collapses like any whitespace
+        ("你好\n世界", "你好 世界"),
+        ("车坏了之后,车主把它丢弃在了高速公路上。", "车坏了之后,车主把它丢弃在了高速公路上。"),  # ASCII punctuation in a translation
+        ("Tom 说：“GDP 增长了 5%！”", "Tom 说：“GDP 增长了 5%！”"),  # what the English rule lets through stays
+        ("《哈利·波特》是一本书吗？", "《哈利·波特》是一本书吗？"),
+        ("他说「你好」——然后走了……", "他说「你好」——然后走了……"),
+        ("（非正式）你好；再见、回头见", "（非正式）你好；再见、回头见"),
+        ("【计】『缓存』～", "【计】『缓存』～"),
+        ("在…上面", "在…上面"),
+        ("T恤衫", "T恤衫"),
+        # the six symbols of a quantity the Chinese voice reads as the words they stand for (Tingting: 「30℃」 is byte for byte 「30摄氏度」)
+        ("水在100℃时沸腾。", "水在100℃时沸腾。"),
+        ("今天气温30°C，转了90°。", "今天气温30°C，转了90°。"),
+        ("占20％", "占20％"),
+        ("这本书卖￥20，那本卖¥30。", "这本书卖￥20，那本卖¥30。"),
+        ("二〇〇八年", "二〇〇八年"),
+        ("好" * 300, "好" * 300),
+    ],
+)
+def test_normalize_text_accepts_chinese_glosses_and_translations(raw: str, expected: str):
+    assert audio.normalize_text(raw, audio.ZH) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "farmer", "GDP 5%", "，。！", "-好", "好" * 301, "你好<script>", "你\u0000好", "日本語です", "한국어", "你好=世界", "50€的书", "好|坏", "[好]", "{好}", "好#1", "好*", "好+", "好^", "〈好〉", "好\\坏"])
+def test_normalize_text_rejects_what_a_chinese_voice_must_not_see(raw: str):
+    assert audio.normalize_text(raw, audio.ZH) is None
+
+
+@pytest.mark.parametrize("raw", ["〇", "℃", "30℃", "20％ ￥5 ¥5 90°", "1+1=2 等于二", "他得了A+。", "3~5个", "好~"])
+def test_the_quantity_symbols_are_no_han_characters_and_bring_no_other_symbol_along(raw: str):
+    """℃ ° ％ ￥ ¥ 〇 are let through because the voice reads them as words; a text still needs a Han character of its own (〇 is none —
+    HAN_RE is what content validation calls CJK), and `+` `=` `~` stay refused: the voice drops or skips them (「A+」 is read 「A」,
+    「3~5」 without the 到), and the glosses of 磨耳朵 rely on a sense like 「A+级」 being refused."""
+    assert audio.normalize_text(raw, audio.ZH) is None
+
+
+def test_the_chinese_rule_is_the_english_class_plus_han_and_chinese_punctuation():
+    english = audio.TEXT_RE.pattern[len("^(?!-)[") : -len("]+$")]
+    assert audio.ZH_TEXT_RE.pattern == "^(?!-)[" + "㐀-䶿一-鿿" + r"\uf900-\ufaff" + "，。！？；：、（）《》「」『』【】～·" + "℃°％￥¥〇" + english + "]+$"  # the two rules cannot drift apart
+    from wd.ai import common
+
+    assert all(bool(audio.HAN_RE.search(chr(cp))) == common.has_cjk(chr(cp)) for cp in range(0x10000))  # "a Han character" is what content validation calls CJK
+    assert audio.ACCENTS == ("en-US", "en-GB") and audio.ZH == "zh-CN" and audio.LANGS == ("en-US", "en-GB", "zh-CN")
+    # the language decides the rule: Chinese is still no English text, English alone is no Chinese text
+    assert audio.normalize_text("你好") is None and audio.normalize_text("你好", "en-GB") is None and audio.normalize_text("hello", audio.ZH) is None
+
+
+def test_choose_zh_voice_takes_the_best_tier_then_the_preference_order_and_never_an_eloquence_voice():
+    voices = audio.parse_voices(ZH_LISTING)
+    assert audio.choose_zh_voice(voices) == "Yu-shu (Premium)"  # the tier first: Lili leads the list but is only Enhanced here
+    below_premium = [v for v in voices if v.tier < 2]
+    assert audio.choose_zh_voice(below_premium) == "Lili (Enhanced)"  # inside a tier the preference order — not the alphabetically earlier Binbin …
+    assert audio.choose_zh_voice(below_premium, speaks=lambda n: n != "Lili (Enhanced)") == "Binbin (Enhanced)"  # … which is still a candidate
+    assert audio.parse_voices(ZH_LISTING)[2].tier == 1  # "Eddy (中文（中国大陆）)": a qualified name, so it would outrank every compact voice
+    compact = [v for v in voices if not v.qualified or v.base == "Eddy"]
+    assert audio.choose_zh_voice(compact) == "Lili" and audio.choose_zh_voice([v for v in compact if v.base != "Lili"]) == "Tingting"
+    assert audio.choose_zh_voice(compact, speaks=lambda n: False) is None
+    assert audio.choose_zh_voice([v for v in voices if v.lang != "zh_CN" or v.base == "Eddy"]) is None  # 台湾's Meijia, the English voices, Eloquence: none
+    assert audio.choose_zh_voice([]) is None
+
+
+def test_no_voice_crosses_languages():
+    voices = audio.parse_voices(ZH_LISTING)
+    chinese = [v for v in voices if v.lang.startswith("zh")]
+    assert audio.choose_voice(chinese, "en-US") is None and audio.choose_voice(chinese, "en-GB") is None  # an English accent never gets a Chinese voice
+    assert audio.choose_zh_voice([v for v in voices if v.lang.startswith("en")]) is None  # … nor Chinese an English one
+
+
+def test_say_speaks_zh_goes_by_the_size_of_the_clip_not_by_the_unknown_name_comparison(test_env: dict[str, str], fake_say, monkeypatch: pytest.MonkeyPatch):
+    """This Mac: `say` substitutes Tingting for a name it does not know, so the comparison of say_resolves calls the real Tingting
+    unresolved. What a voice writes for Chinese text is the test — an English voice exits 0 with a header-only AIFF."""
+    fakes = fake_say(ZH_LISTING, fallback="Tingting")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    assert audio.say_resolves(cfg, "Tingting") is False  # byte for byte what the unknown name produced
+    assert audio.say_speaks_zh(cfg, "Tingting") is True
+    assert audio.say_speaks_zh(cfg, "Samantha") is False  # 4608 bytes of silence
+    assert audio.say_speaks_zh(cfg, "Tingting") is True and audio.say_speaks_zh(cfg, "Samantha") is False
+    assert zh_probes(fakes) == ["Tingting", "Samantha"]  # each voice once per process
+    assert sorted(probes(fakes)) == sorted(["Tingting", audio.UNKNOWN_VOICE])  # the two probe texts are cached apart
+    assert not list(cfg.tmp_dir.glob("audio-probe-*"))
+    monkeypatch.setattr(audio, "SAY_BIN", str(fakes["say"].with_name("missing")))
+    assert audio.say_speaks_zh(cfg, "Lili") is False  # a probe that fails is no voice
+
+
+def test_say_voice_for_chinese_resolves_once_with_its_own_override(test_env: dict[str, str], fake_say, caplog: pytest.LogCaptureFixture):
+    fakes = fake_say(ZH_LISTING, fallback="Tingting")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    assert audio.speaks_zh(cfg) is True and zh_probes(fakes) == []  # not resolved yet: optimistic — and the flag never asks `say`
+    with caplog.at_level(logging.INFO, logger="wd.audio"):
+        assert audio.say_voice_for(cfg, audio.ZH) == "Yu-shu (Premium)"
+        assert audio.say_voice_for(cfg, audio.ZH) == "Yu-shu (Premium)"
+    assert zh_probes(fakes) == ["Yu-shu (Premium)"] and probes(fakes) == []  # one size probe, no comparison with the unknown name
+    assert [r.getMessage() for r in caplog.records if getattr(r, "event", "") == "audio_voice_zh"] == ["say voice for zh-CN: Yu-shu (Premium)"]
+    assert audio.speaks_zh(cfg) is True
+    assert audio.say_voice_for(cfg, "en-US") == "Samantha" and audio.say_voice_for(cfg, "en-GB") == "Daniel"  # English as before
+    # WD_AUDIO_SAY_VOICE is the English override and never speaks Chinese; WD_AUDIO_SAY_VOICE_ZH is the Chinese one and never speaks English
+    english = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE="Daniel")
+    assert audio.say_voice_for(english, audio.ZH) == "Yu-shu (Premium)" and audio.say_voice_for(english, "en-US") == "Daniel"
+    chinese = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH=" Tingting ")
+    assert chinese.audio_say_voice_zh == "Tingting" and {e["key"]: e["value"] for e in chinese.entries()}["WD_AUDIO_SAY_VOICE_ZH"] == "Tingting"
+    assert audio.say_voice_for(chinese, audio.ZH) == "Tingting" and audio.say_voice_for(chinese, "en-US") == "Samantha" and audio.speaks_zh(chinese)
+    assert audio.locate(chinese, audio.ZH, "月亮")[2] == "Tingting" and audio.locate(chinese, audio.ZH, "月亮")[0].path != audio.locate(cfg, audio.ZH, "月亮")[0].path
+    assert audio.say_voice_for(make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Meijia"), audio.ZH) == "Meijia"  # any listed Chinese voice that speaks will do (台湾's: zh_TW)
+
+
+def test_a_chinese_override_must_be_a_listed_voice_that_speaks_chinese(test_env: dict[str, str], fake_say):
+    fakes = fake_say(ZH_LISTING, fallback="Tingting")
+    typo = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Tingtin")  # `say` would speak it — with its fallback voice, under the wrong key
+    with pytest.raises(audio.AudioError) as e:
+        audio.say_voice_for(typo, audio.ZH)
+    assert e.value.reason == "failed" and "WD_AUDIO_SAY_VOICE_ZH='Tingtin'" in e.value.detail and "say -v '?'" in e.value.detail
+    assert zh_probes(fakes) == []  # not in the listing: the size probe could not tell it from Tingting
+    english = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Samantha")
+    for _ in range(2):
+        with pytest.raises(audio.AudioError) as e:  # lookup() raises the same error, so the router answers 503 failed
+            audio.lookup(english, audio.ZH, "月亮")
+        assert e.value.reason == "failed" and "WD_AUDIO_SAY_VOICE_ZH='Samantha'" in e.value.detail
+    assert zh_probes(fakes) == []  # an en_US row: refused by the listing, so no request ever asks `say` — once or again
+    assert audio.speaks_zh(typo) is False and audio.speaks_zh(english) is False
+    assert audio.synthesize(english, "en-US", "farmer").path.is_file()  # English does not care
+    assert audio.say_voice_for(english, "en-GB") == "Daniel" and audio.voice_key(english) == hashlib.sha256(b"say\n\nSamantha\nDaniel\n").hexdigest()[:8]  # … and settled: an empty name, not the placeholder
+
+
+def test_a_chinese_override_is_never_an_eloquence_row_or_an_english_voice_that_makes_noise(test_env: dict[str, str], fake_say):
+    """Measured on this Mac: `say -v 'Eddy (中文（中国大陆）)'` — a zh_CN row of the listing, like the seven other Eloquence names — is
+    not resolved and comes out as Tingting, byte for byte; and the classic en_US voices (Fred, Albert, Kathy) do not write silence
+    for Chinese text but 8–11 s of noise. Both pass the size probe, so the listing row decides before it: the override must be a
+    Chinese voice and no Eloquence one — else Tingting's clips under another voice's key, or noise for a gloss."""
+    fakes = fake_say(ZH_LISTING + "Fred                en_US    # Hello! My name is Fred.\n", fallback="Tingting", noisy=("Fred",))
+    probe = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    assert audio.say_speaks_zh(probe, "Eddy (中文（中国大陆）)") is True and audio.say_speaks_zh(probe, "Fred") is True  # the size probe alone lets both through
+    audio.reset_voice_cache()
+    fakes["calls"].unlink()
+    for name in ("Eddy (中文（中国大陆）)", "Fred"):
+        cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH=name)
+        for ask in (lambda: audio.say_voice_for(cfg, audio.ZH), lambda: audio.lookup(cfg, audio.ZH, "月亮")):  # the router's path: 503 failed
+            with pytest.raises(audio.AudioError) as e:
+                ask()
+            assert e.value.reason == "failed" and f"WD_AUDIO_SAY_VOICE_ZH={name!r}" in e.value.detail and "Eloquence" in e.value.detail
+        assert audio.speaks_zh(cfg) is False
+    assert zh_probes(fakes) == [] and calls(fakes) == []  # refused by their rows: neither was asked to speak
+    # the Chinese voices of the other regions stay eligible — the rule is "a zh_… row", not "zh_CN"
+    assert audio.say_voice_for(make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Meijia"), audio.ZH) == "Meijia" and zh_probes(fakes) == ["Meijia"]
+
+
+def test_a_mac_without_a_chinese_voice_is_a_settled_none(test_env: dict[str, str], fake_say, caplog: pytest.LogCaptureFixture):
+    fakes = fake_say("Daniel              en_GB    # Hello! My name is Daniel.\nEddy (中文（中国大陆）)     zh_CN    # 你好！我叫Eddy。\nMeijia              zh_TW    # 你好，我叫美佳。\nSamantha            en_US    # Hello! My name is Samantha.\n")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    before = audio.voice_key(cfg)
+    with caplog.at_level(logging.INFO, logger="wd.audio"):
+        audio.warm_up(cfg)
+    assert [getattr(r, "event", "") for r in caplog.records] == ["audio_voice", "audio_voice", "audio_voice_zh_missing"]
+    missing = caplog.records[-1]
+    assert missing.levelno == logging.INFO and "no Chinese voice" in missing.getMessage() and "Spoken Content" in missing.getMessage() and "WD_AUDIO_SAY_VOICE_ZH" in missing.getMessage()
+    settled = audio.voice_key(cfg)
+    assert settled == hashlib.sha256(b"say\n\nSamantha\nDaniel\n").hexdigest()[:8] and settled != before  # an empty name, not the placeholder of an unresolved voice
+    for _ in range(2):
+        with pytest.raises(audio.AudioError) as e:
+            audio.lookup(cfg, audio.ZH, "月亮")
+        assert e.value.reason == "failed" and "no Chinese voice" in e.value.detail and "月亮" not in e.value.detail
+    assert audio.voice_key(cfg) == settled and audio.speaks_zh(cfg) is False  # the browsers' clip URLs stay put
+    assert zh_probes(fakes) == []  # Eloquence is no candidate and Meijia is zh_TW: nothing to probe, now or later
+    assert audio.synthesize(cfg, "en-US", "farmer").path.read_bytes().startswith(b"Samantha:farmer")
+
+
+def test_a_listing_that_cannot_be_read_is_no_verdict_about_chinese(test_env: dict[str, str], fakes: dict[str, Path], monkeypatch: pytest.MonkeyPatch):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    monkeypatch.setattr(audio, "SAY_BIN", str(fakes["say"].with_name("missing")))
+    with pytest.raises(audio.AudioError) as e:
+        audio.say_voice_for(cfg, audio.ZH)
+    assert e.value.reason == "failed" and "lists no voices" in e.value.detail
+    assert audio.speaks_zh(cfg) is True  # no verdict either way: the flag stays optimistic, the request above answered 503 failed
+    monkeypatch.setattr(audio, "SAY_BIN", str(fakes["say"]))
+    monkeypatch.setattr(audio, "VOICES_RETRY_S", 0.0)
+    assert audio.say_voice_for(cfg, audio.ZH) == "Ting-Ting" and audio.speaks_zh(cfg) is True  # nothing was remembered against it
+
+
+def test_speaks_zh_is_optimistic_until_the_chinese_voice_is_resolved_and_never_runs_say(test_env: dict[str, str], fake_say, monkeypatch: pytest.MonkeyPatch):
+    """`ServerFlags.audio_zh` in the 2–3 s after a start, before the warm-up has got to the Chinese voice. A page reads `/me` once and
+    keeps the flag for its session, and the HarmonyOS tablet has no voice of its own: a False in that window was a session without
+    Chinese. So "not resolved yet" reads True — unless the listing this process already holds says there is no voice to resolve —,
+    and whoever then asks for a Chinese clip resolves the voice in that request. The flag itself spawns nothing."""
+    fakes = fake_say(ZH_LISTING, fallback="Tingting")
+    by_listing = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    named = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Tingting")
+    refused = [make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH=name) for name in ("Tingtin", "Samantha", "Eddy (中文（中国大陆）)")]
+
+    def no_child(*args, **kwargs):
+        pytest.fail("speaks_zh ran a child process")
+
+    with monkeypatch.context() as m:
+        m.setattr(audio, "_spawn", no_child)
+        assert all(audio.speaks_zh(cfg) is True for cfg in (by_listing, named, *refused))  # nothing is known yet: nobody is told "no Chinese"
+    assert len(audio.say_voices()) == 9  # the warm-up has read the listing (the English accents come first) — the Chinese choice is still open
+    with monkeypatch.context() as m:
+        m.setattr(audio, "_spawn", no_child)
+        assert audio.speaks_zh(by_listing) is True and audio.speaks_zh(named) is True  # a zh_CN voice to probe, the named one among them
+        assert [audio.speaks_zh(cfg) for cfg in refused] == [False, False, False]  # the listing settles these before any probe: unlisted, English, Eloquence
+    assert zh_probes(fakes) == [] and calls(fakes) == []
+    # resolved: the answer is the choice — a name, or the settled "none" when the candidate does not speak after all
+    assert audio.say_voice_for(named, audio.ZH) == "Tingting" and audio.speaks_zh(named) is True
+    monkeypatch.setattr(audio, "SILENT_AIFF_BYTES", 1 << 20)  # from here on no candidate's probe clip counts as speech
+    with pytest.raises(audio.AudioError, match="no Chinese voice"):
+        audio.say_voice_for(by_listing, audio.ZH)
+    assert audio.speaks_zh(by_listing) is False and audio.speaks_zh(named) is True
+
+
+def test_speaks_zh_reads_the_cached_listing_of_a_mac_without_a_chinese_voice(test_env: dict[str, str], fake_say):
+    fakes = fake_say("Daniel              en_GB    # Hello! My name is Daniel.\nEddy (中文（中国大陆）)     zh_CN    # 你好！我叫Eddy。\nMeijia              zh_TW    # 你好，我叫美佳。\nSamantha            en_US    # Hello! My name is Samantha.\n")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    taiwan = make_settings(test_env, WD_AUDIO_PROVIDER="say", WD_AUDIO_SAY_VOICE_ZH="Meijia")
+    assert audio.speaks_zh(cfg) is True and audio.speaks_zh(taiwan) is True  # before the listing: optimistic
+    assert audio.say_voice_for(cfg, "en-US") == "Samantha"  # the first English request (or the warm-up) reads the listing …
+    assert audio.speaks_zh(cfg) is False  # … and it has no zh_CN voice but an Eloquence one: no need to wait for the Chinese resolution
+    assert audio.speaks_zh(taiwan) is True  # named, 台湾's voice is a candidate
+    assert zh_probes(fakes) == []
+    assert audio.voice_key(cfg) != hashlib.sha256(b"say\n\nSamantha\nDaniel\n").hexdigest()[:8]  # the fingerprint still waits for the resolution itself
+
+
+def test_speaks_zh_never_waits_for_a_listing_in_flight(test_env: dict[str, str], fake_say):
+    """say_voices holds its lock across `say -v '?'` (0.4 s on this Mac, SAY_TIMEOUT_S at worst): `/me` must not queue behind it."""
+    fake_say(ZH_LISTING, fallback="Tingting")
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    answers: list[bool] = []
+    asker = threading.Thread(target=lambda: answers.append(audio.speaks_zh(cfg)), daemon=True)
+    with audio._voices_lock:  # the warm-up thread is inside the listing
+        asker.start()
+        asker.join(timeout=5)
+        assert not asker.is_alive() and answers == [True]
+
+
+def test_warm_up_resolves_the_chinese_voice_after_the_accents_and_without_them(test_env: dict[str, str], fake_say, caplog: pytest.LogCaptureFixture):
+    fakes = fake_say(LISTING)
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    with caplog.at_level(logging.INFO, logger="wd.audio"):
+        audio.warm_up(cfg)
+    assert [(getattr(r, "event", ""), r.getMessage()) for r in caplog.records] == [
+        ("audio_voice", "say voice for en-US: Ava (Premium)"),
+        ("audio_voice", "say voice for en-GB: Stephanie (Premium)"),
+        ("audio_voice_zh", "say voice for zh-CN: Ting-Ting"),
+    ]
+    assert audio.speaks_zh(cfg) is True and zh_probes(fakes) == ["Ting-Ting"]
+    assert audio.lookup(cfg, audio.ZH, "月亮") is None and zh_probes(fakes) == ["Ting-Ting"]  # the request path pays no probe
+    # a Mac with a Chinese voice only: English fails as loudly as before, Chinese is served all the same
+    fake_say("Tingting            zh_CN    # 你好！我叫婷婷。\n", fallback="Tingting")
+    audio.warm_up(cfg)
+    assert audio.speaks_zh(cfg) is True and audio.say_voice_for(cfg, audio.ZH) == "Tingting"
+    with pytest.raises(audio.AudioError) as e:
+        audio.say_voice_for(cfg, "en-US")
+    assert "no English voice" in e.value.detail
+
+
+def test_chinese_clips_are_made_by_the_chinese_voice_under_their_own_key(test_env: dict[str, str], fakes: dict[str, Path]):
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    assert audio.lookup(cfg, audio.ZH, "月亮") is None
+    clip = audio.synthesize(cfg, audio.ZH, "月亮")
+    assert clip.media_type == "audio/mp4" and clip.path.name == hashlib.sha256("say\nTing-Ting\nzh-CN\n月亮".encode()).hexdigest() + ".m4a"
+    assert clip.path.read_bytes().startswith("Ting-Ting:月亮".encode()) and clip.path.stat().st_size >= audio.SILENT_AIFF_BYTES
+    assert stat.S_IMODE(clip.path.stat().st_mode) == 0o600 and calls(fakes) == ["Ting-Ting|月亮"]
+    assert audio.synthesize(cfg, audio.ZH, "月亮") == clip == audio.lookup(cfg, audio.ZH, "月亮") and calls(fakes) == ["Ting-Ting|月亮"]  # a hit spawns nothing
+    assert audio.synthesize(cfg, "en-US", "moon").path.read_bytes().startswith(b"Ava (Premium):moon")  # the accents keep their voices
+    assert [p.name for p in clip.path.parent.iterdir() if p.name.endswith((".tmp", ".aiff"))] == []
+
+
+def test_a_silent_chinese_clip_is_refused_and_never_cached(test_env: dict[str, str], fakes: dict[str, Path]):
+    """The Chinese voice was removed after the probe: `say` substitutes its fallback voice, exits 0 and writes a header-only AIFF —
+    whose AAC passes MIN_CLIP_BYTES. The floor on the AIFF keeps the silence out of the cache."""
+    cfg = make_settings(test_env, WD_AUDIO_PROVIDER="say")
+    assert audio.say_voice_for(cfg, audio.ZH) == "Ting-Ting"
+    fakes["listing"].write_text("".join(line for line in LISTING.splitlines(keepends=True) if not line.startswith("Ting-Ting")), encoding="utf-8")
+    with pytest.raises(audio.AudioError) as e:
+        audio.synthesize(cfg, audio.ZH, "月亮")
+    assert e.value.reason == "failed" and e.value.detail.startswith("silent clip") and "4608 bytes" in e.value.detail and "月亮" not in e.value.detail
+    assert audio.lookup(cfg, audio.ZH, "月亮") is None
+    assert not list(cfg.audio_dir.rglob("*.m4a")) and not list(cfg.audio_dir.rglob("*.tmp")) and not list(cfg.audio_dir.rglob("*.aiff"))
+    # the same header-only file from an English voice given Chinese: without the floor it converts into a "clip" MIN_CLIP_BYTES accepts
+    out = cfg.tmp_dir / "silence.m4a"
+    audio._say("月亮", "Samantha", out)
+    assert out.stat().st_size >= audio.MIN_CLIP_BYTES
+    out.unlink()
+    with pytest.raises(audio.AudioError, match="silent clip"):
+        audio._say("月亮", "Samantha", out, min_aiff=audio.SILENT_AIFF_BYTES)
+    assert not out.exists() and not list(cfg.tmp_dir.glob("*.aiff"))
+    assert audio.synthesize(cfg, "en-US", "a").path.is_file()  # English has no floor: a short word's clip is short
+
+
+def test_chinese_under_the_other_providers_is_missing_or_failed_never_a_key_error(test_env: dict[str, str], tmp_path: Path, fakes: dict[str, Path]):
+    cache = make_settings(test_env, WD_AUDIO_PROVIDER="cache", WD_AUDIO_CACHE_VOICES="en-US=Ava (Premium);en-GB=Stephanie (Premium)")
+    for call in (audio.locate, audio.lookup, audio.synthesize):
+        with pytest.raises(audio.AudioError) as e:
+            call(cache, audio.ZH, "月亮")
+        assert e.value.reason == "missing"  # the mirror holds English clips only: this text's clip is simply not there
+    for cfg in (make_settings(test_env, **bailian_env(tmp_path)), make_settings(test_env, WD_AUDIO_PROVIDER="youdao")):
+        for call in (audio.locate, audio.lookup, audio.synthesize):
+            with pytest.raises(audio.AudioError) as e:
+                call(cfg, audio.ZH, "月亮")
+            assert e.value.reason == "failed" and "no Chinese voice" in e.value.detail
+        assert audio.speaks_zh(cfg) is False
+    off = make_settings(test_env, WD_AUDIO_PROVIDER="off")
+    with pytest.raises(audio.AudioError) as e:
+        audio.locate(off, audio.ZH, "月亮")
+    assert e.value.reason == "off" and audio.speaks_zh(off) is False and audio.speaks_zh(cache) is False
+    assert calls(fakes) == [] and zh_probes(fakes) == []  # nobody asked `say`
+
+
+def test_cli_audio_voices_and_audio_probe_know_the_chinese_voice(test_env: dict[str, str], fake_say, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch):
+    """DEPLOY §9: `wd audio-voices` ends with the Chinese voice (none is not an error) and `wd audio-probe --accent zh-CN` makes one
+    Chinese clip — the check after downloading a voice or setting WD_AUDIO_SAY_VOICE_ZH."""
+    from wd import cli
+
+    fakes = fake_say(ZH_LISTING, fallback="Tingting")
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "say")
+    assert cli.main(["audio-voices"]) == 0
+    out = capsys.readouterr().out
+    assert "en-US → Samantha" in out and "en-GB → Daniel" in out
+    assert out.rstrip().splitlines()[-1] == "zh-CN → Yu-shu (Premium) (the best installed zh_CN voice; WD_AUDIO_SAY_VOICE_ZH overrides)"
+    assert cli.main(["audio-probe", "--accent", "zh-CN"]) == 0
+    assert "audio-probe: provider say, zh-CN → Yu-shu (Premium), 8 chars → " in capsys.readouterr().out and calls(fakes) == ["Yu-shu (Premium)|今晚的月亮很亮。"]
+    assert cli.main(["audio-probe", "--accent", "zh-CN", "你好"]) == 0
+    assert "zh-CN → Yu-shu (Premium), 2 chars → " in capsys.readouterr().out
+    assert cli.main(["audio-probe", "--accent", "zh-CN", "hello"]) == 2
+    err = capsys.readouterr().err
+    assert "text rule refuses" in err and "at least one Chinese character" in err
+    monkeypatch.setenv("WD_AUDIO_SAY_VOICE_ZH", "Tingting")
+    assert cli.main(["audio-voices"]) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1] == "zh-CN → Tingting (WD_AUDIO_SAY_VOICE_ZH)"
+    monkeypatch.setenv("WD_AUDIO_SAY_VOICE_ZH", "Samantha")
+    assert cli.main(["audio-voices"]) == 0  # English resolves: a Mac without a Chinese voice is no failure
+    last = capsys.readouterr().out.rstrip().splitlines()[-1]
+    assert last.startswith("zh-CN → none: WD_AUDIO_SAY_VOICE_ZH='Samantha' is not an installed voice that speaks Chinese") and "磨耳朵" in last
+    assert cli.main(["audio-probe", "--accent", "zh-CN"]) == 1
+    assert "wd audio-probe: say failed — failed: WD_AUDIO_SAY_VOICE_ZH='Samantha'" in capsys.readouterr().err
+    monkeypatch.delenv("WD_AUDIO_SAY_VOICE_ZH")
+    # the other providers have no Chinese clips: the line says so, the probe fails with the reason
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "cache")
+    monkeypatch.setenv("WD_AUDIO_CACHE_VOICES", "en-US=Samantha;en-GB=Daniel")
+    assert cli.main(["audio-voices"]) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith("zh-CN → none: cache has no Chinese clips yet")
+    assert cli.main(["audio-probe", "--accent", "zh-CN"]) == 1
+    assert "cache failed — missing:" in capsys.readouterr().err
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "youdao")
+    assert cli.main(["audio-voices"]) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith("zh-CN → none: youdao has no Chinese clips yet")
+    for key, value in bailian_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    assert cli.main(["audio-voices"]) == 0
+    assert "\nzh-CN → none: bailian has no Chinese clips yet" in capsys.readouterr().out
+    assert cli.main(["audio-probe", "--accent", "zh-CN"]) == 1  # no request leaves the box: there is no Chinese voice to ask for
+    assert "bailian failed — failed: bailian has no Chinese voice" in capsys.readouterr().err
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "off")
+    assert cli.main(["audio-voices"]) == 0
+    assert "zh-CN" not in capsys.readouterr().out

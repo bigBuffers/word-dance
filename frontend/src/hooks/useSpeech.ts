@@ -19,7 +19,7 @@ export type Accent = 'en-US' | 'en-GB';
 export type SpeechRoute = 'native' | 'synth' | 'server';
 
 export const DEFAULT_RATE = 0.92;
-const BETTER_VOICE = /Premium|Enhanced|高级|增强/i; // a downloaded system voice beats the compact one (macOS lists `Ava (Premium)`, `Samantha (Enhanced)`)
+export const BETTER_VOICE = /Premium|Enhanced|高级|增强/i; // a downloaded system voice beats the compact one (macOS lists `Ava (Premium)`, `Samantha (Enhanced)`); audio/utter.ts ranks Chinese voices with it too
 const PREFERRED_VOICE = /Google|Microsoft|Samantha|Daniel/i;
 
 export function speechSupported(): boolean {

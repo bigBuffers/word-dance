@@ -65,3 +65,38 @@ export function ChevronIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+// Transport icons of the listen player (pages/ListenPage): filled shapes, the stroke rounds their corners.
+export function PlayIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M8 5.5v13l10.5-6.5L8 5.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function PauseIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M8.5 5.5v13M15.5 5.5v13" strokeWidth={3.5} />
+    </svg>
+  );
+}
+
+export function PrevIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 6v12" />
+      <path d="M18.5 6.5v11L10 12l8.5-5.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function NextIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M18 6v12" />
+      <path d="M5.5 6.5v11L14 12 5.5 6.5z" fill="currentColor" />
+    </svg>
+  );
+}

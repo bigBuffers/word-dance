@@ -32,4 +32,14 @@ describe('stylesheet contracts', () => {
     expect(settings).toMatch(/\.settings__row input\[type="time"\]\s*\{[^}]*width:\s*auto/);
     expect(settings).toMatch(/\.settings__row input\[type="number"\]\s*\{[^}]*width:\s*7em/);
   });
+
+  it('the listen player sizes its play button with two classes, so the 64 px outrank the 52 px of `.btn--icon.btn--lg`', () => {
+    const listen = sheet('pages/ListenPage.css');
+    // ui.css sizes a large icon button with two classes (specificity 0,2,0); a bare `.listen-bar__play` (0,1,0) would lose
+    expect(sheet('components/ui/ui.css')).toMatch(/\.btn--icon\.btn--lg\s*\{[^}]*width:\s*52px/);
+    expect(listen).toMatch(/\.listen-bar__transport \.listen-bar__play\s*\{[^}]*width:\s*64px[^}]*min-height:\s*64px/);
+    expect(listen).not.toMatch(/(^|[^.\w ])\.listen-bar__play\s*\{/m);
+    // the side columns are equal, so that button sits on the centre line whatever the restart label measures
+    expect(listen).toMatch(/\.listen-bar\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\)/);
+  });
 });

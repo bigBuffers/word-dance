@@ -1,9 +1,10 @@
 // audio/serverAudio (FRONTEND §6.4): the clip URL played straight from one element (synchronously, inside the gesture), the enabled
-// flag, the diagnosis of a clip the element could not play (the API error → a reason the hook maps to copy), and interruption by a
-// later play / stop.
+// flag, the diagnosis of a clip the element could not play (the API error → a reason the hook maps to copy), interruption by a
+// later play / stop, a clip the browser pauses by itself or never starts, and Chinese: `serverAudioSpeaks` per language and the
+// session-level switch-off after a refused Chinese clip.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_EXPIRED_EVENT } from '@/api/client';
-import { ServerAudioError, clipUrl, diagnose, playServerAudio, resetServerAudio, serverAudioEnabled, setServerAudio, stopServerAudio } from './serverAudio';
+import { STALL_MS, ServerAudioError, clipUrl, diagnose, playServerAudio, resetServerAudio, serverAudioEnabled, serverAudioSpeaks, setServerAudio, stopServerAudio } from './serverAudio';
 
 const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>();
 const played: HTMLAudioElement[] = [];
@@ -43,6 +44,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -166,6 +168,73 @@ describe('playServerAudio', () => {
   });
 });
 
+describe('a clip the browser pauses by itself, or never starts', () => {
+  /** jsdom's element is for ever `paused` and never `ended`: the test plays the browser. */
+  function drive(el: HTMLAudioElement) {
+    const flags = { paused: false, ended: false };
+    Object.defineProperty(el, 'paused', { get: () => flags.paused, configurable: true });
+    Object.defineProperty(el, 'ended', { get: () => flags.ended, configurable: true });
+    return flags;
+  }
+
+  it('rejects `paused` when the user agent pauses the element mid-clip (audio focus lost, a call, the headset unplugged)', async () => {
+    const p = playServerAudio('farmer', 'en-US');
+    const el = played[0]!;
+    const flags = drive(el);
+    flags.paused = true;
+    el.dispatchEvent(new Event('pause'));
+    expect(await reason(p)).toBe('paused');
+    expect(fetchMock).not.toHaveBeenCalled(); // the server did nothing wrong: no diagnosis
+  });
+
+  it('is not fooled by the pause event of a natural end, nor by the stale one of its own pause() landing on the next clip', async () => {
+    const first = playServerAudio('first', 'en-US');
+    const el = played[0]!;
+    const flags = drive(el);
+    flags.paused = true;
+    flags.ended = true;
+    el.dispatchEvent(new Event('pause')); // the end of playback: `pause` (ended = true), then `ended`
+    el.dispatchEvent(new Event('ended'));
+    await expect(first).resolves.toBeUndefined();
+
+    flags.ended = false;
+    const second = playServerAudio('second', 'en-US'); // stopServerAudio() paused the element; its event is still queued…
+    flags.paused = false; // …and lands when play() has already started the next clip
+    el.dispatchEvent(new Event('pause'));
+    el.dispatchEvent(new Event('ended'));
+    await expect(second).resolves.toBeUndefined();
+
+    const cut = playServerAudio('third', 'en-US');
+    stopServerAudio();
+    flags.paused = true;
+    el.dispatchEvent(new Event('pause')); // the learner's own stop: settled already, and nobody listens any more
+    await expect(cut).resolves.toBeUndefined();
+  });
+
+  it('gives a clip that has not started playing within the stall time up as network; one that plays is never cut', async () => {
+    vi.useFakeTimers();
+    expect(STALL_MS).toBe(20_000); // the server may hold a request 8 s for a slot, plus the synthesis
+    const hung = reason(playServerAudio('farmer', 'en-US'));
+    let answer: string | null = null;
+    void hung.then((r) => (answer = r));
+    await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+    expect(answer).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await hung).toBe('network');
+    expect(fetchMock).not.toHaveBeenCalled(); // a diagnosis would hang on the same network
+
+    const long = playServerAudio('The farmer grows rice.', 'en-US');
+    played[1]!.dispatchEvent(new Event('playing'));
+    await vi.advanceTimersByTimeAsync(10 * STALL_MS);
+    played[1]!.dispatchEvent(new Event('ended'));
+    await expect(long).resolves.toBeUndefined();
+
+    void playServerAudio('rice', 'en-US');
+    stopServerAudio();
+    expect(vi.getTimerCount()).toBe(0); // a settled clip leaves no watchdog behind
+  });
+});
+
 describe('diagnose', () => {
   it('reads the API error behind the URL', async () => {
     fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'failed' }));
@@ -185,6 +254,72 @@ describe('clipUrl (FRONTEND §6.4)', () => {
     setServerAudio(true, 'k1a2b3c4');
     resetServerAudio();
     expect(clipUrl('farmer', 'en-US')).not.toContain('v=');
+  });
+});
+
+describe('Chinese clips (ServerFlags.audio_zh; docs/LISTEN_MODE_DESIGN.md §6.1)', () => {
+  it('serverAudioSpeaks: English follows the provider flag, Chinese also needs the provider to have a Chinese voice', () => {
+    expect(serverAudioSpeaks('en-US')).toBe(true); // beforeEach: a provider, nothing said about Chinese
+    expect(serverAudioSpeaks('en-GB')).toBe(true);
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+    setServerAudio(true, 'k1', true);
+    expect(serverAudioSpeaks('zh-CN')).toBe(true);
+    setServerAudio(true, 'k1', null); // an older server without the field
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+    setServerAudio(false, '', true); // no provider at all: the flag alone speaks nothing
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+    expect(serverAudioSpeaks('en-US')).toBe(false);
+  });
+
+  it('asks for a Chinese clip with accent=zh-CN, on the same shared element', async () => {
+    setServerAudio(true, 'k1', true);
+    const en = playServerAudio('share', 'en-US', 0.92);
+    const el = played[0]!;
+    el.dispatchEvent(new Event('ended'));
+    await en;
+    const zh = playServerAudio('分享，共用', 'zh-CN', 1);
+    expect(played[1]).toBe(el);
+    expect(el.getAttribute('src')).toBe(`/media/audio?text=${encodeURIComponent('分享，共用')}&accent=zh-CN&v=k1`);
+    expect(clipUrl('你好', 'zh-CN')).toBe(`/media/audio?text=${encodeURIComponent('你好')}&accent=zh-CN&v=k1`);
+    el.dispatchEvent(new Event('ended'));
+    await expect(zh).resolves.toBeUndefined();
+    expect(serverAudioSpeaks('zh-CN')).toBe(true);
+  });
+
+  it('a Chinese clip the server could not make (failed) or would not take (invalid) switches Chinese off for the session — English stays on', async () => {
+    setServerAudio(true, '', true);
+    playImpl = notSupported;
+    fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'failed' })); // no Chinese voice after all
+    expect(await reason(playServerAudio('你好', 'zh-CN'))).toBe('failed');
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+    expect(serverAudioSpeaks('en-US')).toBe(true);
+    setServerAudio(true, '', true); // the next /api/auth/me repeats the flag: the session's verdict stands
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+
+    resetServerAudio();
+    setServerAudio(true, '', true);
+    fetchMock.mockResolvedValueOnce(errorResponse(400, 'validation_error', { fields: { accent: 'x' } })); // an older server knows no zh-CN
+    expect(await diagnose('你好', 'zh-CN')).toBe('invalid');
+    expect(serverAudioSpeaks('zh-CN')).toBe(false);
+    expect(serverAudioEnabled()).toBe(true);
+  });
+
+  it('busy, missing, network and decode leave Chinese on, and an English failure never touches it', async () => {
+    setServerAudio(true, '', true);
+    playImpl = notSupported;
+    fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'busy' }));
+    expect(await reason(playServerAudio('你好', 'zh-CN'))).toBe('busy');
+    fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'missing' }));
+    expect(await reason(playServerAudio('你好', 'zh-CN'))).toBe('missing');
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    expect(await reason(playServerAudio('你好', 'zh-CN'))).toBe('network');
+    fetchMock.mockResolvedValueOnce(audioResponse());
+    expect(await reason(playServerAudio('你好', 'zh-CN'))).toBe('decode');
+    fetchMock.mockResolvedValueOnce(errorResponse(503, 'audio_unavailable', { reason: 'failed' }));
+    expect(await reason(playServerAudio('share', 'en-US'))).toBe('failed');
+    fetchMock.mockResolvedValueOnce(errorResponse(400, 'validation_error', { fields: { text: 'x' } }));
+    expect(await reason(playServerAudio('@@', 'en-GB'))).toBe('invalid');
+    expect(serverAudioSpeaks('zh-CN')).toBe(true);
   });
 });
 

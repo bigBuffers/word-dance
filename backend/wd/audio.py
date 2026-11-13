@@ -2,7 +2,7 @@
 
 The browser speaks with the Web Speech API and the mobile shell with the system TTS, but neither exists everywhere: Android's
 WebView has no ``speechSynthesis``, the Android compatibility container of HarmonyOS NEXT (the family's Huawei tablet) has no TTS
-engine the plugin can reach, and many domestic ROMs have no English voice. ``GET /media/audio?text=…&accent=en-US|en-GB``
+engine the plugin can reach, and many domestic ROMs have no English voice. ``GET /media/audio?text=…&accent=en-US|en-GB|zh-CN``
 (``routers/audio.py``) therefore serves a short clip synthesised **once** on the server and cached under
 ``$WD_DATA_DIR/audio/<2hex>/<sha256>.m4a|.mp3`` — the key is provider + voice + accent + text, so deleting the directory only
 costs a re-synthesis. The cache is bounded by ``WD_AUDIO_CACHE_MB`` (least recently played clips go first; a served clip is touched).
@@ -15,6 +15,15 @@ Providers (``WD_AUDIO_PROVIDER``, DEPLOY §4):
   (:func:`choose_voice`: Premium > Enhanced > compact). ``say`` exits 0 for a voice name it cannot resolve and silently
   substitutes a fixed fallback voice, so every candidate is **probed** once per process (:func:`say_resolves`) before it is used
   and cached — a misspelt override is a 503 ``failed`` with the reason in the log, never clips in another voice.
+  **Chinese** (``accent=zh-CN``, :data:`ZH` — the gloss and the translated sentence 磨耳朵 reads out, API.md 123; the HarmonyOS
+  tablet has no voice of its own, so the server must speak them) is `say` only so far and keeps to itself: its own text rule
+  (:data:`ZH_TEXT_RE`, at least one Han character), its own voice (``WD_AUDIO_SAY_VOICE_ZH`` — a listed Chinese voice, no
+  Eloquence one — or :func:`choose_zh_voice`, never an English voice and never the other way round) and its own probe — an English voice given Chinese exits 0 and writes a
+  header-only AIFF of silence, and on a zh-CN Mac the fallback voice of the comparison above *is* the Chinese voice, so a
+  candidate counts when its AIFF for :data:`ZH_PROBE_TEXT` reaches :data:`SILENT_AIFF_BYTES` (:func:`say_speaks_zh`); the same
+  floor guards every Chinese synthesis, so silence is never cached. A Mac without a Chinese voice is a settled "none":
+  ``ServerFlags.audio_zh`` (:func:`speaks_zh`) is false, the requests answer 503 ``failed``, English is untouched. Until the
+  voice is resolved — the seconds of the warm-up — the flag is optimistic: a page keeps it for its whole session.
 * ``youdao`` — ``https://dict.youdao.com/dictvoice?audio=<text>&type=2|1`` (US / UK), the unofficial endpoint Chinese dictionary
   apps have used for years; opt-in because its terms are not published and every uncached text is sent to it. mp3.
 * ``bailian`` — 阿里云百炼 CosyVoice / Qwen-Audio TTS over its synchronous HTTP API (slice server-audio-2): ``POST`` the text to
@@ -39,7 +48,7 @@ is ``AudioError('busy')``, a provider error ``AudioError('failed')``.
 Two things keep the first tap fast: :func:`warm_up_async` (startup) resolves the voices — the listing and the probes, 1–3 s —
 before anyone asks, and ``wd audio-prewarm`` (:func:`register_cli`) synthesises the clips of the study path (headwords with
 content or in a bank and their example sentences, in learning order) ahead of time — anything else is made at the tap; ``wd audio-voices`` shows what ``say`` lists, what resolves
-and what each accent gets; ``wd audio-probe`` synthesises one clip through the provider in force (the day-0 check of a 百炼 key).
+and what each accent — and Chinese — gets; ``wd audio-probe`` synthesises one clip through the provider in force (the day-0 check of a 百炼 key).
 Another process adding or removing clips (that CLI next to the live service) is harmless: a clip
 appears atomically under its content-addressed name, and the running total behind the cap is re-counted from disk every
 :data:`SCAN_INTERVAL_S` when a clip is added.
@@ -74,12 +83,26 @@ from .config import ConfigError, Settings, ensure_dirs
 log = logging.getLogger("wd.audio")
 
 ACCENTS: tuple[str, ...] = ("en-US", "en-GB")
+ZH = "zh-CN"  # the one language next to the English accents: the Chinese gloss and the translated sentence 磨耳朵 reads out (API.md 123)
+# every value `accent` takes on endpoint 76. ACCENTS stays "the English accents": user_settings.accent, the prewarm commands,
+# WD_AUDIO_CACHE_VOICES and WD_BAILIAN_TTS_VOICES know those two only — Chinese is spoken by `say` alone so far
+LANGS: tuple[str, ...] = (*ACCENTS, ZH)
 MAX_TEXT_CHARS = 300  # above the 240 chars an example sentence may have (ai/content.py EXAMPLE_EN_MAX)
 # one word, a phrase or an example sentence: Latin letters (the accented ones of café / naïve included), digits, spaces and the
 # punctuation an English sentence carries — straight and typographic quotes, hyphen / en dash / em dash, ellipsis, $ % & @ /.
 # Nothing else reaches a provider. The text never becomes an argument (stdin for `say`, an encoded query parameter for youdao);
 # refusing a leading hyphen is defence in depth only.
 TEXT_RE = re.compile(r"^(?!-)[A-Za-zÀ-ɏ0-9 '’‘“”\"\-–—….,;:!?()/&%$@]+$")
+# a Chinese gloss or the translation of an example sentence (`accent=zh-CN`): Han characters (the ranges of ai/common.CJK_RE), the
+# full-width punctuation of a Chinese sentence — ， 。 ！ ？ ； ： 、 （ ） 《 》 「 」 『 』 【 】 ～ · —, six symbols of a quantity — ℃ ° ％ ￥ ¥ 〇:
+# the Chinese voice reads each as the word it stands for (measured with Tingting: 「30℃」 is byte for byte 「30摄氏度」, 「￥20」 is
+# 「20元」, 「二〇〇八年」 is 「二零零八年」) and a translation carrying one would otherwise be dropped whole, while `+` `=` `~` are not read
+# that way (「A+」 comes out as 「A」) and stay refused — and everything TEXT_RE lets through (a translation carries `Tom`, `GDP`,
+# digits; … — “ ” ‘ ’ are in that class already), with at least one Han character (HAN_RE; 〇 is none): a text
+# without any belongs to an English voice. The compatibility ideographs are spelled as escapes on purpose: a tool that NFC-normalises
+# this file turns the literal U+F900 into U+8C48 and the range into one that swallows Hangul (test_audio.py pins both rules)
+ZH_TEXT_RE = re.compile(r"^(?!-)[㐀-䶿一-鿿\uf900-\ufaff，。！？；：、（）《》「」『』【】～·℃°％￥¥〇A-Za-zÀ-ɏ0-9 '’‘“”\"\-–—….,;:!?()/&%$@]+$")
+HAN_RE = re.compile(r"[㐀-䶿一-鿿\uf900-\ufaff]")
 
 SAY_BIN = "/usr/bin/say"
 AFCONVERT_BIN = "/usr/bin/afconvert"
@@ -118,6 +141,10 @@ WARM_UP_JOIN_S = 10.0  # how long shutdown / a test teardown waits for the warm-
 YOUDAO_PAUSE_S = 0.5  # between two bulk requests to the unofficial endpoint (wd audio-prewarm)
 PROBE_TEXT = "hello"
 UNKNOWN_VOICE = "wd-no-such-voice-7f3a"  # what `say` falls back to for this name is what it falls back to for any unknown name
+ZH_PROBE_TEXT = "你好，世界"  # what a candidate Chinese voice is asked to speak (say_speaks_zh)
+# measured on macOS 26: an English voice given Chinese text exits 0 and writes a 4608-byte AIFF of silence (Ava (Premium) on 「月亮」),
+# Tingting writes 62 KB for ZH_PROBE_TEXT, and the shortest real clips are 17–19 KB (「好」, "a") — anything under this is no speech
+SILENT_AIFF_BYTES = 8192
 
 # `say` voices by base name in order of preference per accent. Of one base name the best installed tier wins — "(Premium)" over
 # "(Enhanced)" over the compact voice (the tier label may be localised on some systems — "(高级)" / "(增强)" —; this zh-CN macOS 26
@@ -129,6 +156,14 @@ PREFERRED_VOICES: dict[str, tuple[str, ...]] = {
     "en-GB": ("Serena", "Kate", "Stephanie", "Jamie", "Oliver", "Daniel"),
 }
 VOICE_LANG = {"en-US": "en_US", "en-GB": "en_GB"}
+# Chinese (`accent=zh-CN`) has its own rule (choose_zh_voice) and never shares a voice with an English accent in either direction:
+# of the zh_CN voices `say` lists the best tier wins, then this order, then the name. Tingting is the compact voice macOS ships with
+# — and, on a zh-CN system, the voice `say` substitutes for a name it does not know, which is why Chinese has its own probe
+# (say_speaks_zh). The Eloquence voices exist in zh_CN too ("Eddy (中文（中国大陆）)", a qualified name that would outrank the compact
+# Tingting by tier) and are never chosen here either.
+ZH_VOICE_LANG = "zh_CN"
+PREFERRED_ZH_VOICES: tuple[str, ...] = ("Lili", "Lilian", "Yu-shu", "Shanshan", "Tingting", "Ting-Ting")
+ELOQUENCE_VOICES = frozenset({"Eddy", "Flo", "Reed", "Rocko", "Sandy", "Shelley", "Grandma", "Grandpa"})
 MEDIA = {"say": ("m4a", "audio/mp4"), "youdao": ("mp3", "audio/mpeg"), "bailian": ("mp3", "audio/mpeg"), "cache": ("m4a", "audio/mp4")}  # cache mirrors say clips
 CLIP_SUFFIXES = (".m4a", ".mp3")
 MB = 1024 * 1024
@@ -169,12 +204,16 @@ class Voice:
         return 2 if _PREMIUM_RE.search(self.name[len(self.base) :]) else 1
 
 
-def normalize_text(text: str) -> str | None:
-    """Whitespace-collapsed ``text`` when the providers may speak it, else None."""
+def normalize_text(text: str, lang: str = "en-US") -> str | None:
+    """Whitespace-collapsed ``text`` when the providers may speak it, else None. ``lang`` picks the rule: :data:`TEXT_RE` for the
+    English accents (the default — every caller that speaks English passes nothing), :data:`ZH_TEXT_RE` plus at least one Han
+    character for :data:`ZH`."""
     spoken = " ".join(text.split())
-    if not spoken or len(spoken) > MAX_TEXT_CHARS or not TEXT_RE.match(spoken):
+    if not spoken or len(spoken) > MAX_TEXT_CHARS:
         return None
-    return spoken
+    if lang == ZH:
+        return spoken if ZH_TEXT_RE.match(spoken) and HAN_RE.search(spoken) else None
+    return spoken if TEXT_RE.match(spoken) else None
 
 
 def provider_for(cfg: Settings) -> str:
@@ -213,6 +252,19 @@ def choose_voice(voices: list[Voice], accent: str, resolves=lambda name: True) -
     return None
 
 
+def choose_zh_voice(voices: list[Voice], speaks=lambda name: True) -> str | None:
+    """The ``say -v`` name for Chinese (:data:`ZH`): of the installed zh_CN voices the best tier first (Premium > Enhanced >
+    compact), inside a tier the order of :data:`PREFERRED_ZH_VOICES`, then the name — never an Eloquence voice, skipping names
+    ``speaks`` rejects (the probe of :func:`say_speaks_zh`); else None. There is no fallback across languages: an English voice
+    given Chinese writes silence, and a Chinese voice reading English is not what an accent setting asked for."""
+    rank = {base: i for i, base in enumerate(PREFERRED_ZH_VOICES)}
+    candidates = (v for v in voices if v.lang == ZH_VOICE_LANG and v.base not in ELOQUENCE_VOICES)
+    for v in sorted(candidates, key=lambda v: (-v.tier, rank.get(v.base, len(rank)), v.name)):
+        if speaks(v.name):
+            return v.name
+    return None
+
+
 _voices_lock = threading.Lock()
 _voices_cache: list[Voice] | None = None
 _voices_failed_at = 0.0
@@ -235,18 +287,18 @@ def say_voices() -> list[Voice]:
 
 
 _probe_lock = threading.Lock()
-_probes: dict[str, bytes | None] = {}  # voice name → the AIFF `say -v <name>` produced for PROBE_TEXT (None: say failed)
+_probes: dict[tuple[str, str], bytes | None] = {}  # (voice name, probe text) → the AIFF `say -v <name>` produced for it (None: say failed)
 _choice_lock = threading.Lock()
-_choices: dict[str, str] = {}  # "<override>\n<accent>" → the resolved voice name
+_choices: dict[str, str] = {}  # "<override>\n<accent>" → the resolved voice name; for ZH "" = resolved: no Chinese voice
 
 
-def _probe(cfg: Settings, name: str) -> bytes | None:
+def _probe(cfg: Settings, name: str, text: str = PROBE_TEXT) -> bytes | None:
     with _probe_lock:
-        if name in _probes:
-            return _probes[name]
+        if (name, text) in _probes:
+            return _probes[(name, text)]
     out = cfg.tmp_dir / f"audio-probe-{os.getpid()}-{threading.get_ident()}.aiff"
     try:
-        _run([SAY_BIN, "-v", name, "-o", str(out)], stdin_text=PROBE_TEXT)
+        _run([SAY_BIN, "-v", name, "-o", str(out)], stdin_text=text)
         data = out.read_bytes() if out.is_file() else None
     except AudioError as e:
         log.warning("say -v %r probe failed: %s", name, e.detail, extra={"event": "audio_voice_probe_failed"})
@@ -254,7 +306,7 @@ def _probe(cfg: Settings, name: str) -> bytes | None:
     finally:
         out.unlink(missing_ok=True)
     with _probe_lock:
-        _probes[name] = data
+        _probes[(name, text)] = data
     return data
 
 
@@ -269,10 +321,75 @@ def say_resolves(cfg: Settings, name: str) -> bool:
     return unknown is None or mine != unknown
 
 
+def say_speaks_zh(cfg: Settings, name: str) -> bool:
+    """Whether ``say -v name`` speaks Chinese: its AIFF for :data:`ZH_PROBE_TEXT` is a real clip (≥ :data:`SILENT_AIFF_BYTES`), not
+    the header-only file an English voice writes for Chinese text while exiting 0. Deliberately not the comparison of
+    :func:`say_resolves`: on a zh-CN system the voice `say` substitutes for an unknown name IS the Chinese voice (Tingting on
+    this Mac), so the wanted voice and the bogus name produce the same bytes and that test would call it unresolved. Probed once
+    per process and voice."""
+    data = _probe(cfg, name, ZH_PROBE_TEXT)
+    return data is not None and len(data) >= SILENT_AIFF_BYTES
+
+
+def _no_zh_voice(cfg: Settings) -> AudioError:
+    if cfg.audio_say_voice_zh:
+        return AudioError(
+            "failed",
+            f"WD_AUDIO_SAY_VOICE_ZH={cfg.audio_say_voice_zh!r} is not an installed voice that speaks Chinese (compare `say -v '?'`: a zh_… row, and no Eloquence voice — `say` does not resolve those)",
+        )
+    return AudioError(
+        "failed",
+        "say has no Chinese voice (zh_CN); download one in System Settings → Accessibility → Spoken Content (then restart the service) or set WD_AUDIO_SAY_VOICE_ZH",
+    )
+
+
+def _zh_override(cfg: Settings, voices: list[Voice]) -> Voice | None:
+    """The row `say` lists for ``WD_AUDIO_SAY_VOICE_ZH`` when it can be the Chinese voice: a ``zh_…`` voice (台湾's Meijia and 香港's
+    Sinji read the text too) that is no Eloquence one — else None. The size probe cannot make this call (measured on macOS 26):
+    `say` does not resolve the zh_CN Eloquence rows (``Eddy (中文（中国大陆）)`` …) and speaks them with its fallback voice — Tingting
+    on a zh-CN Mac: real clips, under another voice's name and key —, and the classic en_US voices (Fred, Albert, Kathy) write
+    8–11 s of noise for Chinese text where the newer ones write silence."""
+    row = next((v for v in voices if v.name == cfg.audio_say_voice_zh), None)
+    return row if row is not None and row.lang.startswith("zh") and row.base not in ELOQUENCE_VOICES else None
+
+
+def _say_zh_voice(cfg: Settings) -> str:
+    """:func:`say_voice_for` for :data:`ZH`: ``WD_AUDIO_SAY_VOICE_ZH`` when `say` lists that name as a Chinese voice other than an
+    Eloquence one (:func:`_zh_override`) and it speaks Chinese (the listing stands in for the unknown-name comparison, which
+    cannot tell a typo from the fallback voice here — and for the size probe where that one is fooled), else
+    :func:`choose_zh_voice`. Having none is a **resolved** answer — the empty choice is remembered, so :func:`voice_key` settles,
+    :func:`speaks_zh` reads false and no request probes again — and every call raises the same ``AudioError('failed')`` naming the
+    remedy. Only a listing that could not be read is no answer yet (retried like the English one)."""
+    key = f"{cfg.audio_say_voice_zh}\n{ZH}"
+    with _choice_lock:
+        hit = _choices.get(key)
+    if hit is None:
+        voices = say_voices()
+        if not voices:
+            raise AudioError("failed", "say lists no voices (`say -v '?'` failed or printed nothing — the reason is in the log)")
+        if cfg.audio_say_voice_zh:
+            row = _zh_override(cfg, voices)
+            chosen = row.name if row is not None and say_speaks_zh(cfg, row.name) else ""
+        else:
+            chosen = choose_zh_voice(voices, speaks=lambda name: say_speaks_zh(cfg, name)) or ""
+        with _choice_lock:
+            first = key not in _choices  # else a concurrent first call resolved (and logged) it meanwhile
+            hit = _choices.setdefault(key, chosen)
+        if first and hit:
+            log.info("say voice for %s: %s", ZH, hit, extra={"event": "audio_voice_zh"})
+    if not hit:
+        raise _no_zh_voice(cfg)
+    return hit
+
+
 def say_voice_for(cfg: Settings, accent: str) -> str:
     """The ``say -v`` name used for ``accent``, resolved once per process (and per override): ``WD_AUDIO_SAY_VOICE`` when
     ``say`` resolves it, else the best installed preferred voice. ``AudioError('failed')`` names the problem otherwise — an
-    override ``say`` does not know must not become a cache full of clips in another voice."""
+    override ``say`` does not know must not become a cache full of clips in another voice. :data:`ZH` goes its own way
+    (:func:`_say_zh_voice`: ``WD_AUDIO_SAY_VOICE_ZH``, the zh_CN voices, the size probe) — ``WD_AUDIO_SAY_VOICE`` is an English
+    voice and never speaks Chinese."""
+    if accent == ZH:
+        return _say_zh_voice(cfg)
     key = f"{cfg.audio_say_voice}\n{accent}"
     with _choice_lock:
         hit = _choices.get(key)
@@ -332,7 +449,9 @@ def _sweep_probes(cfg: Settings) -> None:
 
 def warm_up(cfg: Settings) -> None:
     """Resolves the `say` voice of every accent now — the listing and the probes, 1–3 s — so no learner's first tap pays for it.
-    A failure is logged once (event ``audio_voice_failed``); the requests report it again. No-op for the other providers."""
+    A failure is logged once (event ``audio_voice_failed``); the requests report it again. Then the Chinese voice (:data:`ZH`),
+    whatever became of the English ones: a Mac without one is a supported state — one INFO line (event ``audio_voice_zh_missing``),
+    ``ServerFlags.audio_zh`` reads false from then on and 磨耳朵 reads the English only. No-op for the other providers."""
     if provider_for(cfg) != "say":
         return
     _sweep_probes(cfg)
@@ -341,10 +460,16 @@ def warm_up(cfg: Settings) -> None:
             say_voice_for(cfg, accent)
         except AudioError as e:
             log.warning("no say voice for %s: %s", accent, e.detail, extra={"event": "audio_voice_failed"})
-            return  # choose_voice falls back across accents: one accent without a voice means both
+            break  # choose_voice falls back across accents: one accent without a voice means both
         except Exception:  # noqa: BLE001 — a daemon thread reports through the log, never through threading.excepthook
             log.exception("audio warm-up failed for %s", accent, extra={"event": "audio_voice_failed"})
             return
+    try:
+        say_voice_for(cfg, ZH)
+    except AudioError as e:
+        log.info("no say voice for %s: %s", ZH, e.detail, extra={"event": "audio_voice_zh_missing"})
+    except Exception:  # noqa: BLE001 — as above
+        log.exception("audio warm-up failed for %s", ZH, extra={"event": "audio_voice_zh_missing"})
 
 
 _warm_up_lock = threading.Lock()
@@ -375,7 +500,8 @@ def join_warm_up(timeout: float = WARM_UP_JOIN_S) -> None:
 
 def voice_key(cfg: Settings) -> str:
     """A short fingerprint of what makes the clips — the provider, ``WD_AUDIO_SAY_VOICE`` and the voice of each accent as resolved so
-    far (``bailian``: the model and the two configured voices) — for ``ServerFlags.audio_key`` (API.md §9): the client appends it to
+    far, then the Chinese voice (its name; empty once it is settled that there is none) (``bailian``: the model and the two configured
+    voices) — for ``ServerFlags.audio_key`` (API.md §9): the client appends it to
     every clip URL, so a switched provider, model or voice is a new URL and no browser keeps playing last week's voice from its HTTP
     cache. Empty without a provider. Never blocks: a voice not resolved yet reads as a placeholder unique to this process (never the
     key of an earlier run) and the next ``/me`` after the warm-up settles it."""
@@ -387,6 +513,7 @@ def voice_key(cfg: Settings) -> str:
         parts.append(cfg.audio_say_voice)
         with _choice_lock:
             parts.extend(_choices.get(f"{cfg.audio_say_voice}\n{accent}", _UNRESOLVED) for accent in ACCENTS)
+            parts.append(_choices.get(f"{cfg.audio_say_voice_zh}\n{ZH}", _UNRESOLVED))
     elif provider == "cache":
         voices = cfg.audio_cache_voice_map
         parts.extend(voices.get(accent, "?") for accent in ACCENTS)
@@ -397,15 +524,43 @@ def voice_key(cfg: Settings) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:8]
 
 
+def speaks_zh(cfg: Settings) -> bool:
+    """``ServerFlags.audio_zh`` (API.md §9): endpoint 76 answers ``accent=zh-CN`` — the provider is `say` and its Chinese voice is
+    resolved to a name, or **not resolved yet**: the 2–3 s of the warm-up after a start. A page reads ``/me`` once and keeps the
+    flag for its session, and the HarmonyOS tablet has no voice of its own, so a False in that window was a session without
+    Chinese; the optimistic answer costs a Mac without a Chinese voice one 503 ``failed`` — the request resolves the voice itself,
+    as an English one does (:func:`locate`), and the client then stops asking. Only what this process already knows makes it
+    False: the settled "none", or a cached listing with no voice to resolve — no zh_CN voice but Eloquence ones, or an override
+    that is not a listed Chinese voice (:func:`_zh_override`). Never blocks and never runs `say`: the listing is read as it stands,
+    without the lock :func:`say_voices` holds across ``say -v '?'``. The other providers have no Chinese clips yet
+    (docs/LISTEN_MODE_DESIGN.md §8)."""
+    if provider_for(cfg) != "say":
+        return False
+    with _choice_lock:
+        hit = _choices.get(f"{cfg.audio_say_voice_zh}\n{ZH}")
+    if hit is not None:
+        return bool(hit)
+    voices = _voices_cache  # one read of the reference (the list is replaced, never changed in place) — not say_voices(): that waits for a listing in flight
+    if voices is None:
+        return True
+    return (_zh_override(cfg, voices) if cfg.audio_say_voice_zh else choose_zh_voice(voices)) is not None
+
+
 # ------------------------------------------------------------------------------------------------- cache
 def locate(cfg: Settings, accent: str, text: str) -> tuple[Clip, str, str]:
     """``(clip, provider, voice)`` for a normalised ``text``: where the clip lives (it may not exist yet) and what makes it.
 
-    Raises ``AudioError('off')`` without a provider and ``AudioError('failed')`` when ``say`` has no usable English voice.
+    Raises ``AudioError('off')`` without a provider and ``AudioError('failed')`` when ``say`` has no usable English voice — or,
+    for :data:`ZH`, no Chinese one. Chinese under another provider is ``missing`` (``cache``: the mirror holds English clips only)
+    or ``failed`` (``bailian`` / ``youdao``: no Chinese voice is configured there), never a lookup in a two-accent voice map.
     """
     provider = provider_for(cfg)
     if provider == "off":
         raise AudioError("off")
+    if accent == ZH and provider != "say":
+        if provider == "cache":
+            raise AudioError("missing", "the read-only cache mirrors English clips only — no Chinese clip exists for any text yet")
+        raise AudioError("failed", f"{provider} has no Chinese voice — only `say` speaks {ZH} so far")
     if provider == "cache":  # the clips another host made with `say`: the same key, that host's voices
         key_provider, voice = "say", cfg.audio_cache_voice_map[accent]
     elif provider == "bailian":  # the voice is part of the key: a new voice is new clips, the old ones age out under the cap
@@ -455,7 +610,7 @@ def synthesize(cfg: Settings, accent: str, text: str) -> Clip:
         tmp = clip.path.with_name(f"{clip.path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
         try:
             if provider == "say":
-                _say(text, voice, tmp)
+                _say(text, voice, tmp, min_aiff=SILENT_AIFF_BYTES if accent == ZH else 0)
             elif provider == "youdao":
                 _youdao(cfg, text, accent, tmp)
             elif provider == "bailian":
@@ -613,11 +768,20 @@ def _output(argv: list[str]) -> str:
     return _communicate(_spawn(argv, stdout=subprocess.PIPE), argv, None).decode("utf-8", "replace")
 
 
-def _say(text: str, voice: str, out: Path) -> None:
-    """``say`` → AIFF (the only format it writes without re-encoding surprises) → ``afconvert`` → AAC in an m4a."""
+def _say(text: str, voice: str, out: Path, *, min_aiff: int = 0) -> None:
+    """``say`` → AIFF (the only format it writes without re-encoding surprises) → ``afconvert`` → AAC in an m4a.
+
+    An AIFF under ``min_aiff`` bytes (the Chinese clips pass :data:`SILENT_AIFF_BYTES`) is ``AudioError('failed', 'silent clip …')``
+    before anything is converted: `say` exits 0 with a header-only file when its voice cannot speak the text's language — a Chinese
+    voice removed since the probe is replaced by the system's fallback voice —, and the AAC of that passes ``MIN_CLIP_BYTES`` and
+    would be cached, and kept by browsers for a week, as a clip of silence."""
     aiff = out.with_name(out.name + ".aiff")
     try:
         _run([SAY_BIN, "-v", voice, "-o", str(aiff)], stdin_text=text)
+        if min_aiff:
+            size = aiff.stat().st_size if aiff.is_file() else 0
+            if size < min_aiff:
+                raise AudioError("failed", f"silent clip: say -v {voice!r} wrote {size} bytes of AIFF for a {len(text)}-char text (a spoken clip has at least {min_aiff})")
         _run([AFCONVERT_BIN, "-f", "m4af", "-d", "aac", "-b", AAC_BITRATE, str(aiff), str(out)])
     finally:
         aiff.unlink(missing_ok=True)
@@ -1007,9 +1171,15 @@ def _cli_logging() -> None:
     log.setLevel(logging.INFO)
 
 
+def _no_zh_line(provider: str) -> str:
+    """The Chinese line of ``wd audio-voices`` under a provider other than `say`."""
+    return f"{ZH} → none: {provider} has no Chinese clips yet — only `say` speaks Chinese (ServerFlags.audio_zh is false; 磨耳朵 reads Chinese with the device's own voice)"
+
+
 def cmd_audio_voices(args: argparse.Namespace) -> int:
     """``wd audio-voices`` — the provider in force, the installed `say` voices of the preference lists (tier, whether `say`
-    resolves them) and the voice each accent gets; exit 1 when an accent gets none, 2 on a configuration error."""
+    resolves them), the voice each accent gets and, last, the Chinese voice (``zh-CN``, what 磨耳朵 reads glosses and translations
+    with — none is a supported state, not an error); exit 1 when an English accent gets none, 2 on a configuration error."""
     _cli_logging()
     try:
         cfg = Settings.from_env()
@@ -1023,11 +1193,13 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
         print(f"provider: cache (WD_AUDIO_PROVIDER={cfg.audio_provider}) — a read-only mirror of the `say` clips another host synthesised: {len(clips)} clip(s), {sum(size for _m, size, _p in clips) / MB:.1f} MB (WD_AUDIO_CACHE_MB is not enforced here: the host that synthesises bounds it)")
         for accent in ACCENTS:
             print(f"{accent} → {cfg.audio_cache_voice_map.get(accent, '?')} (WD_AUDIO_CACHE_VOICES)")
+        print(_no_zh_line(provider))
         return 0
     if provider == "bailian":
         print(f"provider: bailian (WD_AUDIO_PROVIDER=bailian, model {cfg.bailian_tts_model}, region {cfg.bailian_region}); cache: {cache_bytes(cfg) / MB:.1f} MB of {cfg.audio_cache_mb} MB")
         for accent in ACCENTS:
             print(f"{accent} → {cfg.bailian_voice_map.get(accent, '?')} (WD_BAILIAN_TTS_VOICES)")
+        print(_no_zh_line(provider))
         print("no `say` voices to list: bailian synthesises in the cloud with the voices above (`wd audio-probe` makes one clip with them)")
         return 0
     print(
@@ -1036,6 +1208,8 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
     )
     if provider != "say":
         print("no `say` voices to list: " + ("WD_AUDIO_PROVIDER resolves to off (say needs a Mac)" if provider == "off" else f"{provider} has one fixed voice per accent"))
+        if provider != "off":
+            print(_no_zh_line(provider))
         return 0
     voices = say_voices()
     if not voices:
@@ -1050,7 +1224,7 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
                 verdict = "resolves"
             else:
                 with _probe_lock:
-                    probed = _probes.get(v.name)
+                    probed = _probes.get((v.name, PROBE_TEXT))
                 verdict = "probe failed — say exited non-zero (logged above)" if probed is None else "NOT resolved — say substitutes its fallback voice for this name"
             print(f"  {v.name:<26} {TIER_NAMES[v.tier]:<9} {verdict}")
     rc = 0
@@ -1060,6 +1234,10 @@ def cmd_audio_voices(args: argparse.Namespace) -> int:
         except AudioError as e:
             print(f"{accent} → none: {e.detail}")
             rc = 1
+    try:  # the Chinese voice: its own override, its own probe (say_speaks_zh) — and none is not a failure
+        print(f"{ZH} → {say_voice_for(cfg, ZH)}" + (" (WD_AUDIO_SAY_VOICE_ZH)" if cfg.audio_say_voice_zh else " (the best installed zh_CN voice; WD_AUDIO_SAY_VOICE_ZH overrides)"))
+    except AudioError as e:
+        print(f"{ZH} → none: {e.detail} — 磨耳朵 then reads the English only (ServerFlags.audio_zh is false)")
     return rc
 
 
@@ -1222,11 +1400,13 @@ def cmd_audio_texts(args: argparse.Namespace) -> int:
 
 
 PROBE_DEFAULT_TEXT = "The cat sat on the mat."  # what `wd audio-probe` speaks when no TEXT is given
+PROBE_DEFAULT_TEXT_ZH = "今晚的月亮很亮。"  # … with --accent zh-CN
 
 
 def cmd_audio_probe(args: argparse.Namespace) -> int:
-    """``wd audio-probe [--accent en-US|en-GB] [TEXT]`` — synthesise ONE clip through the provider in force (any provider) and print the
-    provider, the voice, the bytes, the media type and the path: the day-0 check of a 百炼 key, workspace and voice, like `wd sms-probe`.
+    """``wd audio-probe [--accent en-US|en-GB|zh-CN] [TEXT]`` — synthesise ONE clip through the provider in force (any provider) and print the
+    provider, the voice, the bytes, the media type and the path: the day-0 check of a 百炼 key, workspace and voice, like `wd sms-probe`
+    — and, with ``--accent zh-CN``, of the Chinese voice 磨耳朵 uses (`say` only: the other providers answer `failed` / `missing`).
     A clip already cached is served from the cache and says so (pass another TEXT to reach the provider). Exit 0 made, 1 on
     ``AudioError`` (its kind and message — `busy` = 429 / 5xx, retry in a minute), 2 on a configuration error, a text the rule refuses
     or a provider that resolves to `off`."""
@@ -1242,9 +1422,10 @@ def cmd_audio_probe(args: argparse.Namespace) -> int:
         print("wd audio-probe: WD_AUDIO_PROVIDER resolves to off — nothing can synthesise (say on a Mac, bailian or youdao, in .env)", file=sys.stderr)
         return 2
     accent = args.accent or "en-US"
-    spoken = normalize_text(args.text or PROBE_DEFAULT_TEXT)
+    spoken = normalize_text(args.text or (PROBE_DEFAULT_TEXT_ZH if accent == ZH else PROBE_DEFAULT_TEXT), accent)
     if spoken is None:
-        print(f"wd audio-probe: the text rule refuses that text (1–{MAX_TEXT_CHARS} Latin letters, digits, spaces and the punctuation of an English sentence)", file=sys.stderr)
+        rule = "characters with at least one Chinese character, Chinese punctuation and what an English sentence may carry" if accent == ZH else "Latin letters, digits, spaces and the punctuation of an English sentence"
+        print(f"wd audio-probe: the text rule refuses that text (1–{MAX_TEXT_CHARS} {rule})", file=sys.stderr)
         return 2
     started = time.monotonic()
     try:
@@ -1273,8 +1454,8 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("audio-voices", help="the pronunciation provider in force, the installed `say` voices of the preference lists (tier, resolution) and the voice each accent gets")
     p.set_defaults(func=cmd_audio_voices)
     p = sub.add_parser("audio-probe", help="synthesise ONE clip through the configured provider and print provider, voice, bytes, media type and path — the day-0 check of a 百炼 key (exit 1 with the kind and message on failure)")
-    p.add_argument("--accent", choices=list(ACCENTS), default="en-US", metavar="ACCENT", help="en-US (default) or en-GB")
-    p.add_argument("text", nargs="?", default=None, metavar="TEXT", help=f"the text to speak (default: {PROBE_DEFAULT_TEXT!r})")
+    p.add_argument("--accent", choices=list(LANGS), default="en-US", metavar="ACCENT", help="en-US (default), en-GB or zh-CN (the Chinese voice 磨耳朵 reads glosses and translations with)")
+    p.add_argument("text", nargs="?", default=None, metavar="TEXT", help=f"the text to speak (default: {PROBE_DEFAULT_TEXT!r}; with --accent zh-CN {PROBE_DEFAULT_TEXT_ZH!r})")
     p.set_defaults(func=cmd_audio_probe)
     p = sub.add_parser("audio-prewarm", help="synthesise the clips of the study path — headwords with content or in a bank and their example sentences, in learning order (--stage adds a stage's headwords); anything else is made at the tap — so those taps never wait; safe next to the live service")
     p.add_argument("--accent", action="append", choices=list(ACCENTS), metavar="ACCENT", help="en-US or en-GB (repeatable); default: en-US plus every accent a learner chose")
@@ -1295,11 +1476,14 @@ __all__ = [
     "ACCENTS",
     "AudioError",
     "Clip",
+    "LANGS",
     "MAX_TEXT_CHARS",
     "PREFERRED_VOICES",
+    "PREFERRED_ZH_VOICES",
     "PrewarmReport",
     "PrewarmSet",
     "SCAN_INTERVAL_S",
+    "ZH",
     "join_warm_up",
     "voice_key",
     "Voice",
@@ -1307,6 +1491,7 @@ __all__ = [
     "bailian_price_line",
     "cache_bytes",
     "choose_voice",
+    "choose_zh_voice",
     "cmd_audio_prewarm",
     "cmd_audio_probe",
     "cmd_audio_texts",
@@ -1326,8 +1511,10 @@ __all__ = [
     "reset_cache_accounting",
     "reset_voice_cache",
     "say_resolves",
+    "say_speaks_zh",
     "say_voice_for",
     "say_voices",
+    "speaks_zh",
     "synthesize",
     "texts_from_file",
     "warm_up",

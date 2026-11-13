@@ -235,6 +235,7 @@ describe('speechFailureCopy', () => {
     expect(speechFailureCopy(new ServerAudioError('off'))).toBe(zh.word.voiceMissing);
     expect(speechFailureCopy(new ServerAudioError('missing'))).toBe(zh.word.voiceClipMissing);
     expect(speechFailureCopy(new ServerAudioError('blocked'))).toBeNull();
+    expect(speechFailureCopy(new ServerAudioError('paused'))).toBeNull(); // the browser paused the clip by itself: nothing the learner can do about it
     expect(speechFailureCopy(new ServerAudioError('auth'))).toBeNull();
     expect(speechFailureCopy(new ServerAudioError('interrupted'))).toBeNull();
     expect(speechFailureCopy(new Error('This language is not supported.'))).toBe(zh.word.voiceMissing);

@@ -1,0 +1,366 @@
+/* ListenPage (磨耳朵) — a 100dvh player like the study session: head, options, the stage in the middle, the transport bar
+   sticky at the bottom (FRONTEND §5.9, §6.2). Tokens only; dark mode comes with them. */
+.listen {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100dvh - var(--safe-top));
+  padding-bottom: 0;
+}
+
+.listen__head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap);
+}
+
+.listen__exit {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.listen__exit:hover {
+  color: var(--brand-ink);
+  text-decoration: none;
+}
+
+.listen__title {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.listen__progress {
+  justify-self: end;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.listen__meter {
+  flex: none;
+  height: 6px;
+  margin-bottom: var(--space-3);
+  border-radius: 3px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.listen__meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand);
+  transition: width var(--dur) var(--ease);
+}
+
+.listen__skeleton {
+  margin: var(--space-4) 0;
+}
+
+/* ---------- mode + options ---------- */
+.listen__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.listen__switches {
+  display: flex;
+  gap: var(--space-5);
+}
+
+.listen__switches .switch {
+  flex: 1 1 0;
+}
+
+.listen__picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+.listen__pick {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  min-width: 0;
+}
+
+.listen__pick-label {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.listen__note {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-s);
+  background: var(--hard-soft);
+  color: var(--hard-ink);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* ---------- stage ---------- */
+.listen__stage {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--space-5) 0;
+  text-align: center;
+}
+
+/* the line being read: one soft brand band, the same in both themes */
+.listen__line {
+  margin: 0;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-s);
+  overflow-wrap: anywhere;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.listen__line.is-active {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+}
+
+.listen__word {
+  font-family: var(--font-word);
+  font-size: clamp(2rem, 10vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.listen__phonetic {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-word);
+  letter-spacing: 0.01em;
+}
+
+.listen__meaning {
+  font-size: var(--text-lg);
+}
+
+.listen__sentence {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  margin-top: var(--space-3);
+}
+
+.listen__en {
+  font-size: var(--text-lg);
+}
+
+.listen__zh {
+  color: var(--muted); /* `.listen__line.is-active` outranks it while the translation is read */
+}
+
+/* 听写: the position, one dot per reading, the hint — never the word */
+.listen__index {
+  margin: 0;
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.listen__rounds {
+  display: flex;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.listen__round {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--line);
+  transition: background var(--dur) var(--ease);
+}
+
+.listen__round.is-done {
+  background: var(--brand);
+}
+
+.listen__hint {
+  margin: 0;
+}
+
+.listen__tap {
+  margin-top: var(--space-4);
+}
+
+.listen__stage .listen__note {
+  margin-top: var(--space-3);
+}
+
+/* ---------- transport bar: fixed to the bottom of the page (safe-area aware), like the grade bar ---------- */
+.listen-bar {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); /* equal side columns: the play button stays on the centre line */
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) 0 calc(var(--space-3) + var(--safe-bottom) + var(--tabbar-h));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.listen-bar__restart {
+  justify-self: start;
+}
+
+.listen-bar__transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.listen-bar__transport svg {
+  width: 24px;
+  height: 24px;
+}
+
+/* the one primary control, a size up (two classes: `.btn--icon.btn--lg` sets 52 px) */
+.listen-bar__transport .listen-bar__play {
+  width: 64px;
+  min-height: 64px;
+}
+
+.listen-bar__transport .listen-bar__play svg {
+  width: 28px;
+  height: 28px;
+}
+
+/* ---------- finished: 听完了 / 对答案 ---------- */
+.listen__finished,
+.listen__answers {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--space-5) 0 calc(var(--space-5) + var(--safe-bottom));
+}
+
+.listen__finished {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.listen__finished-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+.listen__answers-title {
+  margin: 0;
+}
+
+/* the two headings take the focus the transport bar dropped when the chain ends (announced, Tab goes on from there): they are
+   not controls, so no ring — which a script-moved focus would otherwise show on a device nobody has touched */
+.listen__finished-title:focus-visible,
+.listen__answers-title:focus-visible {
+  box-shadow: none;
+}
+
+.listen__answer-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.listen__answer {
+  display: grid;
+  grid-template-columns: 2em minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.listen__answer-no {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the word and, for one that was never read, its tag (`.badge`, word.css — loaded with the SpeakButton) */
+.listen__answer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.listen__answer-word {
+  font-family: var(--font-word);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.listen__answer-meaning {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.listen__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 479.98px) {
+  .listen__actions .btn {
+    flex: 1 1 100%;
+  }
+
+  /* phones: the restart label gives up its padding so it fits the side column next to three 52 / 64 px buttons */
+  .listen-bar__restart {
+    padding-inline: 0;
+  }
+
+  .listen-bar__transport {
+    gap: var(--space-3);
+  }
+}
+
+@media (max-width: 359.98px) {
+  .listen-bar,
+  .listen-bar__transport {
+    gap: var(--space-1);
+  }
+}

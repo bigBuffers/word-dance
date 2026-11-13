@@ -1,4 +1,4 @@
-// Shell: TopNav + TabBar with the counters badge and the today dot (FRONTEND 2/4), bare on /study; slice 1-B: the SwitchBar while
+// Shell: TopNav + TabBar with the counters badge and the today dot (FRONTEND 2/4), bare on /study and /listen; slice 1-B: the SwitchBar while
 // `session.guardian` is set (switch back → GateDialog → endpoint 105 → applyAuth → /children) and no password note for a child.
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -34,7 +34,7 @@ const me = (over: Partial<MeResponse['user']> = {}, counters = { suggestions_ope
     email_verified: false,
     updated_at: ISO,
   },
-  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false },
+  server: { version: '0.1.0', registration_mode: 'invite', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', audio_zh: false, sms_enabled: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false },
   counters,
   session,
 });
@@ -88,6 +88,7 @@ function renderShell(path: string) {
           <Route element={<AppLayout />}>
             <Route path="/today" element={<div>today-page</div>} />
             <Route path="/study" element={<div>study-page</div>} />
+            <Route path="/listen" element={<div>listen-page</div>} />
             <Route path="/admin" element={<div>admin-page</div>} />
             <Route path="/children" element={<div>children-page</div>} />
           </Route>
@@ -136,6 +137,17 @@ describe('AppLayout', () => {
     expect(await screen.findByText('study-page')).toBeTruthy();
     expect(document.querySelector('nav')).toBeNull();
     expect(document.querySelector('.app-shell--bare')).not.toBeNull();
+  });
+
+  it('hides the shell on /listen too: the player owns the viewport, no nav, no banners, no tab-bar offset', async () => {
+    mockFetch({ '/api/auth/me': () => json(200, me({ has_password: false }, undefined, { guardian: { id: 9, display_name: 'Parent' }, gate_until: null })), '/api/today': () => json(200, today(3, 10)) });
+    renderShell('/listen');
+    expect(await screen.findByText('listen-page')).toBeTruthy();
+    expect(document.querySelector('nav')).toBeNull();
+    expect(document.querySelector('.app-shell--bare')).not.toBeNull();
+    expect(screen.queryByText(zh.auth.passwordBanner)).toBeNull();
+    expect(screen.queryByText(zh.children.switchBack)).toBeNull();
+    expect(document.documentElement.style.getPropertyValue('--tabbar-h')).toBe('');
   });
 
   it('asks a learner without a password to set one (dismissible), never an admin or an account with a password', async () => {

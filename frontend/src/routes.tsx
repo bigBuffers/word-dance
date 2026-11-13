@@ -1,9 +1,10 @@
 // Route table (FRONTEND.md §2) — FROZEN CONTRACT (TASKS P0 step 8). Pages are lazy (per-route code
 // splitting); the guards come from auth/AuthContext. `RequireOnboarded` wraps ONLY `/`, `/today`,
-// `/study`, `/history` and `/history/:batchId`; vocab / bank / screen / word detail / settings are
+// `/study`, `/listen`, `/history` and `/history/:batchId`; vocab / bank / screen / word detail / settings are
 // browsable before onboarding (DESIGN §6.2). `<AppLayout/>` (components/layout, WP7) is the shell of every authenticated page.
 // Slice 1-B: `/children` (the guardian's children page, under the shell, no onboarding guard — the page itself sends non-guardians to
 // /settings) and the guest page `/child-login` (a child's device signs in with the 8-digit code of endpoint 99 → 107).
+// Listen mode: `/listen` (the audio-first player of today's words, endpoint 123) — onboarded like `/study` and bare like it (no shell).
 import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { RequireAdmin, RequireAuth, RequireGuest, RequireNotOnboarded, RequireOnboarded } from '@/auth/AuthContext';
@@ -16,6 +17,7 @@ const ForgotPasswordPage = lazy(() => import('@/pages/ForgotPasswordPage'));
 const WelcomePage = lazy(() => import('@/pages/WelcomePage'));
 const TodayPage = lazy(() => import('@/pages/TodayPage'));
 const StudyPage = lazy(() => import('@/pages/StudyPage'));
+const ListenPage = lazy(() => import('@/pages/ListenPage'));
 const ScreenPage = lazy(() => import('@/pages/ScreenPage'));
 const ScreenRunPage = lazy(() => import('@/pages/ScreenRunPage'));
 const VocabPage = lazy(() => import('@/pages/VocabPage'));
@@ -42,6 +44,7 @@ export const routePaths = {
   today: '/today',
   study: '/study',
   studyBatch: (batchId: number) => `/study?batch=${batchId}`,
+  listen: '/listen',
   screen: '/screen',
   screenRun: (stage: string) => `/screen/${encodeURIComponent(stage)}`,
   vocab: '/vocab',
@@ -97,6 +100,7 @@ export function AppRoutes() {
               <Route path="/" element={<Navigate to="/today" replace />} />
               <Route path="/today" element={<TodayPage />} />
               <Route path="/study" element={<StudyPage />} />
+              <Route path="/listen" element={<ListenPage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/history/:batchId" element={<BatchPage />} />
             </Route>

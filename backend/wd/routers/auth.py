@@ -117,6 +117,7 @@ def server_flags(
         "needs_setup": users == 0,
         "audio": cfg.audio_provider_effective != "off",  # GET /media/audio serves clips (API.md 76)
         "audio_key": audio.voice_key(cfg),  # provider + voice fingerprint: a switched voice is a new clip URL for the browser cache
+        "audio_zh": audio.speaks_zh(cfg),  # endpoint 76 takes accent=zh-CN: `say` with a Chinese voice — optimistic until the warm-up has settled it, never blocking (磨耳朵, endpoint 123)
         "sms_enabled": bool(cfg.sms_configured or sms_sender is not None),  # phone verification codes can be sent (endpoints 80, 85)
         # third-party sign-in (slice 2-A): the login page's 「其他方式登录」 row and the settings 绑定 rows
         "wechat_enabled": bool(cfg.wechat_configured or cfg.auth_fake_providers or wechat is not None),  # endpoints 112–116

@@ -82,7 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadMe = useCallback(async (): Promise<boolean> => {
     try {
       const me = await endpoints.getMe();
-      setServerAudio(me.server.audio, me.server.audio_key); // the module-level speak() (auto-pronounce, key P) reads the flag without the context
+      setServerAudio(me.server.audio, me.server.audio_key, me.server.audio_zh); // the module-level speak() (auto-pronounce, key P) and the listen page's utter() read the flags without the context
       setState((s) => ({ ...s, user: me.user, settings: me.settings, server: me.server, counters: me.counters, session: me.session ?? null }));
       return true;
     } catch (e) {
@@ -212,7 +212,7 @@ export function RequireAuth() {
   return <Outlet />;
 }
 
-/** `onboarding_state === 'done'` only (applied to `/`, `/today`, `/study`, `/history`, `/history/:batchId`). */
+/** `onboarding_state === 'done'` only (applied to `/`, `/today`, `/study`, `/listen`, `/history`, `/history/:batchId`). */
 export function RequireOnboarded() {
   const { user } = useAuth();
   const location = useLocation();

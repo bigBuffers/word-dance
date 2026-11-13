@@ -25,7 +25,7 @@ const settings: Settings = {
   show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
-const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
+const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', audio_zh: false, sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
 const word = (id: number, lemma: string): WordBrief => ({
   id, lemma, display: lemma, kind: 'word', phonetic: null, translation_short: `zh-${lemma}`, stages: ['xs'], stage_min: 1, cet6_star: false, frq: null, collins: null, oxford: null, difficulty: null,
   is_public: true, is_valid_english: true, my_state: null, content_state: 'ready', image_state: 'none',

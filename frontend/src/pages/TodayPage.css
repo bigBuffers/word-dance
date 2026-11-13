@@ -166,6 +166,11 @@
   margin-top: var(--space-2);
 }
 
+/* 磨耳朵, the second way through today's words: paired with the CTA above it (half the column gap) */
+.today__listen {
+  margin-top: calc(-1 * var(--space-2));
+}
+
 .today__done {
   text-align: center;
   display: flex;

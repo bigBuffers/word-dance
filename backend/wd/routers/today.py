@@ -1,8 +1,9 @@
-"""Today routes (WP4): ``/api/today*`` (API.md 43–47). All are ``O`` endpoints (409 ``onboarding_required`` before onboarding).
+"""Today routes (WP4): ``/api/today*`` (API.md 43–47, 123). All are ``O`` endpoints (409 ``onboarding_required`` before onboarding).
 
 ``GET /api/today`` never builds; ``POST /api/today/build`` is idempotent (``UNIQUE(user_id, local_date)``); grades go
 through ``services.batches.grade_item`` (final vs intermediate grades, DESIGN §7); ``/more`` answers 409
-``batch_not_ready`` only when no batch exists yet for the user's current local date.
+``batch_not_ready`` only when no batch exists yet for the user's current local date. ``GET /api/today/playlist`` (123, 磨耳朵) is
+today's words as ``services.listen`` prepares them for a voice — read-only like ``GET /api/today``, it never builds either.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from ..clock import Clock, local_date
 from ..config import Settings
 from ..deps import get_clock, get_db, get_settings, require_onboarded
 from ..errors import ApiError
-from ..services import bank, batches
+from ..services import bank, batches, listen
 
 router = APIRouter()
 
@@ -30,6 +31,16 @@ def today(
     cfg: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     return batches.today_response(conn, int(me["id"]), clock.now_utc(), cfg=cfg)
+
+
+@router.get("/api/today/playlist", response_model=schemas.ListenPlaylist)
+def playlist(
+    me: dict[str, Any] = Depends(require_onboarded),
+    conn: sqlite3.Connection = Depends(get_db),
+    clock: Clock = Depends(get_clock),
+    cfg: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    return listen.playlist(conn, int(me["id"]), clock.now_utc(), cfg=cfg)
 
 
 @router.post("/api/today/build", response_model=schemas.TodayResponse)

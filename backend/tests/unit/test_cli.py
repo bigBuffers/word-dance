@@ -238,6 +238,8 @@ def test_audio_commands_are_owned_and_registered_by_the_audio_module(settings):
     assert probe.func is audio.cmd_audio_probe and (probe.accent, probe.text) == ("en-GB", "Hello there")
     bare = parser.parse_args(["audio-probe"])
     assert (bare.accent, bare.text) == ("en-US", None)
+    chinese = parser.parse_args(["audio-probe", "--accent", "zh-CN", "你好"])  # the Chinese voice of 磨耳朵 (API.md 76 / 123)
+    assert (chinese.accent, chinese.text) == ("zh-CN", "你好")
     sub = parser._subparsers._group_actions[0].choices["audio-probe"]  # type: ignore[union-attr]
     assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--accent"}
     with pytest.raises(SystemExit) as e:
@@ -255,7 +257,7 @@ def test_audio_commands_are_owned_and_registered_by_the_audio_module(settings):
     assert texts.func is audio.cmd_audio_texts and (texts.stage, texts.db) == (["xs"], "y.db")
     sub = parser._subparsers._group_actions[0].choices["audio-texts"]  # type: ignore[union-attr]
     assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--stage", "--db"}
-    for bad in (["--accent", "fr-FR"], ["--stage", "k12"], ["--limit", "-1"]):  # usage errors
+    for bad in (["--accent", "fr-FR"], ["--accent", "zh-CN"], ["--stage", "k12"], ["--limit", "-1"]):  # usage errors (Chinese clips are not prewarmed: docs/LISTEN_MODE_DESIGN.md §8)
         with pytest.raises(SystemExit) as e:
             parser.parse_args(["audio-prewarm", *bad])
         assert e.value.code == 2

@@ -1,6 +1,8 @@
 """GET /media/audio (API.md 76): session required, provider off → 503 {reason:off}, validation, a say clip served and cached with
 its headers (ranges included — the client plays the URL in an <audio> element), the per-user miss limit, provider failures and an
-unresolvable WD_AUDIO_SAY_VOICE → 503 {reason:failed}, and the log that never carries the learner's text."""
+unresolvable WD_AUDIO_SAY_VOICE → 503 {reason:failed}, and the log that never carries the learner's text; `accent=zh-CN` (磨耳朵):
+a Chinese clip by the Chinese voice, its own text rule, 503 failed / missing without a Chinese voice, and `ServerFlags.audio_zh`
+(optimistic until the voice is resolved)."""
 
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ def say_client(test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, reques
 
 def calls(fakes: dict[str, Path]) -> list[str]:
     lines = fakes["calls"].read_text(encoding="utf-8").splitlines() if fakes["calls"].exists() else []
-    return [c for c in lines if not c.endswith("|" + audio.PROBE_TEXT)]
+    return [c for c in lines if not c.endswith(("|" + audio.PROBE_TEXT, "|" + audio.ZH_PROBE_TEXT))]
 
 
 def test_requires_a_session(client: TestClient):
@@ -53,8 +55,9 @@ def test_validation_comes_before_the_provider(say_client: TestClient, login, fak
     login("alice")
     r = say_client.get("/media/audio", params={"text": "farmer", "accent": "fr-FR"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error" and "accent" in r.json()["error"]["details"]["fields"]
-    r = say_client.get("/media/audio", params={"text": "你好"})
-    assert r.status_code == 400 and "text" in r.json()["error"]["details"]["fields"]
+    r = say_client.get("/media/audio", params={"text": "你好"})  # under an English accent (the default): Chinese belongs to accent=zh-CN
+    assert r.status_code == 400 and r.json()["error"]["details"]["fields"] == {"text": "1–300 个英文字母、数字或常见标点"}
+    assert say_client.get("/media/audio", params={"text": "你好", "accent": "en-GB"}).status_code == 400
     assert say_client.get("/media/audio", params={"text": "-ish"}).status_code == 400
     assert say_client.get("/media/audio", params={"text": "a" * 301}).status_code == 400  # the text rule
     assert say_client.get("/media/audio", params={"text": "a" * 401}).status_code == 400  # the query bound
@@ -139,7 +142,7 @@ def test_me_carries_the_voice_fingerprint(say_client: TestClient, login, fakes):
     assert r.status_code == 200
     audio.say_voice_for(Settings.from_env(), "en-GB")
     after = say_client.get("/api/auth/me").json()["server"]["audio_key"]  # both voices resolved: the settled key (§9.1: the first /me after a start may differ)
-    assert after == hashlib.sha256(b"say\n\nSamantha\nDaniel").hexdigest()[:8] == audio.voice_key(Settings.from_env())  # this module's LISTING
+    assert after == hashlib.sha256(b"say\n\nSamantha\nDaniel\n").hexdigest()[:8] == audio.voice_key(Settings.from_env())  # this module's LISTING: no Chinese voice — a settled empty name
     assert say_client.get("/api/auth/me").json()["server"]["audio_key"] == after
 
 
@@ -177,3 +180,117 @@ def test_a_read_only_cache_serves_mirrored_clips_and_answers_missing_for_the_res
     assert len(events) == 2 and all(r.levelno == logging.INFO and "zebra" not in r.getMessage() for r in events)
     assert not [r for r in caplog.records if getattr(r, "event", "") == "audio_unavailable"]
     assert len(calls(fakes)) == 1  # the server synthesised nothing
+
+
+# ------------------------------------------------------------- Chinese clips (accent zh-CN: 磨耳朵, API.md 76 / 123)
+ZH_LISTING = LISTING + "Tingting            zh_CN    # 你好！我叫婷婷。\n"
+
+
+@pytest.fixture
+def zh_fakes(fake_say) -> dict[str, Path]:
+    """A Mac with a Chinese voice — Tingting, which on a zh-CN system is also what `say` substitutes for an unknown name."""
+    return fake_say(ZH_LISTING, fallback="Tingting")
+
+
+@pytest.fixture
+def zh_client(test_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, zh_fakes: dict[str, Path]) -> TestClient:
+    monkeypatch.setenv("WD_AUDIO_PROVIDER", "say")
+    return request.getfixturevalue("client")
+
+
+def test_a_chinese_clip_is_made_once_by_the_chinese_voice(zh_client: TestClient, login, zh_fakes):
+    login("alice")
+    audio.join_warm_up()  # the startup warm-up resolves the Chinese voice after the two accents
+    server = zh_client.get("/api/auth/me").json()["server"]
+    assert server["audio"] is True and server["audio_zh"] is True
+    assert server["audio_key"] == hashlib.sha256(b"say\n\nSamantha\nDaniel\nTingting").hexdigest()[:8]  # the Chinese voice is part of the fingerprint
+    r = zh_client.get("/media/audio", params={"text": "  分享，共用 ", "accent": "zh-CN", "v": server["audio_key"]})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "audio/mp4" and r.headers["cache-control"] == "private, max-age=604800" and r.headers["accept-ranges"] == "bytes"
+    assert r.content.startswith("Tingting:分享，共用".encode()) and len(r.content) >= audio.SILENT_AIFF_BYTES
+    assert calls(zh_fakes) == ["Tingting|分享，共用"]
+    again = zh_client.get("/media/audio", params={"text": "分享，共用", "accent": "zh-CN"})
+    assert again.status_code == 200 and again.content == r.content and calls(zh_fakes) == ["Tingting|分享，共用"]  # a hit: no second spawn
+    sentence = zh_client.get("/media/audio", params={"text": "Tom 说：“今晚的月亮很亮。”", "accent": "zh-CN"})  # a translation carries names and typographic quotes
+    assert sentence.status_code == 200 and sentence.content.startswith("Tingting:Tom 说：".encode())
+    # the accents keep their voices and their rule
+    assert zh_client.get("/media/audio", params={"text": "share"}).content.startswith(b"Samantha:share")
+    assert zh_client.get("/media/audio", params={"text": "分享，共用", "accent": "en-GB"}).status_code == 400
+
+
+def test_chinese_text_follows_its_own_rule(zh_client: TestClient, login, zh_fakes):
+    login("alice")
+    for text in ("share", "GDP 5%", "，。", "-好", "好" * 301, "你好<b>", "日本語です"):
+        r = zh_client.get("/media/audio", params={"text": text, "accent": "zh-CN"})
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", text
+        assert r.json()["error"]["details"]["fields"] == {"text": "1–300 个字符，需含汉字"}, text
+    r = zh_client.get("/media/audio", params={"text": "月亮", "accent": "zh-TW"})
+    assert r.status_code == 400 and r.json()["error"]["details"]["fields"] == {"accent": "只支持 en-US、en-GB 或 zh-CN"}
+    assert calls(zh_fakes) == []
+
+
+def test_chinese_misses_count_against_the_same_budget(zh_client: TestClient, login, zh_fakes, monkeypatch: pytest.MonkeyPatch):
+    login("alice")
+    monkeypatch.setattr(audio_router, "SYNTH_PER_MINUTE", 2)
+    assert zh_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN"}).status_code == 200
+    assert zh_client.get("/media/audio", params={"text": "moon"}).status_code == 200
+    r = zh_client.get("/media/audio", params={"text": "太阳", "accent": "zh-CN"})
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    assert zh_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN"}).status_code == 200  # hits stay free
+    assert calls(zh_fakes) == ["Tingting|月亮", "Samantha|moon"]
+
+
+def test_without_a_chinese_voice_chinese_is_503_failed_and_spends_no_budget(say_client: TestClient, login, fakes, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """This module's LISTING: a Mac with English voices only — a supported state, the client is told by `audio_zh`."""
+    login("alice")
+    audio.join_warm_up()
+    server = say_client.get("/api/auth/me").json()["server"]
+    assert server["audio"] is True and server["audio_zh"] is False
+    monkeypatch.setattr(audio_router, "SYNTH_PER_MINUTE", 1)
+    with caplog.at_level(logging.WARNING, logger="wd.routers.audio"):
+        for _ in range(3):
+            r = say_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN"})
+            assert r.status_code == 503 and r.json()["error"]["details"] == {"reason": "failed"}
+    warnings = [rec.getMessage() for rec in caplog.records if getattr(rec, "event", "") == "audio_unavailable"]
+    assert len(warnings) == 3 and all("no Chinese voice" in w and "2-char zh-CN text" in w and "月亮" not in w for w in warnings)
+    assert say_client.get("/media/audio", params={"text": "farmer"}).status_code == 200  # the minute's one miss was not spent on the refusals
+    assert calls(fakes) == ["Samantha|farmer"]
+    assert say_client.get("/api/auth/me").json()["server"]["audio_key"] == server["audio_key"]  # settled: the refusals change nothing
+
+
+def test_audio_zh_is_optimistic_before_the_chinese_voice_is_resolved(zh_client: TestClient, login, zh_fakes):
+    """The 2–3 s after a restart: a page that loads now keeps its `/me` for the session, and on the tablet (no voice of its own) a
+    false flag was a session without Chinese. Unresolved reads true; the first Chinese clip resolves the voice in its own request,
+    exactly as the first English one does."""
+    login("alice")
+    audio.reset_voice_cache()  # joins the startup warm-up and forgets what it found: the process as it is before the warm-up got anywhere
+    asked = zh_fakes["calls"].read_text(encoding="utf-8")  # that warm-up's probes
+    server = zh_client.get("/api/auth/me").json()["server"]
+    assert server["audio"] is True and server["audio_zh"] is True
+    assert zh_fakes["calls"].read_text(encoding="utf-8") == asked  # the flag asked `say` nothing — no probe, no clip
+    r = zh_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN", "v": server["audio_key"]})
+    assert r.status_code == 200 and r.content.startswith("Tingting:月亮".encode()) and calls(zh_fakes) == ["Tingting|月亮"]
+    assert zh_client.get("/api/auth/me").json()["server"]["audio_zh"] is True
+
+
+def test_an_optimistic_audio_zh_without_a_chinese_voice_is_one_503_failed_and_then_false(say_client: TestClient, login, fakes):
+    """This module's LISTING (English voices only) in the same window: the flag cannot know yet, the clip request finds out — 503
+    `failed`, which the client takes as "no Chinese from the server this session" (FRONTEND §6.4) — and the next `/me` is settled."""
+    login("alice")
+    audio.reset_voice_cache()
+    assert say_client.get("/api/auth/me").json()["server"]["audio_zh"] is True
+    r = say_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN"})
+    assert r.status_code == 503 and r.json()["error"]["details"] == {"reason": "failed"}
+    assert say_client.get("/api/auth/me").json()["server"]["audio_zh"] is False
+    assert calls(fakes) == []
+
+
+def test_a_read_only_cache_has_no_chinese_clips(cache_client: TestClient, login, fakes, caplog: pytest.LogCaptureFixture):
+    login("alice")
+    assert cache_client.get("/api/auth/me").json()["server"]["audio_zh"] is False
+    with caplog.at_level(logging.INFO, logger="wd.routers.audio"):
+        r = cache_client.get("/media/audio", params={"text": "月亮", "accent": "zh-CN"})
+    assert r.status_code == 503 and r.json()["error"]["details"] == {"reason": "missing"}  # the client speaks this one itself, like any unsynced text
+    assert [getattr(rec, "event", "") for rec in caplog.records if rec.name == "wd.routers.audio"] == ["audio_clip_missing"]
+    assert cache_client.get("/media/audio", params={"text": "farmer", "accent": "zh-CN"}).status_code == 400  # the text rule still comes first
+    assert calls(fakes) == []

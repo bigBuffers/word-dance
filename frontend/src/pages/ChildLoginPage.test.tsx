@@ -33,7 +33,7 @@ function installFetch(loginStatus = 200) {
       calls.push({ method, path, body });
       if (method === 'GET' && path === '/api/auth/me') {
         if (!signedIn) return json(401, { error: { code: 'unauthorized', message: '' } });
-        return json(200, { user: child, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
+        return json(200, { user: child, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', audio_zh: false, sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
       }
       if (method === 'GET' && path === '/api/health') return json(200, { status: 'ok', version: '0.1.0', registration_mode: 'verified', needs_setup: false, sms_enabled: true, email_enabled: false, captcha: false, wechat_enabled: false, qq_enabled: false, apple_enabled: false, time: ISO });
       if (method === 'POST' && path === '/api/auth/child-login') {

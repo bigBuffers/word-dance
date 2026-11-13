@@ -265,9 +265,16 @@ def third_party_state(cfg: Settings, configured: bool) -> str:
 def audio_lines(cfg: Settings) -> tuple[list[str], bool]:
     """The pronunciation provider in force (``WD_AUDIO_PROVIDER`` with ``auto`` resolved, API.md 76) and, for ``bailian``, the model,
     the region, both voices and whether the API key FILE is readable (``ok`` / ``missing`` — never the key itself); a missing key file
-    under ``bailian`` is a failure (every tap would answer 503 ``failed``)."""
+    under ``bailian`` is a failure (every tap would answer 503 ``failed``). One more line says where the Chinese clips of 磨耳朵
+    (``accent=zh-CN``, API.md 123) come from: ``say`` — by configuration only, this check spawns nothing; ``wd audio-voices`` probes
+    the voice — or nowhere yet under the other providers. Never a failure: without a Chinese voice 磨耳朵 reads the English only."""
     provider = cfg.audio_provider_effective
     lines = [f"audio: {provider} (WD_AUDIO_PROVIDER={cfg.audio_provider})"]
+    if provider == "say":
+        voice = f"WD_AUDIO_SAY_VOICE_ZH={cfg.audio_say_voice_zh}" if cfg.audio_say_voice_zh else "the best installed zh_CN voice (WD_AUDIO_SAY_VOICE_ZH unset)"
+        lines.append(f"audio zh-CN: say, {voice} — `wd audio-voices` shows whether it speaks; none = 磨耳朵 reads the English only")
+    elif provider != "off":
+        lines.append(f"audio zh-CN: none — {provider} has no Chinese clips yet (only say speaks Chinese; 磨耳朵 uses the device's own Chinese voice)")
     if provider != "bailian":
         return lines, True
     path = Path(cfg.bailian_api_key_file).expanduser() if cfg.bailian_api_key_file else None

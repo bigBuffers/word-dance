@@ -10,7 +10,9 @@ Validation rules:
 * ``WD_AUDIO_PROVIDER`` is ``auto`` / ``say`` / ``youdao`` / ``bailian`` / ``cache`` / ``off`` (wd/audio.py; ``auto`` becomes ``say`` on a
   host with ``/usr/bin/say`` and ``off`` elsewhere — ``Settings.audio_provider_effective``; ``bailian`` is never chosen by ``auto``);
   ``cache`` serves the ``say`` clips another host synthesised and needs ``WD_AUDIO_CACHE_VOICES`` naming both accents' voices
-  (``en-US=Ava (Premium);en-GB=Serena (Premium)``); ``WD_AUDIO_CACHE_MB`` bounds the clip cache; ``bailian`` (阿里云百炼 CosyVoice /
+  (``en-US=Ava (Premium);en-GB=Serena (Premium)``); ``WD_AUDIO_CACHE_MB`` bounds the clip cache; ``WD_AUDIO_SAY_VOICE`` names the
+  ``say`` voice of the two English accents and ``WD_AUDIO_SAY_VOICE_ZH`` the one of the Chinese clips (``accent=zh-CN``, 磨耳朵 — API.md
+  76 / 123) — both free text that ``say`` itself is asked about at run time, neither ever speaking the other language; ``bailian`` (阿里云百炼 CosyVoice /
   Qwen-Audio TTS over its synchronous HTTP API, slice server-audio-2) refuses to start without ``WD_BAILIAN_API_KEY_FILE`` (the
   ``WD_ALIYUN_ACCESS_KEY_SECRET_FILE`` rule: an existing readable regular file, group/other-readable warns, the first line is read at
   call time) and ``WD_BAILIAN_WORKSPACE_ID`` (the 业务空间 id the endpoint host is built from), ``WD_BAILIAN_REGION`` is ``cn-beijing``
@@ -243,6 +245,7 @@ class Settings:
     # --- pronunciation audio (wd/audio.py, API.md 76) ----------------------------------
     audio_provider: str = "auto"  # auto | say | youdao | bailian | cache | off — server-side clips for clients without an English voice
     audio_say_voice: str = ""  # macOS `say -v` voice for both accents; empty = the best installed one of audio.PREFERRED_VOICES
+    audio_say_voice_zh: str = ""  # macOS `say -v` voice for the Chinese clips (accent zh-CN, 磨耳朵); empty = the best installed zh_CN voice (audio.choose_zh_voice)
     audio_cache_voices: str = ""  # provider cache: "en-US=Ava (Premium);en-GB=Serena (Premium)" — the voices the mirrored say clips were made with
     audio_cache_mb: int = 256  # cap of the clip cache under audio/; the least recently played clips are removed beyond it
     # --- pronunciation: 百炼 cloud TTS (provider bailian, slice server-audio-2; dark until WD_AUDIO_PROVIDER=bailian) -----------
@@ -847,6 +850,7 @@ class Settings:
             pexels_key=pexels_key,
             audio_provider=audio_provider,
             audio_say_voice=text("WD_AUDIO_SAY_VOICE", ""),
+            audio_say_voice_zh=text("WD_AUDIO_SAY_VOICE_ZH", ""),
             audio_cache_voices=audio_cache_voices,
             audio_cache_mb=integer("WD_AUDIO_CACHE_MB", 256, 16, 1_000_000),
             bailian_api_key_file=bailian_key_file,

@@ -440,3 +440,69 @@ def test_confusables_and_suggestions_open_on_today(client: TestClient, settings,
     assert card["word"]["dance"] is not None
     assert card["word"]["dance"] == dance.spec_for(card["word"]["display"], card["word"]["phonetic"]) == detail["word"]["dance"]
     assert card["word"]["dance"]["letters"] == ["ab", "sorb"] and card["word"]["dance"]["stress"] == 1
+
+
+# ------------------------------------------------------------------------- 磨耳朵 (123 GET /api/today/playlist)
+LISTEN_ITEM_KEYS = {"item_id", "word_id", "kind", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"}
+
+
+def test_playlist_requires_a_session_and_onboarding_and_never_builds(client: TestClient, settings, frozen_clock):
+    frozen_clock.set(START)
+    r = client.get("/api/today/playlist")
+    assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
+    _, pending = make_user(settings, "pending", onboarding="screen")
+    as_user(client, pending)
+    r = client.get("/api/today/playlist")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "onboarding_required"
+    _, token = make_user(settings, "done")
+    as_user(client, token)
+    before = row_counts(settings)
+    r = client.get("/api/today/playlist")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"batch_id": None, "local_date": "2026-10-14", "items": []}  # no batch today: nothing to listen to, and nothing is built
+    assert r.headers["cache-control"] == "no-store" and row_counts(settings) == before
+
+
+def test_playlist_is_todays_study_words_as_a_voice_reads_them(client: TestClient, settings, frozen_clock, alice):
+    ids = {l: word_id(settings, l) for l in ("apple", "bank", "cat")}
+    for wid in ids.values():
+        mark(client, wid, context="browse")
+    content = {
+        "word": "apple", "valid": True, "meaning_zh": "n. 苹果；苹果树", "meaning_en": "a round fruit", "examples": [{"en": "She eats an apple every day.", "zh": "她每天吃一个苹果。"}, {"en": "The apple fell.", "zh": "苹果掉了。"}],
+        "collocations": [], "mnemonic_zh": "", "image_keywords": ["apple"], "image_alt_zh": "一个苹果", "difficulty": 1,
+        "version": 1, "prompt_version": "content-v1", "model": "claude-sonnet-fake", "created_at": "2026-10-14T00:00:00Z",
+    }
+    cid = run(settings, "INSERT INTO word_contents(word_id, version, prompt_version, model, content_json) VALUES (?, 1, 'content-v1', 'm', ?)", (ids["apple"], json.dumps(content, ensure_ascii=False)))
+    run(settings, "UPDATE words SET active_content_id = ?, content_state = 'ready' WHERE id = ?", (cid, ids["apple"]))
+    today = client.post("/api/today/build").json()
+    assert len(items_by_kind(today, "screen")) == 2  # the batch has 推荐词 …
+    before = row_counts(settings)
+    r = client.get("/api/today/playlist")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"batch_id", "local_date", "items"} and (body["batch_id"], body["local_date"]) == (today["batch"]["id"], "2026-10-14")
+    study = sorted((i for i in today["batch"]["items"] if i["kind"] != "screen"), key=lambda i: i["position"])
+    assert [(i["item_id"], i["word_id"], i["kind"]) for i in body["items"]] == [(i["item_id"], i["word"]["id"], "new") for i in study]  # … the playlist only the three study words, in batch order
+    assert all(set(i) == LISTEN_ITEM_KEYS and i["done"] is False for i in body["items"])
+    by_word = {i["word_id"]: i for i in body["items"]}
+    assert {k: by_word[ids["apple"]][k] for k in ("display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh")} == {
+        "display": "apple", "phonetic": "'æpl", "spoken_en": "apple", "meaning_zh": "n. 苹果；苹果树", "gloss_zh": "苹果，苹果树",
+        "sentence_en": "She eats an apple every day.", "sentence_zh": "她每天吃一个苹果。",  # one sentence: the first
+    }
+    bank_item = by_word[ids["bank"]]  # no content yet: the dictionary's main sense, nothing to read as a sentence
+    assert (bank_item["meaning_zh"], bank_item["gloss_zh"], bank_item["sentence_en"], bank_item["sentence_zh"]) == ("n. 银行, 堤, 岸", "银行，堤", None, None)
+    assert row_counts(settings) == before  # a GET: no rows written, no job enqueued
+    # listening follows the study session: 已掌握 leaves the list, every other word stays whatever its grade
+    grade(client, by_word[ids["bank"]]["item_id"], "master")
+    grade(client, by_word[ids["cat"]]["item_id"], "good")  # a new card's first 记住了 is the 10-minute step: not done yet
+    after = client.get("/api/today/playlist").json()["items"]
+    assert [(i["word_id"], i["done"]) for i in after] == [(i["word_id"], False) for i in body["items"] if i["word_id"] != ids["bank"]]
+    # … and it is the word's state that decides, not the grade of its item: `cat` graduates (a final 记住了, listed as done) and is
+    # then marked 已掌握 on its word page — the item keeps its `good`, the word has left the bank and the list
+    frozen_clock.advance(minutes=10)
+    assert grade(client, by_word[ids["cat"]]["item_id"], "good")["item"]["result"] == "good"
+    assert [(i["word_id"], i["done"]) for i in client.get("/api/today/playlist").json()["items"]] == [(i["word_id"], i["word_id"] == ids["cat"]) for i in body["items"] if i["word_id"] != ids["bank"]]
+    assert mark(client, ids["cat"], "mastered", context="detail")["state"] == "mastered"
+    assert q1(settings, "SELECT result FROM push_items WHERE id = ?", (by_word[ids["cat"]]["item_id"],)) == "good"
+    assert [(i["word_id"], i["done"]) for i in client.get("/api/today/playlist").json()["items"]] == [(ids["apple"], False)]
+    assert client.get("/api/today").json()["batch"]["counts"]["new"] == 3  # the 今日 counts still say three (they count items): the entry and the list both go by the words still in the bank

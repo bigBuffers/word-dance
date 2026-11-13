@@ -199,6 +199,7 @@ class ServerFlags(Model):
     needs_setup: bool
     audio: bool
     audio_key: str  # fingerprint of the provider + voice behind GET /media/audio (empty without a provider): the client appends it to clip URLs
+    audio_zh: bool  # GET /media/audio also speaks Chinese (accent zh-CN): the provider is `say` and its Chinese voice is resolved — or not resolved yet, the seconds after a start (wd.audio.speaks_zh) — 磨耳朵 (endpoint 123)
     sms_enabled: bool  # WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
     # third-party sign-in (slice 2-A): Settings.<provider>_configured or auth_fake_providers (routers/auth.server_flags)
     wechat_enabled: bool  # the WeChat mini-program bridge is configured (endpoints 112–116) — the login page shows 微信, settings offers 绑定微信
@@ -1679,6 +1680,32 @@ class TodayResponse(Model):
     suggestions_open: int
 
 
+class ListenItem(Model):
+    """One word of the 磨耳朵 playlist (endpoint 123, ``services/listen.py``): what a voice says for it, derived on the server so
+    every client speaks the same strings — and the strings endpoint 76 accepts."""
+
+    item_id: int
+    word_id: int
+    kind: ItemKind  # review | new | extra — 推荐词 are not listened to
+    done: bool  # push_items.result IS NOT NULL: the item has its final grade (it is played all the same)
+    display: str
+    phonetic: str | None
+    spoken_en: str | None  # the headword as a voice reads it (`sb.` / `sth.` spelled out); null when the English text rule refuses it
+    meaning_zh: str  # shown, never spoken: content.meaning_zh, else the dictionary's main sense, else ''
+    gloss_zh: str | None  # the speakable Chinese gloss: at most two senses, no part-of-speech labels, no brackets; null when none can be derived
+    sentence_en: str | None  # the first example sentence the English text rule accepts; null without content
+    sentence_zh: str | None  # its translation when the Chinese text rule accepts it
+
+
+class ListenPlaylist(Model):
+    """Endpoint 123: today's review / new / extra words in batch order, one row per word, the words that have left the bank since
+    (已掌握 / 已认识 / removed) left out; ``batch_id`` null (and no items) when the user has no batch today."""
+
+    batch_id: int | None
+    local_date: str
+    items: list[ListenItem]
+
+
 class GradeRequest(Model):
     client_event_id: str
     grade: Literal["again", "hard", "good", "master", "skip", "known", "unfamiliar"]
@@ -2272,4 +2299,6 @@ ENDPOINT_MODELS: dict[int, tuple[type[BaseModel] | None, type[BaseModel]]] = {
     115: (WechatScanRequest, WechatScanInfo),
     116: (WechatConfirmRequest, WechatConfirmResult),
     117: (IdentityUnbindRequest, UserResponse),
+    # 磨耳朵 (docs/LISTEN_MODE_DESIGN.md §4.3): today's words as a listening playlist
+    123: (None, ListenPlaylist),
 }

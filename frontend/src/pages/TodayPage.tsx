@@ -3,7 +3,8 @@
 // "zh.today.pending(n)" only while counts.pending_content > 0, suggestions badge from suggestions_open,
 // more — also while building), complete ("zh.today.done + zh.today.seeYou" + more + goScreen + goVocab) and the
 // "zh.today.continueYesterday(n)" card whenever previous_open_batch is set. `GET /api/today` is polled every
-// 30 s while content is pending and the tab is visible.
+// 30 s while content is pending and the tab is visible. While the batch holds a review / new / extra word that is
+// still in the bank the "zh.today.listen" entry (→ /listen, FRONTEND §5.9) sits under the study CTA and on the done card.
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
@@ -178,6 +179,11 @@ export default function TodayPage() {
   const finished = data.goal_met || allDone || batch.completed_at !== null;
   const canMore = batch.can_request_more;
   const studyLabel = counts.done > 0 ? zh.today.resume : zh.today.start;
+  // the listen page (`/listen`, endpoint 123) plays the review / new / extra words that are still in the bank — graded ones too,
+  // so the entry stays on the done card. The rule is the playlist's own, read off the items: a screen item is never listened to,
+  // and a word that has left the bank (mastered / known / removed — its state now, not the item's grade) is not either, so a day
+  // whose words were all marked mastered has no entry instead of one that opens an empty list
+  const listenable = batch.items.some((it) => it.kind !== 'screen' && (it.mine?.state === 'new' || it.mine?.state === 'learning'));
 
   return (
     <section className="page today">
@@ -220,11 +226,23 @@ export default function TodayPage() {
               <span className="btn__label">{zh.today.resume}</span>
             </Link>
           )}
+          {listenable && (
+            <Link className="btn btn--secondary btn--md" to={routePaths.listen}>
+              <span className="btn__label">{zh.today.listen}</span>
+            </Link>
+          )}
         </div>
       ) : (
-        <Link className="btn btn--primary btn--lg btn--block today__cta" to={routePaths.study}>
-          <span className="btn__label">{studyLabel}</span>
-        </Link>
+        <>
+          <Link className="btn btn--primary btn--lg btn--block today__cta" to={routePaths.study}>
+            <span className="btn__label">{studyLabel}</span>
+          </Link>
+          {listenable && (
+            <Link className="btn btn--secondary btn--lg btn--block today__listen" to={routePaths.listen}>
+              <span className="btn__label">{zh.today.listen}</span>
+            </Link>
+          )}
+        </>
       )}
 
       <div className="today__actions">

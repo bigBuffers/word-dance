@@ -22,8 +22,8 @@ def test_every_model_forbids_extra_fields():
 
 def test_endpoint_catalogue_covers_api_md_section_2():
     # endpoint 4 (logout → 204), 52/53/76/78 (media files), 114 (the 小程序码 PNG) and 118–122 (the OAuth redirects) have no JSON body; every
-    # other number 1..122 is present (94–111: slice 1-B; 112, 113, 115, 116, 117: slice 2-A)
-    expected = set(range(1, 123)) - {4, 52, 53, 76, 78, 114, 118, 119, 120, 121, 122}
+    # other number 1..123 is present (94–111: slice 1-B; 112, 113, 115, 116, 117: slice 2-A; 123: 磨耳朵)
+    expected = set(range(1, 124)) - {4, 52, 53, 76, 78, 114, 118, 119, 120, 121, 122}
     assert set(ENDPOINT_MODELS) == expected
     for num, (req, resp) in ENDPOINT_MODELS.items():
         assert resp is not None and issubclass(resp, BaseModel), num
@@ -231,7 +231,7 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.AdminOverviewWords.model_fields) == {"total", "with_content", "with_photo", "with_claude_svg", "card_only", "user_added", "pending_validation"}
     # sign-in by verification code (docs/AUTH_SIGNUP_DESIGN.md; API.md §9)
     assert set(schemas.User.model_fields) == {"id", "username", "display_name", "email", "email_verified", "role", "onboarding_state", "created_at", "has_password", "phone_masked", "needs_profile", "age_band", "account_kind", "is_child", "needs_profile_prompt", "providers"}
-    assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "sms_enabled", "wechat_enabled", "qq_enabled", "apple_enabled"}
+    assert set(schemas.ServerFlags.model_fields) == {"version", "registration_mode", "email_configured", "ai_enabled", "images_enabled", "dev", "needs_setup", "audio", "audio_key", "audio_zh", "sms_enabled", "wechat_enabled", "qq_enabled", "apple_enabled"}
     assert set(schemas.HealthResponse.model_fields) == {"status", "version", "registration_mode", "needs_setup", "sms_enabled", "email_enabled", "captcha", "wechat_enabled", "qq_enabled", "apple_enabled", "time"}
     assert set(schemas.StaleChallenge.model_fields) == {"token", "display_name_masked", "since", "can_password", "can_email", "email_masked"}
     assert set(schemas.CodeLoginResponse.model_fields) == {"user", "settings", "created", "challenge"}
@@ -409,3 +409,20 @@ def test_third_party_contract_models_follow_plan_2a():
     assert ENDPOINT_MODELS[115] == (schemas.WechatScanRequest, schemas.WechatScanInfo) and ENDPOINT_MODELS[116] == (schemas.WechatConfirmRequest, schemas.WechatConfirmResult)
     assert ENDPOINT_MODELS[117] == (schemas.IdentityUnbindRequest, schemas.UserResponse)
     assert ENDPOINT_MODELS[87] == (schemas.PhoneUnbindRequest, schemas.UserResponse)  # 87 keeps its own name
+
+
+def test_listen_contract_models_follow_the_design():
+    """磨耳朵 (docs/LISTEN_MODE_DESIGN.md §4; API.md §9 / §2 row 123): `ListenItem` / `ListenPlaylist` in the §9 field order with every field
+    required (the server always sends them — a null is a statement, an omission a contract break), `ServerFlags.audio_zh` required, and the
+    ENDPOINT_MODELS row."""
+    assert list(schemas.ListenItem.model_fields) == ["item_id", "word_id", "kind", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"]
+    assert list(schemas.ListenPlaylist.model_fields) == ["batch_id", "local_date", "items"]
+    assert all(f.is_required() for f in schemas.ListenItem.model_fields.values()) and all(f.is_required() for f in schemas.ListenPlaylist.model_fields.values())
+    assert schemas.ServerFlags.model_fields["audio_zh"].is_required()
+    item = dict(item_id=1, word_id=2, kind="new", done=False, display="moon", phonetic=None, spoken_en="moon", meaning_zh="", gloss_zh=None, sentence_en=None, sentence_zh=None)
+    assert schemas.ListenPlaylist(batch_id=None, local_date="2026-10-14", items=[]).items == []
+    assert schemas.ListenPlaylist(batch_id=7, local_date="2026-10-14", items=[item]).items[0].gloss_zh is None
+    for bad in ({**item, "kind": "listen"}, {**item, "meaning_zh": None}, {k: v for k, v in item.items() if k != "sentence_zh"}, {**item, "position": 3}):
+        with pytest.raises(ValidationError):
+            schemas.ListenItem(**bad)
+    assert ENDPOINT_MODELS[123] == (None, schemas.ListenPlaylist)

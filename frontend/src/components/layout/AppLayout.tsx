@@ -2,7 +2,7 @@
 // as the layout route). TopNav ≥ 768 px, TabBar < 768 px; badges from AuthContext.counters (bank) and
 // the today-badge store below (today dot while ungraded items exist). Sets `--tabbar-h` on the root
 // while the TabBar is shown so fixed bars and toasts clear it, and hides the whole shell on `/study`
-// (the study card owns the viewport, FRONTEND §6.2). The inner <Suspense> keeps the shell visible while
+// and `/listen` (the study card and the listen player own the viewport, FRONTEND §6.2). The inner <Suspense> keeps the shell visible while
 // a lazy page chunk loads. Above the outlet, a dismissible note asks a learner whose account has no password yet
 // (`user.has_password === false`, a code-created account; never admins, never a child — its guardian manages the login) to set one —
 // `zh.auth.passwordBanner` (docs/AUTH_SIGNUP_DESIGN.md §5.2, the recycled-number defence, rule 2); the dismissal is a per-viewer
@@ -30,8 +30,8 @@ import './AppLayout.css';
 export const PHONE_QUERY = '(max-width: 767.98px)';
 /** Height reserved for the TabBar (+ the safe-area inset) — mirrors `.tabbar` in AppLayout.css. */
 export const TABBAR_HEIGHT_CSS = 'calc(56px + env(safe-area-inset-bottom, 0px))';
-/** Routes that render without the shell (full-viewport study session). */
-export const BARE_ROUTES: readonly string[] = ['/study'];
+/** Routes that render without the shell (full-viewport study session, the listen player). */
+export const BARE_ROUTES: readonly string[] = ['/study', '/listen'];
 /** The today badge is re-checked at most this often (ms) when the route or tab visibility changes. */
 export const TODAY_BADGE_STALE_MS = 60_000;
 /** The password note comes back this long after a dismissal (ms). */

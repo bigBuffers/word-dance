@@ -47,6 +47,7 @@ export interface ServerFlags {
   needs_setup: boolean;                 // true while no user exists (also in GET /api/health)
   audio: boolean;                       // GET /media/audio serves pronunciation clips (WD_AUDIO_PROVIDER is not off; endpoint 76) — the fallback for devices without an English voice
   audio_key: string;                    // fingerprint of the provider + voice behind endpoint 76 (empty without a provider): the client appends it to clip URLs as `v`, so a switched voice is a new URL for the browser cache
+  audio_zh: boolean;                    // endpoint 76 also speaks Chinese (`accent=zh-CN`): the provider has a Chinese voice, or has not resolved it yet (optimistic for the seconds after a start, §9.1) — 磨耳朵 (endpoint 123) reads glosses and translations with it
   sms_enabled: boolean;                 // WD_SMS_PROVIDER is not off: phone verification codes can be sent (endpoints 80, 85)
   wechat_enabled: boolean;              // the WeChat mini-program bridge is configured (endpoints 112–116) — the login page shows 微信 and settings offers 绑定微信
   qq_enabled: boolean;                  // QQ 互联 login is configured (118 / 119)
@@ -238,6 +239,15 @@ export interface TodayResponse {
   previous_open_batch: PreviousOpenBatch | null;              // 「继续昨天的学习（还剩 N 个）」 on 今日
   suggestions_open: number;                                   // open 整理建议 (badge on 今日)
 }
+export interface ListenItem {
+  item_id: number; word_id: number; kind: ItemKind; done: boolean;   // kind: review | new | extra (推荐词 are not listened to); done: the item has its final grade
+  display: string; phonetic: string | null;
+  spoken_en: string | null;             // what to speak for the headword (`sb.` / `sth.` spelled out); null when endpoint 76 would refuse the text
+  meaning_zh: string;                   // shown on the player and on the 听写 answer sheet: content.meaning_zh, else the dictionary's main sense ('' when neither exists)
+  gloss_zh: string | null;              // speakable Chinese gloss: at most two senses, no part-of-speech labels, no brackets; null when none can be derived
+  sentence_en: string | null; sentence_zh: string | null;   // one example sentence endpoint 76 accepts, and its translation (null when it cannot be spoken); both null without content
+}
+export interface ListenPlaylist { batch_id: number | null; local_date: string; items: ListenItem[] }   // endpoint 123: today's review / new / extra words in batch order, one row per word, without the words that have left the bank since (已掌握 / 已认识 / removed — the word's state now, not the item's grade); batch_id null = no batch today
 export interface GradeResponse {
   item: { item_id: number; result: string | null; skip_count: number; requeue_at: string | null };   // result null + requeue_at set = intermediate grade: the item stays ungraded and is graded again later (endpoint 45)
   mine: UserWord | null; next_due_zh: string;                 // '10 分钟后' | '明天' | '今天' | 'N 天后' | '约 N 个月后' | '已掌握' | '已跳过' | '已认识' (thresholds in §9.1)

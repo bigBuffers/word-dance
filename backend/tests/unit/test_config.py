@@ -774,3 +774,20 @@ def test_bailian_region_url_override_model_and_voices(tmp_path: Path, caplog: py
         assert "WD_AUDIO_CACHE_VOICES" not in str(e.value)
     assert Settings.from_env({"WD_BAILIAN_TTS_VOICES": "en-US=loongabby_v3"}).bailian_voice_map == {"en-US": "loongabby_v3"}  # only bailian needs both
     assert Settings.from_env({"WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium)"}).audio_cache_voice_map == {"en-US": "Ava (Premium)"}  # the cache rule is untouched
+
+
+def test_say_voice_zh_is_free_text_next_to_the_english_override():
+    """`WD_AUDIO_SAY_VOICE_ZH` (DEPLOY §4): the `say` voice of the Chinese clips (`accent=zh-CN`, 磨耳朵) — empty by default, stripped,
+    reported, independent of `WD_AUDIO_SAY_VOICE` (the English accents); `say` itself is asked about the name at run time. Chinese is
+    not a third accent: the two-voice rules of `WD_AUDIO_CACHE_VOICES` / `WD_BAILIAN_TTS_VOICES` stay as they are."""
+    from wd.config import AUDIO_ACCENTS
+
+    cfg = Settings.from_env({})
+    assert cfg.audio_say_voice_zh == "" and {e["key"]: e for e in cfg.entries()}["WD_AUDIO_SAY_VOICE_ZH"] == {"key": "WD_AUDIO_SAY_VOICE_ZH", "value": "", "source": "default"}
+    named = Settings.from_env({"WD_AUDIO_SAY_VOICE": "Ava (Premium)", "WD_AUDIO_SAY_VOICE_ZH": " Lili (Premium) "})
+    assert (named.audio_say_voice, named.audio_say_voice_zh) == ("Ava (Premium)", "Lili (Premium)")
+    assert {e["key"]: e for e in named.entries()}["WD_AUDIO_SAY_VOICE_ZH"] == {"key": "WD_AUDIO_SAY_VOICE_ZH", "value": "Lili (Premium)", "source": "env"}
+    assert AUDIO_ACCENTS == ("en-US", "en-GB")
+    assert Settings.from_env({"WD_AUDIO_PROVIDER": "cache", "WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium);en-GB=Serena (Premium)"}).audio_provider_effective == "cache"  # an existing two-voice .env keeps starting
+    with pytest.raises(ConfigError, match="WD_AUDIO_CACHE_VOICES"):
+        Settings.from_env({"WD_AUDIO_CACHE_VOICES": "en-US=Ava (Premium);en-GB=Serena (Premium);zh-CN=Tingting"})

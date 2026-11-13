@@ -1,4 +1,4 @@
-// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–122; 76 `GET /media/audio`
+// word-Dance typed endpoint wrappers — exactly one function per API.md §2 catalogue entry (1–123; 76 `GET /media/audio`
 // builds its URLs in audio/serverAudio.ts and has no wrapper; 114 is the `<img src>` of `WechatTicket.qr_url`; the redirect
 // endpoints 118–122 are plain `<a href>` navigations — `oauthStartUrl` builds 118 / 120 —, so they have no wrapper either and
 // are listed under `// #N —` comments to keep the numbering visible). FROZEN CONTRACT (TASKS P0 step 8). Each wrapper is preceded
@@ -36,6 +36,7 @@ import type {
   ImageMeta,
   ImportResponse,
   Job,
+  ListenPlaylist,
   LookupPreview,
   MarkAction,
   Origin,
@@ -804,6 +805,8 @@ export const getHistoryBatches = (page = 1, signal?: AbortSignal) => api.get<Pag
 export const getBatch = (batchId: number, signal?: AbortSignal) => api.get<TodayResponse>(`/api/batches/${seg(batchId)}`, undefined, signal);
 // #51 GET /api/stats
 export const getStats = (signal?: AbortSignal) => api.get<Stats>('/api/stats', undefined, signal);
+// #123 GET /api/today/playlist
+export const getListenPlaylist = (signal?: AbortSignal) => api.get<ListenPlaylist>('/api/today/playlist', undefined, signal);
 
 // ---------------------------------------------------------------------------------------------------
 // §8 Media (URL builders — loaded by <img>, cookie session) and admin

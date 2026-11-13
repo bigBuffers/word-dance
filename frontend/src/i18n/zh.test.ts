@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ItemKind, ReportReason, Stage, UserState, WebhookFormat } from '@/api/types';
+import type { ListenMode } from '@/listen/player';
 import type { InvalidReason } from '@/utils/normalizeInput';
 import { zh } from './zh';
 
@@ -59,7 +60,8 @@ describe('zh.ts', () => {
     const reasons: Record<ReportReason, string> = zh.word.reportReasons;
     const formats: Record<WebhookFormat, string> = zh.settings.formats;
     const invalidReasons: Record<InvalidReason, string> = zh.bank.invalidReason; // every client-side rejection has the server's zh reason
-    for (const table of [stages, kinds, states, reasons, formats, invalidReasons]) {
+    const listenModes: Record<ListenMode, string> = zh.listen.modes; // 磨耳朵: 跟着听 / 听写
+    for (const table of [stages, kinds, states, reasons, formats, invalidReasons, listenModes]) {
       for (const label of Object.values(table)) expect(label.length).toBeGreaterThan(0);
     }
   });
@@ -91,5 +93,7 @@ describe('zh.ts', () => {
     expect(zh.common.total(4722)).toContain('4722');
     expect(zh.errors.accountLocked(601)).toContain('11');
     expect(zh.study.nextDue.days(3)).toContain('3');
+    expect(zh.listen.position(3, 12)).toBe('3 / 12');
+    expect(zh.listen.skipped(2)).toContain('2');
   });
 });

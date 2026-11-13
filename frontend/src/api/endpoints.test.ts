@@ -8,10 +8,10 @@ describe('endpoints.ts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('declares a numbered wrapper for every catalogue entry 1–122 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders; 114 is an <img src>, 118–122 are navigation links)', () => {
+  it('declares a numbered wrapper for every catalogue entry 1–123 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders; 114 is an <img src>, 118–122 are navigation links)', () => {
     const numbers = [...source.matchAll(/^\/\/ #(\d+) (GET|POST|PUT|PATCH|DELETE) (\/\S+)/gm)].map((m) => Number(m[1]));
     const withoutWrapper = new Set([76, 114, 118, 119, 120, 121, 122]);
-    const expected = Array.from({ length: 122 }, (_, i) => i + 1).filter((n) => !withoutWrapper.has(n));
+    const expected = Array.from({ length: 123 }, (_, i) => i + 1).filter((n) => !withoutWrapper.has(n));
     expect([...numbers].sort((a, b) => a - b)).toEqual(expected);
     expect(new Set(numbers).size).toBe(numbers.length);
     // the wrapper-less entries stay visible under `// #N —` comments so the numbering has no gaps
@@ -73,6 +73,8 @@ describe('endpoints.ts', () => {
     await endpoints.unbindIdentity('wechat_mini', { password: 'pw' });
     await endpoints.scanWechatTicket({ js_code: 'js-code', pairing_code: '123456' }); // the mini program's calls (115 / 116), documented here, never made by the SPA
     await endpoints.confirmWechatTicket({ mp_token: 'tok', ticket: 'abcdefghijklmnopqrstuvwxyz', accept: true });
+    // the listen page's playlist (API.md 123) — last, so the indexed body assertions below keep their positions
+    await endpoints.getListenPlaylist();
 
     const probeBodies = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/admin/ai/probe')).map(([, init]) => init?.body);
     expect(probeBodies).toEqual([JSON.stringify({ provider: 'claude' }), JSON.stringify({ provider: 'fallback' })]);
@@ -127,6 +129,7 @@ describe('endpoints.ts', () => {
       'DELETE /api/account/identities/wechat_mini',
       'POST /api/auth/wechat/scan',
       'POST /api/auth/wechat/confirm',
+      'GET /api/today/playlist',
     ]);
     expect(fetchMock.mock.calls[13]?.[1]?.body).toBe(JSON.stringify({ paused: true }));
     expect(fetchMock.mock.calls[11]?.[1]?.body).toBe(JSON.stringify({ password: 'pw' }));

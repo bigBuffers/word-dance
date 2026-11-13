@@ -92,7 +92,7 @@ def test_register_first_user_is_admin_with_defaults_and_cookie(client: TestClien
     assert me.status_code == 200, me.text
     body = me.json()
     assert body["user"]["username"] == "alice" and body["settings"]["next_push_at"] == "2026-10-15T00:00:00Z"
-    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False, "audio_key": "", "sms_enabled": False, "wechat_enabled": False, "qq_enabled": False, "apple_enabled": False}  # slice 2-A: dark
+    assert body["server"] == {"version": body["server"]["version"], "registration_mode": "open", "email_configured": False, "ai_enabled": True, "images_enabled": True, "dev": False, "needs_setup": False, "audio": False, "audio_key": "", "audio_zh": False, "sms_enabled": False, "wechat_enabled": False, "qq_enabled": False, "apple_enabled": False}  # slice 2-A: dark
     assert body["counters"] == {"suggestions_open": 0, "attention": 0}
     assert set(body) == {"user", "settings", "server", "counters", "session"} and body["session"] == {"guardian": None, "gate_until": None}  # slice 1-B: a self session, no 家长门 stamp
     bob = register(client, "bob")
