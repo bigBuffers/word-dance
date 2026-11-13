@@ -22,7 +22,7 @@ const health = (over: Record<string, unknown>) => () =>
 const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: '138****8000', needs_profile: true, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: [] };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: true, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
-  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
+  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
 const me = () => json(200, { user, settings, server: { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', audio_zh: false, sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false }, counters: { suggestions_open: 0, attention: 0 }, session: { guardian: null, gate_until: null } });
@@ -30,12 +30,13 @@ const word = (id: number, lemma: string): WordBrief => ({
   id, lemma, display: lemma, kind: 'word', phonetic: null, translation_short: `zh-${lemma}`, stages: ['xs'], stage_min: 1, cet6_star: false, frq: null, collins: null, oxford: null, difficulty: null,
   is_public: true, is_valid_english: true, my_state: null, content_state: 'ready', image_state: 'none',
 });
-const image = (id: number): ImageMeta => ({ id: null, url: `/media/demo/${id}.svg`, kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null });
+const image = (id: number): ImageMeta => ({ id: null, url: `/media/demo/${id}.svg`, kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null });
 const content = (lemma: string): Content => ({
   word: lemma, valid: true, meaning_zh: `meaning-${lemma}`, meaning_en: 'x', examples: [{ en: `Look ${lemma}.`, zh: `zh-example-${lemma}` }, { en: 'second', zh: 'second' }], collocations: [], mnemonic_zh: '',
   image_keywords: [], image_alt_zh: '', difficulty: 1, version: 1, prompt_version: 'p', model: 'm', created_at: ISO,
 });
-const demo: DemoResponse = { items: [{ word: word(1, 'up'), content: content('up'), image: image(1), dance: null }, { word: word(2, 'jump'), content: null, image: image(2), dance: null }] };
+// the second picture claims a word layer (the demo route answers `false` today, API.md 77): a guest must still get it whole
+const demo: DemoResponse = { items: [{ word: word(1, 'up'), content: content('up'), image: image(1), dance: null }, { word: word(2, 'jump'), content: null, image: { ...image(2), kind: 'svg', provider: 'claude_svg', alt_zh: 'scene-jump', word_layer: true, hook_zh: 'hook-jump' }, dance: null }] };
 
 type Handler = (init?: RequestInit) => Response;
 function mockFetch(routes: Record<string, Handler>) {
@@ -389,6 +390,29 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: zh.auth.demoItem(2) }));
     expect(headword()).toBe('jump');
     expect(screen.getByText('zh-jump')).toBeTruthy(); // no content → the short translation
+    expect((screen.getByAltText('scene-jump') as HTMLImageElement).getAttribute('src')).toBe('/media/demo/2.svg'); // a guest has no image_word setting: never `?plain=1`
+  });
+
+  it("the demo picture's own description leads its alt text; a picture without one keeps the content's", async () => {
+    // what GET /api/demo answers for a demo word whose active SVG is a memory card (API.md 77): `word_layer` false — so the
+    // card-first rule inside WordImage never applies here — with the card's scene in `alt_zh`, next to a content whose
+    // `image_alt_zh` was written before the card existed
+    const own: DemoResponse = {
+      items: [
+        { word: word(1, 'up'), content: { ...content('up'), image_alt_zh: 'content-alt-up' }, image: { ...image(1), id: 8, kind: 'svg', provider: 'claude_svg', width: 800, height: 500, alt_zh: 'scene-up' }, dance: null },
+        { word: word(2, 'jump'), content: { ...content('jump'), image_alt_zh: 'content-alt-jump' }, image: image(2), dance: null }, // the template card: `alt_zh` null
+        { word: word(3, 'cold'), content: { ...content('cold'), image_alt_zh: 'content-alt-cold' }, image: { ...image(3), kind: 'svg', provider: 'claude_svg', alt_zh: '  ' }, dance: null },
+      ],
+    };
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({}), '/api/demo': () => json(200, own) });
+    renderLogin();
+    expect(await screen.findByText(zh.auth.demoTitle)).toBeTruthy();
+    const alt = () => (document.querySelector('.login-demo img') as HTMLImageElement).getAttribute('alt');
+    expect(alt()).toBe('scene-up'); // the scene on screen, not the description of a picture nobody drew
+    fireEvent.click(screen.getByRole('button', { name: zh.auth.demoItem(2) }));
+    expect(alt()).toBe('content-alt-jump');
+    fireEvent.click(screen.getByRole('button', { name: zh.auth.demoItem(3) }));
+    expect(alt()).toBe('content-alt-cold'); // a blank description is none
   });
 
   it('slice 2-A: no third-party row on a dark server, none while needs_setup; with the flags on, QQ / Apple link to 118 / 120 with ?next and WeChat opens the ticket sheet', async () => {

@@ -21,7 +21,7 @@ import { getBank, getToday } from '@/api/endpoints';
 import TodayPage from './TodayPage';
 
 const T0 = '2026-11-12T00:00:00.000Z';
-const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null };
+const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null };
 
 let nextId = 0;
 /**

@@ -129,7 +129,7 @@ describe('in a browser (no native shell)', () => {
     settings = {
       stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
       webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
-      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, next_push_at: null,
     } as unknown as Settings;
     installFetch();
   });
@@ -173,7 +173,7 @@ describe('push settings test buttons', () => {
       stages: ['cet4', 'cet6'],
       current_stage: 'cet4',
       show_images: true,
-      zh_examples: 'tap', dance_mode: 'full',
+      zh_examples: 'tap', dance_mode: 'full', image_word: true,
       auto_pronounce: true,
       accent: 'en-US',
       email_enabled: true,
@@ -321,7 +321,7 @@ describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
       zh_examples: 'tap',
       auto_pronounce: true,
       accent: 'en-US',
-      dance_mode: 'full',
+      dance_mode: 'full', image_word: true,
       email_enabled: false,
       webhook_enabled: false,
       webhook_url: null,
@@ -354,12 +354,75 @@ describe('learning settings · word dance (FRONTEND §5.8, §6.5)', () => {
   });
 });
 
+describe('learning settings · the word on memory cards (FRONTEND §5.8; docs/MEMORY_CARDS_DESIGN.md §3.7)', () => {
+  beforeEach(() => {
+    calls = [];
+    user = baseUser;
+    server = baseServer;
+    settings = {
+      timezone: 'Asia/Shanghai',
+      push_time: '08:00',
+      push_enabled: true,
+      daily_new_count: 10,
+      daily_screen_count: 15,
+      max_reviews: 60,
+      stages: ['xs'],
+      current_stage: 'xs',
+      show_images: true,
+      zh_examples: 'tap',
+      auto_pronounce: true,
+      accent: 'en-US',
+      dance_mode: 'full',
+      image_word: true,
+      email_enabled: false,
+      webhook_enabled: false,
+      webhook_url: null,
+      webhook_format: 'generic',
+      next_push_at: null,
+      email_verified: true,
+      updated_at: '2026-11-13T00:00:00Z',
+    };
+    installFetch();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const imageWordSwitch = () => screen.getByRole('switch', { name: zh.settings.imageWord }) as HTMLButtonElement;
+
+  it('the switch reflects image_word (on by default), carries its hint as description and saves the one field', async () => {
+    renderSettings();
+    await screen.findByRole('switch', { name: zh.settings.imageWord });
+    expect(imageWordSwitch().getAttribute('aria-checked')).toBe('true');
+    const hint = screen.getByText(zh.settings.imageWordHint);
+    expect(imageWordSwitch().getAttribute('aria-describedby')).toBe(hint.id);
+    // it sits with the other picture setting: right after the show-images switch
+    const names = screen.getAllByRole('switch').map((sw) => sw.getAttribute('aria-labelledby')).map((id) => (id ? document.getElementById(id)?.textContent : null));
+    expect(names.indexOf(zh.settings.imageWord)).toBe(names.indexOf(zh.settings.showImages) + 1);
+
+    fireEvent.click(imageWordSwitch());
+    await waitFor(() => expect(settings.image_word).toBe(false));
+    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ image_word: false }]);
+    await waitFor(() => expect(imageWordSwitch().getAttribute('aria-checked')).toBe('false'));
+    fireEvent.click(imageWordSwitch());
+    await waitFor(() => expect(settings.image_word).toBe(true));
+    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.body)).toEqual([{ image_word: false }, { image_word: true }]);
+    await waitFor(() => expect(imageWordSwitch().getAttribute('aria-checked')).toBe('true'));
+  });
+
+  it('a stored image_word of false shows the switch off', async () => {
+    settings = { ...settings, image_word: false };
+    renderSettings();
+    await screen.findByRole('switch', { name: zh.settings.imageWord });
+    expect(imageWordSwitch().getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByRole('switch', { name: zh.settings.showImages }).getAttribute('aria-checked')).toBe('true'); // its neighbour is untouched
+  });
+});
+
 describe('account - login methods (FRONTEND 5.8, API.md 85-88, 7 / 8 with a code)', () => {
   const minimalSettings = () =>
     ({
       stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
       webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
-      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, next_push_at: null,
     }) as unknown as Settings;
   beforeEach(() => {
     calls = [];
@@ -537,7 +600,7 @@ describe('account - third-party identities (FRONTEND 5.8, API.md 112 / 117 / 118
     ({
       stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
       webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
-      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, next_push_at: null,
     }) as unknown as Settings;
   const allOn = { wechat_enabled: true, qq_enabled: true, apple_enabled: true };
   beforeEach(() => {
@@ -674,7 +737,7 @@ describe('account - guardian and child accounts (FRONTEND 5.8, API.md 8 / 108 / 
     settings = {
       stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: true,
       webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
-      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+      show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, next_push_at: null,
     } as unknown as Settings;
     installFetch();
   });

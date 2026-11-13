@@ -1,0 +1,13 @@
+# The memory-card studio's own virtualenv (studio/README.md §4) — nothing here is a dependency of the app:
+#
+#   python3.12 -m venv studio/.venv && studio/.venv/bin/pip install -r studio/requirements.txt
+#
+# fonttools  turns the house font's glyphs into SVG paths (tools/letters.py) and back into the reference outlines the
+#            glyph check compares against (tools/check.py);
+# skia-pathops merges a glyph's overlapping contours into one outline (tools/letters.py: no seams under a dashed or inner stroke);
+# defusedxml is what the repository's sanitiser and memory-card structure check parse with — tools/check.py runs
+#            backend/wd/images/sanitize_svg.py and memo.py inside this venv (backend/requirements.txt pins the same 0.7 line).
+# The tools' tests (studio/tests) additionally need pytest; it is not pinned: studio/.venv/bin/pip install pytest
+fonttools==4.68.0
+defusedxml==0.7.1
+skia-pathops==0.9.2

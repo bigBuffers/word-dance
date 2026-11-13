@@ -234,6 +234,33 @@ def test_today_flow_intermediate_final_duplicate_skip_master_restore_screen_comp
     assert final["streak_days"] == 1
 
 
+def test_a_grade_stored_before_migration_0021_replays_with_todays_image_meta(client: TestClient, settings, frozen_clock, alice):
+    """review_logs.result_json keeps the WHOLE GradeResponse, study_item.image included, as the build of its day wrote it. A 不熟悉
+    on a 推荐词 that the server committed before the 记忆图卡 deploy and the tablet never saw acknowledged is re-sent afterwards with
+    the same client_event_id: the nine-key ImageMeta of that day must come back as today's twelve-key one (the picture was no
+    card: false / null / null), not as a 500 the client retries for ever."""
+    mark(client, word_id(settings, "apple"), context="browse")
+    today = client.post("/api/today/build").json()
+    scr = items_by_kind(today, "screen")[0]
+    event = str(uuid.uuid4())
+    first = grade(client, scr["item_id"], "unfamiliar", event=event, elapsed_ms=None)
+    assert first["study_item"] is not None and first["duplicate"] is False
+    assert (first["study_item"]["image"]["word_layer"], first["study_item"]["image"]["hook_zh"], first["study_item"]["image"]["note_zh"]) == (False, None, None)
+    stored = json.loads(q1(settings, "SELECT result_json FROM review_logs WHERE client_event_id = ?", (event,)))
+    for key in ("word_layer", "hook_zh", "note_zh"):
+        del stored["study_item"]["image"][key]  # the snapshot as ea77832 wrote it
+    assert len(stored["study_item"]["image"]) == 9
+    run(settings, "UPDATE review_logs SET result_json = ? WHERE client_event_id = ?", (json.dumps(stored, ensure_ascii=False), event))
+    again = grade(client, scr["item_id"], "unfamiliar", event=event, elapsed_ms=None)
+    assert again["duplicate"] is True and {k: v for k, v in again.items() if k != "duplicate"} == {k: v for k, v in first.items() if k != "duplicate"}
+    # only what is missing is filled in: a snapshot of today that carries a card's fields is answered as stored
+    stored["study_item"]["image"].update(word_layer=True, hook_zh="两个 o 像两轮圆月。", note_zh=None)
+    run(settings, "UPDATE review_logs SET result_json = ? WHERE client_event_id = ?", (json.dumps(stored, ensure_ascii=False), event))
+    card = grade(client, scr["item_id"], "unfamiliar", event=event, elapsed_ms=None)["study_item"]["image"]
+    assert (card["word_layer"], card["hook_zh"], card["note_zh"]) == (True, "两个 o 像两轮圆月。", None)
+    assert q1(settings, "SELECT COUNT(*) FROM review_logs WHERE client_event_id = ?", (event,)) == 1
+
+
 def test_again_then_left_alone_is_still_listed_tomorrow(client: TestClient, settings, frozen_clock, alice):
     w = word_id(settings, "apple")
     mark(client, w)

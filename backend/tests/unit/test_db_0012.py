@@ -47,7 +47,7 @@ def test_0012_adds_word_images_meta_columns_and_keeps_rows(settings, tmp_path: P
         assert (12, "word_images_meta") in result.applied
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         info = {r["name"]: r for r in c.execute("PRAGMA table_info(word_images)")}
-        assert [r["name"] for r in c.execute("PRAGMA table_info(word_images)")] == before_cols + list(NEW_COLUMNS)  # appended, nothing rebuilt
+        assert [r["name"] for r in c.execute("PRAGMA table_info(word_images)")] == before_cols + list(NEW_COLUMNS) + ["hook_zh", "note_zh"]  # appended, nothing rebuilt (0021's two captions ride along, test_db_0021.py)
         assert info["text_free"]["notnull"] == 1 and info["text_free"]["dflt_value"] == "0" and info["text_free"]["type"] == "INTEGER"
         assert all(info[col]["notnull"] == 0 and info[col]["dflt_value"] is None and info[col]["type"] == "TEXT" for col in ("prompt_version", "model", "eval_json"))
         # the 30 live SVGs drawn before this migration printed the headword: text_free stays 0, prompt_version / model NULL

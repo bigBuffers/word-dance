@@ -39,3 +39,11 @@ data/seed/vocab.jsonl
 
 # Deploy helper scratch (pre-deploy counters of the live database; written by the ad-hoc Mac deploy scripts, never meant to be tracked)
 /pre.json
+
+# Memory-card studio (studio/README.md): its own virtualenv, drafts and render scaffolding, and every output of
+# studio/tools/check — the PNG renders and the sanitised copies, wherever a card lives (studio/, studio/cast/, a batch
+# under studio/tmp/). Only sources are tracked: handbooks, tools, the font, the approved cards and their manifest.
+studio/.venv/
+studio/tmp/
+studio/**/png/
+studio/**/clean/

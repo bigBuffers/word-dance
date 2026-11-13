@@ -45,6 +45,20 @@
   font-weight: 500;
 }
 
+/* a Switch is its own <label> and the row's only child, so the rule above made it hug its text: the toggle sat wherever the
+   label ended — two toggle columns in one card once a switch carried a hint (图片上显示单词). The label spans the row instead
+   and its own space-between sends every toggle to the right edge, in line with the segmented controls. Same specificity as
+   the rule above, so this one has to stay below it. */
+.settings__row > label.switch {
+  flex: 1 1 auto;
+}
+
+/* …and the hint under a switch label is running text, not a row label: it wraps and is not bold (both inherited from above) */
+.settings__row .switch__desc {
+  white-space: normal;
+  font-weight: 400;
+}
+
 .settings__row > :not(:first-child) {
   min-width: 0;
 }

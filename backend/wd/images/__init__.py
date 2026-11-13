@@ -2,10 +2,16 @@
 
 Public surface for the other packages (TASKS §I):
 
-* :func:`reject_active_image` — ``POST /api/words/{id}/report {target:'image'}`` (WP3's word routes, admin reports)
+* :func:`reject_active_image` — ``POST /api/words/{id}/report {target:'image'}`` (WP3's word routes, admin reports);
+  :func:`wears_memory_card` — the learner's route asks it first: a report on a 记忆图卡 is only recorded, the card stays up
+  until an admin resolves the report with ``refetch_image`` (API.md 28, 71)
 * :func:`image_meta` — ``ImageMeta`` with the template-card fallback (WP3 / WP4; never None)
 * :func:`render_card` — the template SVG (media route 53)
 * :func:`activate_svg` / :func:`clean_svg` — used by the ``generate_svg`` handler (WP5)
+* :func:`activate_memo` — a 记忆图卡 validated, cleaned, labelled, stored and activated in one call; ``wd images-import`` is the
+  single way in and takes the same two steps apart (``store.prepare_memo``, then ``store.store_memo`` on the very card it
+  compared with the active picture; docs/MEMORY_CARDS_DESIGN.md §3, ``images/memo.py`` for the recognition rule, the structure
+  check and the ``?plain=1`` cut of API.md 52)
 * :func:`request_refresh` (换一张, API.md 29) · :func:`admin_refetch` (API.md 69) · :func:`word_is_studied`
 * :func:`retry_if_failed` / :func:`retry_failed_studied` — the failed-image retry rules (PLAN §5.1 C7): the scheduler's
   03:30 maintenance and ``wd images-retry`` call the sweep; the per-word hook is for the bank / batch sites (R-16)
@@ -31,9 +37,10 @@ from .service import (
     request_refresh,
     retry_failed_studied,
     retry_if_failed,
+    wears_memory_card,
     word_is_studied,
 )
-from .store import activate_svg
+from .store import activate_memo, activate_svg
 
 __all__ = [
     "RETRY_MAX_AUTO_30D",
@@ -41,6 +48,7 @@ __all__ = [
     "RETRY_NIGHTLY_LIMIT",
     "RETRY_NIGHTLY_PRIORITY",
     "SvgRejected",
+    "activate_memo",
     "activate_svg",
     "admin_refetch",
     "card_meta",
@@ -54,5 +62,6 @@ __all__ = [
     "request_refresh",
     "retry_failed_studied",
     "retry_if_failed",
+    "wears_memory_card",
     "word_is_studied",
 ]

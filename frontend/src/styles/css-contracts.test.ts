@@ -33,6 +33,23 @@ describe('stylesheet contracts', () => {
     expect(settings).toMatch(/\.settings__row input\[type="number"\]\s*\{[^}]*width:\s*7em/);
   });
 
+  it('a switch row of the settings page spans the row, so every toggle sits at its right edge, and the switch hint wraps at normal weight', () => {
+    const settings = sheet('pages/SettingsPage.css');
+    // `.settings__row > label:first-child` (hug the text, nowrap, weight 500) also matches the Switch's own <label class="switch">:
+    // a hugging label put the toggle wherever its text ended (the 图片上显示单词 row, with a hint, 118 px right of its neighbours)
+    // and handed nowrap + 500 down to `.switch__desc`. The switch rule has the same specificity (0,2,1), so it must come later.
+    const hugging = settings.search(/\.settings__row > label:first-child,\s*\.settings__row > span:first-child\s*\{[^}]*flex:\s*0 0 auto[^}]*white-space:\s*nowrap[^}]*font-weight:\s*500/);
+    const spanning = settings.search(/\.settings__row > label\.switch\s*\{[^}]*flex:\s*1 1 auto/);
+    expect(hugging).toBeGreaterThan(-1);
+    expect(spanning).toBeGreaterThan(hugging);
+    expect(settings).toMatch(/\.settings__row \.switch__desc\s*\{[^}]*white-space:\s*normal[^}]*font-weight:\s*400/);
+    // once the label spans the row its own space-between sends the toggle to the far end; the text column may shrink so the hint can wrap
+    const ui = sheet('components/ui/ui.css');
+    expect(ui).toMatch(/\.switch\s*\{[^}]*justify-content:\s*space-between/);
+    expect(ui).toMatch(/\.switch__text\s*\{[^}]*min-width:\s*0/);
+    expect(ui).toMatch(/\.switch__control\s*\{[^}]*flex:\s*none/);
+  });
+
   it('the listen player sizes its play button with two classes, so the 64 px outrank the 52 px of `.btn--icon.btn--lg`', () => {
     const listen = sheet('pages/ListenPage.css');
     // ui.css sizes a large icon button with two classes (specificity 0,2,0); a bare `.listen-bar__play` (0,1,0) would lose

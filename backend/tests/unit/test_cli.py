@@ -70,7 +70,7 @@ def test_images_retry_is_owned_and_registered_by_the_images_handler(settings):
     """PLAN §5.1 C7: `wd images-retry [--limit N] [--dry-run]` joins fetch-image / images-prune under wd.images.handler."""
     from wd.images import handler, service
 
-    assert cli.COMMAND_OWNERS["wd.images.handler"] == ("fetch-image", "images-prune", "images-retry")
+    assert cli.COMMAND_OWNERS["wd.images.handler"] == ("fetch-image", "images-prune", "images-retry", "images-import")
     parser = cli.build_parser()
     args = parser.parse_args(["images-retry", "--dry-run", "--limit", "5"])
     assert args.func is handler.cmd_images_retry and args.dry_run is True and args.limit == 5
@@ -78,6 +78,25 @@ def test_images_retry_is_owned_and_registered_by_the_images_handler(settings):
     assert args.dry_run is False and args.limit == service.RETRY_NIGHTLY_LIMIT == 50 and args.since is None
     args = parser.parse_args(["images-retry", "--since", "2026-11-11T12:00:00Z", "--limit", "300"])
     assert args.since == "2026-11-11T12:00:00Z" and args.limit == 300 and service.OUTAGE_SWEEP_PRIORITY == 90
+
+
+def test_images_import_is_owned_and_registered_by_the_images_handler(settings):
+    """docs/MEMORY_CARDS_DESIGN.md §3.5: `wd images-import DIR --manifest FILE [--dry-run] [--only LEMMA …]` and `wd images-import --undo FILE`
+    join the other image commands under wd.images.handler — exactly the options DEPLOY §9 lists."""
+    from wd.images import handler
+
+    assert "images-import" in cli.COMMAND_OWNERS["wd.images.handler"]
+    parser = cli.build_parser()
+    args = parser.parse_args(["images-import", "studio/cards", "--manifest", "studio/manifest.json", "--dry-run", "--only", "moon", "ice cream"])
+    assert args.func is handler.cmd_images_import
+    assert (args.dir, args.manifest, args.undo, args.dry_run, args.only) == ("studio/cards", "studio/manifest.json", None, True, ["moon", "ice cream"])
+    args = parser.parse_args(["images-import", "--undo", "studio/manifest.json"])
+    assert (args.dir, args.manifest, args.undo, args.dry_run, args.only) == (None, None, "studio/manifest.json", False, None)
+    sub = parser._subparsers._group_actions[0].choices["images-import"]  # type: ignore[union-attr]
+    assert {o for o in sub._option_string_actions if o.startswith("--") and o != "--help"} == {"--manifest", "--undo", "--dry-run", "--only"}
+    # neither mode, both modes, a directory without a manifest, a directory with --undo: usage errors (exit 2) before any database is opened
+    for argv in (["images-import"], ["images-import", "d", "--manifest", "m.json", "--undo", "m.json"], ["images-import", "d"], ["images-import", "d", "--undo", "m.json"], ["images-import", "--manifest", "m.json"]):
+        assert cli.main(argv) == 2, argv
 
 
 def test_learn_order_is_owned_and_registered_by_the_learn_order_module(settings):

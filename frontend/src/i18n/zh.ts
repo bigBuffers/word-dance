@@ -115,6 +115,7 @@ export const zh = {
               webhookFailDns: '域名无法解析，请检查地址拼写', webhookFailPrivate: '地址不是公网地址，已拒绝；请填写公网 https 地址', webhookFailTimeout: '连接超时，请稍后重试或检查目标服务',
               webhookFailTls: 'HTTPS 证书校验失败，请检查目标站点的证书', webhookFailInvalidUrl: '地址格式无效，请检查后重新填写',
               showImages: '显示配图', zhExamples: '例句译文', zhModes: { tap: '点按显示', always: '总是显示' }, autoPronounce: '自动发音', accent: '口音', accents: { 'en-US': '美音', 'en-GB': '英音' },
+              imageWord: '图片上显示单词', imageWordHint: '关掉后，带单词的配图只显示画面',
               dance: '单词之舞', danceModes: { full: '全部', form_only: '只拼读', off: '关' }, danceHint: '新词和还不熟的词出现时，字母按音节入场、重读的音节跳得最高；翻面时 up、in、cold 这类词再做一次它的意思。「只拼读」只跳字母、不做意思动作；点发音按钮随时可以再看一次',
               nativeReminderHint: '在 App 里，提醒由手机本机在设定时间发出，不需要 Bark 或微信推送', reminderDenied: '没有通知权限，请到系统设置里允许 word-Dance 发送通知', allowNotifications: '允许通知',
               displayName: '昵称', changePassword: '修改密码', currentPassword: '当前密码', newPassword: '新密码', export: '导出数据', exportCsv: 'CSV', exportJson: 'JSON',

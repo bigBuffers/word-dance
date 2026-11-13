@@ -12,6 +12,10 @@ Boots a throwaway word-Dance instance and walks the whole product once against t
     → re-add via unfamiliar (times_added 2) → export → import into bob → history/stats → admin overview
     (today_usd > 0 with the fake; with_photo + with_claude_svg + card_only == with_content) → pronunciation clip
     (English, and Chinese with accent=zh-CN where the host's `say` has a Chinese voice)
+    → 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §7): `wd images-import` of ONE card (backend/tests/fixtures/memo: moon.svg + manifest,
+    dry run first) → ImageMeta.word_layer true with its hook → `?plain=1` serves the same picture without `word-art` →
+    Settings.image_word off / on reads back → a second import is `unchanged` → 换一张 leaves the card in place → 不合适 on the
+    card is only recorded (the report is open in the admin's list, the card stays) → `--undo`
     → third-party sign-in with the dev fakes (WD_AUTH_FAKE_PROVIDERS=1, slice 2-A): health flags → WeChat bridge
     (ticket → scan → confirm → poll = session, providers ['wechat_mini']; 89 wants a password; unbind the last way in → 409;
     with a password → unbind 200) → QQ (start → fake consent → callback → finish → session) → Apple (start → fake consent
@@ -723,6 +727,62 @@ def run_scenario(s: Smoke) -> None:
             expect(chinese.json()["error"]["code"] == "audio_unavailable" and chinese.json()["error"]["details"].get("reason") in ("off", "failed"), f"503 {chinese.text[:200]}")
         alice.get("/media/audio", params={"text": "moon", "accent": "zh-CN"}, expect_status=400)  # no Han character: that is an English accent's text
         expect(alice.error_code() == "validation_error", f"code {alice.error_code()}")
+
+    # ------------------------------------------------------------------ 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §7 acceptance)
+    memo_step = "记忆图卡: wd images-import (dry run → import) → ImageMeta.word_layer + hook → ?plain=1 without word-art → image_word round trip → unchanged → 换一张 keeps the card → 不合适 is only recorded → --undo"
+    memo_dir = s.backend / "tests" / "fixtures" / "memo"  # moon.svg — one of the ten approved sample cards — and its manifest
+    memo_manifest = memo_dir / "manifest.json"
+    probe = alice.raw("GET", "/api/words/moon")
+    if probe.status_code == 404:
+        s.skip(memo_step, "the seed in use has no word `moon` (a --seed override); the shipped K-12 seed has it")
+    else:
+        with s.step(memo_step):
+            expect(probe.status_code == 200, f"GET /api/words/moon → {probe.status_code}: {probe.text[:200]}")
+            wid = probe.json()["word"]["id"]
+            before = probe.json()["image"]
+            expect(before["word_layer"] is False and before["hook_zh"] is None and before["note_zh"] is None, f"moon should not wear a memory card yet: {before}")
+            card = json.loads(memo_manifest.read_text(encoding="utf-8"))["cards"]["moon"]
+            cp = s.cli("images-import", str(memo_dir), "--manifest", str(memo_manifest), "--dry-run")
+            expect("1 would be imported, 0 unchanged, 0 rejected" in cp.stdout and "nothing written" in cp.stdout, f"dry run: {cp.stdout[-300:]}")
+            expect(alice.get(f"/api/words/{wid}/image") == before, "the dry run changed the word's image")
+            cp = s.cli("images-import", str(memo_dir), "--manifest", str(memo_manifest))
+            expect("1 imported, 0 unchanged, 0 rejected" in cp.stdout, f"import: {cp.stdout[-300:]}")
+            img = alice.get(f"/api/words/{wid}/image")
+            expect(img["kind"] == "svg" and img["provider"] == "claude_svg" and img["mime"] == "image/svg+xml" and img["attribution"] is None, f"card meta {img}")
+            expect(img["word_layer"] is True and img["hook_zh"] == card["hook_zh"] and img["note_zh"] == card["note_zh"] and img["alt_zh"] == card["alt_zh"], f"card captions {img}")
+            expect(img["url"].startswith("/media/images/") and img["url"].endswith(".svg") and (img["width"], img["height"]) == (800, 500), f"card url / size {img}")
+            expect(alice.get("/api/words/moon")["image"] == img, "WordDetail.image differs from GET /api/words/{id}/image")
+            full = alice.get(img["url"])
+            expect(full.headers.get("content-type", "").startswith("image/svg+xml") and "default-src 'none'" in full.headers.get("content-security-policy", ""), "card media headers")
+            expect('<g id="word-art"' in full.text and "wa-0-m" in full.text and '<desc id="aigc-label">' in full.text and "<text" not in full.text, "the stored card lacks its word layer or its AIGC label")
+            plain = alice.get(img["url"], params={"plain": "1"})
+            expect("word-art" not in plain.text and "wa-" not in plain.text and '<g id="scene"' in plain.text, "?plain=1 still carries the word layer (or lost the scene)")
+            expect(plain.text == full.text[: full.text.index('<g id="word-art"')] + "</svg>", "?plain=1 is not the stored file cut before the word layer")
+            expect(plain.headers.get("cache-control") == full.headers.get("cache-control") == "private, max-age=31536000, immutable", f"cache-control {plain.headers.get('cache-control')!r}")
+            expect(plain.headers.get("content-type") == full.headers.get("content-type") and plain.headers.get("content-security-policy") == full.headers.get("content-security-policy"), "?plain=1 changed the media headers")
+            expect(alice.get(img["url"], params={"plain": "0"}).text == full.text, "plain=0 must be the full picture")
+            expect(alice.get("/api/settings")["image_word"] is True, "image_word should default to true")
+            off = alice.call("PUT", "/api/settings", json={"image_word": False})
+            expect(off["image_word"] is False and alice.get("/api/settings")["image_word"] is False and alice.get("/api/auth/me")["settings"]["image_word"] is False, f"image_word off did not read back: {off}")
+            expect(alice.call("PUT", "/api/settings", json={"image_word": True})["image_word"] is True and alice.get("/api/settings")["image_word"] is True, "image_word on did not read back")
+            cp = s.cli("images-import", str(memo_dir), "--manifest", str(memo_manifest))
+            expect("0 imported, 1 unchanged, 0 rejected" in cp.stdout, f"second import: {cp.stdout[-300:]}")
+            expect(alice.get(f"/api/words/{wid}/image") == img, "an unchanged import replaced the card")
+            # 换一张 from a client that still offers it: the job runs in a `wd worker-once` subprocess, searches nothing and the card stays
+            r = alice.post(f"/api/words/{wid}/image/refresh", expect_status=202)
+            expect(r["image_state"] == "queued", f"refresh {r}")
+            s.drain(alice)
+            expect(alice.get(f"/api/words/{wid}/image") == img, "换一张 replaced a memory card")
+            expect(alice.get(f"/api/words/{wid}")["word"]["image_state"] == "ready", "image_state did not return to ready after the skipped fetch")
+            # 不合适 on the card (API.md 28): the report is recorded for the admin and that is all — nothing rejected, no fetch queued
+            rep = alice.post(f"/api/words/{wid}/report", {"target": "image", "reason": "irrelevant_image"}, expect_status=201)
+            expect(isinstance(rep.get("id"), int), f"report {rep}")
+            expect(alice.get(f"/api/words/{wid}/image") == img, "a learner's report took a memory card down")
+            expect(alice.get(f"/api/words/{wid}")["word"]["image_state"] == "ready", "a report on a memory card queued a fetch")
+            expect(any(x["id"] == rep["id"] and x["status"] == "open" for x in alice.get("/api/admin/reports")["items"]), "the report on the card is not in the admin's open list")
+            cp = s.cli("images-import", "--undo", str(memo_manifest))
+            expect("1 memory card(s) superseded" in cp.stdout, f"undo: {cp.stdout[-300:]}")
+            expect(alice.get(f"/api/words/{wid}/image") == before, "the undo did not bring the previous picture (the template card) back")
 
     # ------------------------------------------------------------------ third-party sign-in (slice 2-A, the dev fakes)
     wx = Api(s.base_url, "wechat-web")

@@ -3,7 +3,8 @@
 Route order follows API.md §1: ``POST /api/words/batch-mark`` is registered before the dynamic routes, and
 ``GET /api/words/{id_or_lemma}`` never matches a path with a ``/``. Every route applies the §1 visibility rule
 (404 ``word_not_found`` for an invisible word). The explicit content request checks the Claude budget through
-``wd.ai.budget.can_spend`` (WP5); the image report / 换一张 go through ``wd.images`` (WP6).
+``wd.ai.budget.can_spend`` (WP5); the image report / 换一张 go through ``wd.images`` (WP6) — except a report on a 记忆图卡,
+which is recorded and changes nothing: a reviewed card is taken down by an admin (endpoint 71), not by one learner's tap.
 """
 
 from __future__ import annotations
@@ -277,7 +278,11 @@ def report(
             (uid, wid, body.target, body.reason, body.note, word.get("active_image_id"), word.get("active_content_id"), now),
         )
         report_id = int(cur.lastrowid)
-        if body.target == "image" and word.get("active_image_id") is not None:
+        # A 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §8) is only reported: the row above — with image_id = the card — is the whole
+        # effect; nothing is rejected, active_image_id / image_state stay, no fetch_image is queued, so no stock picture or
+        # old-style drawing takes the place of a reviewed card because one learner tapped 不合适. The report waits as `open` in the
+        # admin's list, and resolving it with refetch_image (endpoint 71) is what rejects the card and fetches a replacement.
+        if body.target == "image" and word.get("active_image_id") is not None and not images.wears_memory_card(conn, wid):
             # WP6: active image → rejected, system_events('image_rejected'), fetch_image with it excluded
             images.reject_active_image(conn, wid, reason=body.reason, priority=FETCH_IMAGE_PRIORITY_USER, now=now)
     return {"id": report_id}

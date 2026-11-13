@@ -764,3 +764,8 @@ def test_makefile_targets_are_wired():
     assert re.search(r"^install:.*\n(\t.*\n)*\t.*deploy/install\.sh", mk, re.M)
     assert re.search(r"^backup:.*\n(\t.*\n)*\t.*\bbackup\b", mk, re.M)
     assert "--keep-daily 14 --keep-weekly 8" in mk
+    # studio-check installs on EVERY run, like `setup`: a recipe that installs only when studio/.venv/bin/python is missing never
+    # repairs a venv whose first `pip install` died half-way (index unreachable) — the interpreter is there, pytest is not
+    assert re.search(
+        r"^studio-check:.*\n\ttest -x studio/\.venv/bin/python \|\| \$\(STUDIO_PYTHON\) -m venv studio/\.venv\n\tstudio/\.venv/bin/pip install .*-r studio/requirements\.txt pytest\n", mk, re.M
+    )

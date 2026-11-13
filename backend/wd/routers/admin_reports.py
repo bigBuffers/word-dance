@@ -5,6 +5,10 @@
   report flow (:func:`wd.images.reject_active_image` — active image ``rejected`` + ``fetch_image`` excluding it),
   ``regenerate`` enqueues ``generate_content {word_id, force:true}`` on a fresh ``content:<id>:r<n>`` key
   (validated words only); ``resolution`` records what happened (``regenerated`` / ``image_replaced`` / ``dismissed``).
+  ``refetch_image`` is the operator's explicit decision and the one way a report takes a 记忆图卡 down: the learner's own
+  report (endpoint 28) only recorded it. The card is ``rejected`` first, so the fetch queued here meets no card and runs
+  (``handler.handle_fetch_image`` holds back only a fetch for a word that still wears one); ``wd images-import`` then
+  leaves that card down unless the word is named with ``--only`` (``store.retired_memo``).
 """
 
 from __future__ import annotations

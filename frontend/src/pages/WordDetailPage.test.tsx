@@ -1,13 +1,19 @@
 // WordDetailPage render tests (FRONTEND §5.8): the remove / reset confirmations explain what happens, the bank
 // panel reads "not reviewed yet" for a never-graded row and names an overdue review, and ECDICT's pos ratio is
-// shown as readable shares.
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+// shown as readable shares. Memory cards (docs/MEMORY_CARDS_DESIGN.md §3.6–3.7): `settings.image_word` off asks for the picture
+// without its word layer, the mnemonic lines are the picture's hook + caveat while it is shown (else the content's mnemonic),
+// and such a picture offers flag-image only. A report on the picture (flag-image, or the sheet with a picture reason) takes a
+// photo or an older drawing down, so the page waits for the next one (the 3-s poll); a memory card stays — the server only
+// records the report — so there the page thanks and does nothing else: no poll, no parked button, the same picture.
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { UserWord, WordDetail } from '@/api/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getWordImage, reportWord } from '@/api/endpoints';
+import type { Content, ImageMeta, UserWord, WordDetail } from '@/api/types';
+import { ToastProvider } from '@/components/ui/Toast';
 import { zh } from '@/i18n/zh';
 
-const h = vi.hoisted(() => ({ detail: null as unknown, settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap', dance_mode: 'full' as 'full' | 'off' } }));
+const h = vi.hoisted(() => ({ detail: null as unknown, settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap', dance_mode: 'full' as 'full' | 'off', image_word: true } }));
 
 vi.mock('@/api/endpoints', () => ({
   getWord: vi.fn(() => Promise.resolve(h.detail)),
@@ -89,7 +95,7 @@ function detailOf(mine: UserWord | null, word: Partial<WordDetail['word']> = {})
     content: null,
     content_state: 'none',
     content_deferred_until: null,
-    image: { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null },
+    image: { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null },
     mine,
     redirected_from: null,
     history: [],
@@ -99,9 +105,11 @@ function detailOf(mine: UserWord | null, word: Partial<WordDetail['word']> = {})
 function renderDetail() {
   return render(
     <MemoryRouter initialEntries={['/words/1']}>
-      <Routes>
-        <Route path="/words/:idOrLemma" element={<WordDetailPage />} />
-      </Routes>
+      <ToastProvider>
+        <Routes>
+          <Route path="/words/:idOrLemma" element={<WordDetailPage />} />
+        </Routes>
+      </ToastProvider>
     </MemoryRouter>,
   );
 }
@@ -170,5 +178,203 @@ describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
     await screen.findByRole('heading', { level: 1 });
     expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
     expect(container.querySelector('.dword')).toBeNull();
+  });
+});
+
+describe('WordDetailPage memory cards (FRONTEND §5.8; docs/MEMORY_CARDS_DESIGN.md §3.6–3.7)', () => {
+  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
+  const content: Content = {
+    word: 'abandon', valid: true, meaning_zh: 'MEANING-ZH', meaning_en: 'to leave', examples: [{ en: 'She abandoned hope.', zh: 'EXAMPLE-ZH' }], collocations: ['abandon ship'], mnemonic_zh: 'MNEMONIC-ZH',
+    image_keywords: [], image_alt_zh: 'ALT-ZH', difficulty: 2, version: 1, prompt_version: 'content_v1', model: 'sonnet', created_at: '2026-10-13T00:00:00Z',
+  };
+  const ready = (image: ImageMeta): WordDetail => ({ ...detailOf(mineRow()), content, content_state: 'ready', image });
+  const src = () => (screen.getByRole('img') as HTMLImageElement).getAttribute('src');
+  /** The mnemonic lines: every paragraph after the mnemonic subtitle inside the examples card. */
+  const lines = () => {
+    const title = screen.queryByRole('heading', { level: 3, name: zh.study.mnemonic });
+    const out: (string | null)[] = [];
+    for (let el = title?.nextElementSibling ?? null; el && el.tagName === 'P'; el = el.nextElementSibling) out.push(el.textContent);
+    return out;
+  };
+  beforeEach(() => {
+    h.settings.show_images = true;
+    h.settings.image_word = true;
+  });
+  afterEach(() => {
+    h.settings.show_images = false;
+    h.settings.image_word = true;
+  });
+
+  it("shows the whole picture, its hook and — quieter — its caveat instead of the content's mnemonic; flag-image only", async () => {
+    h.detail = ready(memoryCard);
+    const { container } = renderDetail();
+    await screen.findByText('MEANING-ZH');
+    expect(src()).toBe('/media/images/ab/0123.svg');
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    expect(container.querySelector('.word-detail__mnemonic-note')?.textContent).toBe('NOTE-ZH');
+    expect(screen.queryByText('MNEMONIC-ZH')).toBeNull();
+    expect(screen.getByText(zh.word.aiImage)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: zh.word.changeImage })).toBeNull();
+    expect(screen.getByRole('button', { name: zh.word.flagImage })).toBeTruthy();
+  });
+
+  it('image_word off → the same picture without its word layer (?plain=1), the hook stays', async () => {
+    h.settings.image_word = false;
+    h.detail = ready(memoryCard);
+    renderDetail();
+    await screen.findByText('MEANING-ZH');
+    expect(src()).toBe('/media/images/ab/0123.svg?plain=1');
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+  });
+
+  it("falls back to the content's mnemonic when pictures are hidden or the picture brings no hook", async () => {
+    h.settings.show_images = false;
+    h.detail = ready(memoryCard);
+    const hidden = renderDetail();
+    await screen.findByText('MEANING-ZH');
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+    expect(screen.queryByText('HOOK-ZH')).toBeNull();
+    expect(screen.queryByText('NOTE-ZH')).toBeNull();
+    hidden.unmount();
+
+    h.settings.show_images = true;
+    h.settings.image_word = false;
+    h.detail = ready({ ...memoryCard, word_layer: false, hook_zh: null, note_zh: null }); // an older drawing
+    renderDetail();
+    await screen.findByText('MEANING-ZH');
+    expect(src()).toBe('/media/images/ab/0123.svg'); // nothing to drop
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+    expect(screen.getByRole('button', { name: zh.word.changeImage })).toBeTruthy(); // and it can still be replaced
+  });
+
+  it("a picture that could not be loaded takes its hook with it; the failure is not held against the next word's picture, nor against a retry that arrives", async () => {
+    const first: WordDetail = { ...ready(memoryCard), word: { ...ready(memoryCard).word, confusables: ['abundant'] } };
+    const other: ImageMeta = { ...memoryCard, id: 9, url: '/media/images/cd/4567.svg', hook_zh: 'HOOK-2', note_zh: null };
+    h.detail = first;
+    renderDetail();
+    await screen.findByText('MEANING-ZH');
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    fireEvent.error(screen.getByRole('img'));
+    expect(screen.queryByRole('img')).toBeNull(); // the box is empty …
+    expect(lines()).toEqual(['MNEMONIC-ZH']); // … so the line about the picture goes too
+
+    // the page moves on to another word without remounting: what it remembers is the source that failed, not "the picture failed"
+    h.detail = { ...ready(other), word: { ...ready(other).word, id: 2, lemma: 'abundant', display: 'abundant', confusables: ['abandon'] } };
+    fireEvent.click(screen.getByRole('link', { name: 'abundant' }));
+    await screen.findByRole('heading', { level: 1, name: 'abundant' });
+    expect(src()).toBe('/media/images/cd/4567.svg');
+    expect(lines()).toEqual(['HOOK-2']);
+
+    // and back: the source that failed is requested again — the content's mnemonic until it has arrived, then its hook
+    h.detail = first;
+    fireEvent.click(screen.getByRole('link', { name: 'abandon' }));
+    await screen.findByRole('heading', { level: 1, name: 'abandon' });
+    expect(src()).toBe('/media/images/ab/0123.svg');
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+    fireEvent.load(screen.getByRole('img'));
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+  });
+
+  it('the hook comes with the picture: it shows while the word has no content yet; without a hook there is no mnemonic then', async () => {
+    h.detail = { ...detailOf(mineRow()), image: memoryCard };
+    const first = renderDetail();
+    await screen.findByText(zh.study.contentFailed);
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    first.unmount();
+
+    h.detail = detailOf(mineRow());
+    renderDetail();
+    await screen.findByText(zh.study.contentFailed);
+    expect(lines()).toEqual([]);
+  });
+});
+
+describe('WordDetailPage picture reports (FRONTEND §5.8, API.md 28; docs/MEMORY_CARDS_DESIGN.md §8)', () => {
+  const photo: ImageMeta = { id: 5, url: '/media/images/cd/4567.jpg', kind: 'photo', provider: 'wikimedia', mime: 'image/jpeg', width: 1024, height: 640, alt_zh: 'PHOTO-ZH', attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+  /** An older drawing (svg-v2): same provider as a memory card, no word layer. */
+  const drawing: ImageMeta = { id: 7, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+  const memoryCard: ImageMeta = { ...drawing, id: 8, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
+  /** What `GET …/image` answers once the reported picture is down. */
+  const next: ImageMeta = { ...photo, id: 6, url: '/media/images/ef/89ab.jpg' };
+  const src = () => (screen.getByRole('img') as HTMLImageElement).getAttribute('src');
+  const flag = () => screen.getByRole('button', { name: zh.word.flagImage }) as HTMLButtonElement;
+  const toasts = () => screen.queryAllByRole('status').map((t) => t.querySelector('.toast__msg')?.textContent);
+  /** Lets the image poll tick: only the interval is faked, so `findBy…` / `waitFor` keep their real timers. */
+  const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+  const open = async (image: ImageMeta) => {
+    h.detail = { ...detailOf(mineRow()), image };
+    const view = renderDetail();
+    await screen.findByRole('img');
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    return view;
+  };
+
+  beforeEach(() => {
+    h.settings.show_images = true;
+    vi.mocked(reportWord).mockResolvedValue({ id: 1 });
+    vi.mocked(getWordImage).mockResolvedValue(next);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    h.settings.show_images = false;
+  });
+
+  it.each([['a photo', photo], ['an older drawing', drawing]])('flag-image on %s: the report, the thanks, then the wait for the next picture — as before', async (_kind, image) => {
+    await open(image);
+    fireEvent.click(flag());
+    await waitFor(() => expect(toasts()).toEqual([zh.word.reported]));
+    expect(vi.mocked(reportWord).mock.calls).toEqual([[1, { target: 'image', reason: 'irrelevant_image' }]]);
+    expect(flag().disabled).toBe(true); // parked until the replacement is in
+    expect(screen.getByRole('button', { name: zh.word.changeImage }).getAttribute('aria-busy')).toBe('true');
+    expect(getWordImage).not.toHaveBeenCalled();
+    await tick(3_000);
+    expect(vi.mocked(getWordImage).mock.calls).toEqual([[1]]);
+    await waitFor(() => expect(src()).toBe(next.url));
+    expect(flag().disabled).toBe(false);
+    await tick(9_000);
+    expect(getWordImage).toHaveBeenCalledTimes(1); // the poll ended with the new picture
+  });
+
+  it('flag-image on a memory card: the same report and the same thanks, and nothing else — the picture stays, nothing is polled, the button is not parked', async () => {
+    await open(memoryCard);
+    fireEvent.click(flag());
+    await waitFor(() => expect(toasts()).toEqual([zh.word.reported])); // thanks only: the text promises no other picture
+    expect(vi.mocked(reportWord).mock.calls).toEqual([[1, { target: 'image', reason: 'irrelevant_image' }]]);
+    expect(flag().disabled).toBe(false);
+    await tick(61_000); // longer than the whole poll (20 × 3 s) would run
+    expect(getWordImage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(src()).toBe(memoryCard.url);
+    expect(screen.getByText('HOOK-ZH')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: zh.word.changeImage })).toBeNull();
+    expect(flag().disabled).toBe(false);
+  });
+
+  it('the report sheet with a picture reason follows the same rule: a photo is waited for, a memory card is not', async () => {
+    for (const [image, polls] of [[photo, 1], [memoryCard, 0]] as const) {
+      const view = await open(image);
+      fireEvent.click(screen.getByRole('button', { name: zh.word.report }));
+      fireEvent.click(screen.getByRole('radio', { name: zh.word.reportReasons.inappropriate_image }));
+      fireEvent.click(screen.getByRole('button', { name: zh.common.confirm }));
+      await waitFor(() => expect(toasts()).toEqual([zh.word.reported]));
+      expect(vi.mocked(reportWord).mock.lastCall).toEqual([1, { target: 'image', reason: 'inappropriate_image' }]);
+      await tick(3_000);
+      expect(getWordImage).toHaveBeenCalledTimes(polls);
+      view.unmount();
+      vi.useRealTimers();
+      vi.mocked(getWordImage).mockClear();
+    }
+  });
+
+  it('a report that fails shows the error and starts no wait, whatever the picture', async () => {
+    vi.mocked(reportWord).mockRejectedValue(new Error('offline'));
+    await open(photo);
+    fireEvent.click(flag());
+    await waitFor(() => expect(toasts().length).toBe(1));
+    expect(toasts()).not.toContain(zh.word.reported);
+    await tick(3_000);
+    expect(getWordImage).not.toHaveBeenCalled();
+    expect(flag().disabled).toBe(false);
   });
 });

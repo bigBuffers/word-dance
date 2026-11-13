@@ -644,6 +644,7 @@ export default function StudyPage() {
             onSkip={() => undefined}
             zhMode={settings?.zh_examples ?? 'tap'}
             showImage={settings?.show_images ?? true}
+            imageWord={settings?.image_word ?? true}
             preview={previewAll(snapshotOf(item.mine), { uwId: item.mine?.id ?? null, timeZone })}
             zhForced={zhForced}
             accent={settings?.accent}
@@ -706,6 +707,7 @@ export default function StudyPage() {
           onSkip={() => tapSkip(current)}
           zhMode={settings?.zh_examples ?? 'tap'}
           showImage={settings?.show_images ?? true}
+          imageWord={settings?.image_word ?? true}
           preview={previewAll(snapshotOf(current.mine), { uwId: current.mine?.id ?? null, timeZone })}
           hint={hint}
           onHint={() => setHint(true)}

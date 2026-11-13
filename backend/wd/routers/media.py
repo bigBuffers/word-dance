@@ -4,6 +4,11 @@
   ``^[0-9a-f]{2}/[0-9a-f]{64}\\.(jpg|svg)$`` (anything else, incl. traversal attempts, is 404);
   ``Cache-Control: private, max-age=31536000, immutable``, ``nosniff``, and for SVG
   ``Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'``. Session cookie required.
+  ``?plain=1`` on a 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.2) answers the same picture without its word layer — the
+  page shows pictures through ``<img>``, so only the server can take the layer off (``images.memo.strip_word_layer``: the
+  file up to ``<g id="word-art"`` plus ``</svg>``) — under the same headers; the immutable cache keys on the full URL, so
+  the two variants never mix. A photo, a drawing without that one layer, or any other value of ``plain`` is served exactly as
+  without the parameter.
 * ``GET /media/card/{word_id}.svg`` — the deterministic template card (LRU-cached), ``private, max-age=86400``,
   same SVG headers; 404 ``word_not_found`` outside the API.md §1 visibility rule.
 """
@@ -12,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -19,7 +25,8 @@ from fastapi.responses import FileResponse
 
 from ..deps import current_user, get_db, visible_word_sql
 from ..errors import ApiError
-from ..images import render_card
+from ..images import memo, render_card
+from ..images.sanitize_svg import MAX_BYTES as SVG_MAX_BYTES
 
 router = APIRouter()
 
@@ -29,10 +36,23 @@ IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
 CARD_CACHE = "private, max-age=86400"
 SVG_MIME = "image/svg+xml"
 JPEG_MIME = "image/jpeg"
+PLAIN_MAX_BYTES = 2 * SVG_MAX_BYTES  # ?plain=1 reads the file into memory: a stored drawing is a sanitised SVG (≤ 60 KB + its label); anything bigger is served whole
 
 
 def svg_headers(cache: str) -> dict[str, str]:
     return {"Cache-Control": cache, "X-Content-Type-Options": "nosniff", "Content-Security-Policy": SVG_CSP}
+
+
+def plain_svg(file: Path) -> str | None:
+    """The stored drawing ``file`` without its word layer (``?plain=1``), or None when it is not a 记忆图卡 with exactly one
+    word layer in the canonical place — the caller then serves the file as it is. Never raises: an unreadable, oversized or
+    non-UTF-8 file is simply not a card."""
+    try:
+        if file.stat().st_size > PLAIN_MAX_BYTES:
+            return None
+        return memo.strip_word_layer(file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 @router.get("/media/images/{path:path}", include_in_schema=False)
@@ -44,6 +64,11 @@ def media_image(path: str, request: Request, conn: sqlite3.Connection = Depends(
     if not file.is_file():
         raise ApiError("not_found")
     if path.endswith(".svg"):
+        # `plain` means something for exactly one value, given once (API.md 52): ?plain=0, ?plain=true, ?plain=1&plain=1 are the full picture
+        if request.query_params.getlist("plain") == ["1"]:
+            plain = plain_svg(file)
+            if plain is not None:
+                return Response(content=plain, media_type=SVG_MIME, headers=svg_headers(IMMUTABLE_CACHE))
         return FileResponse(file, media_type=SVG_MIME, headers=svg_headers(IMMUTABLE_CACHE))
     return FileResponse(file, media_type=JPEG_MIME, headers={"Cache-Control": IMMUTABLE_CACHE, "X-Content-Type-Options": "nosniff"})
 

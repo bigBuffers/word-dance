@@ -1,8 +1,12 @@
 // WordDetailPage — `/words/:idOrLemma` (FRONTEND §5.8, API.md 23–30). Full ECDICT entry, forms chips,
 // Claude content (or the pending / deferred / failed copy with generateExamples), image with refresh-image (refresh →
-// poll `GET …/image`) and flag-image (report target image), SRS panel, my last 20 actions, the actions bar
+// poll `GET …/image`) and flag-image (report target image, then the same poll), SRS panel, my last 20 actions, the actions bar
 // (unfamiliar / mastered / remove / reset) and the report sheet. A lemma that maps to several headwords (409
 // ambiguous_form) renders the candidate chips; `redirected_from` shows zh.word.redirected(from).
+// Memory cards (docs/MEMORY_CARDS_DESIGN.md §3.7): `settings.image_word` reaches `WordImage` like `show_images` does (off →
+// the picture without its word layer), and the mnemonic lines are the picture's own hook + caveat while it is shown — pictures
+// switched on and this one not failed to load (`failedSrc`). A report on such a picture is only recorded by the server and the
+// card stays up, so after it the page thanks and waits for nothing (`awaitNextImage`): no poll, no parked button, the same picture.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { errorMessage, isApiError } from '@/api/client';
@@ -11,7 +15,7 @@ import type { ContentResponse, ReportTarget } from '@/api/endpoints';
 import type { MarkAction, ReportReason, ReviewLogItem, UserState, WordBrief, WordDetail } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { ExampleList } from '@/components/study/ExampleList';
-import { WordImage } from '@/components/study/WordImage';
+import { imageSrc, memoryLines, WordImage } from '@/components/study/WordImage';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -116,6 +120,9 @@ export default function WordDetailPage() {
   const [reporting, setReporting] = useState(false);
   const [imageRefreshing, setImageRefreshing] = useState(false);
   const [requestingContent, setRequestingContent] = useState(false);
+  // the picture source that could not be loaded, as `WordImage` reports it — the source and not a flag: this page moves from
+  // word to word without remounting, and a flag would take the hook of the next picture; cleared when that source arrives after all
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const imagePoll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const patch = useCallback(
@@ -203,16 +210,27 @@ export default function WordDetailPage() {
     }
   }, [data, startImagePoll, toast]);
 
+  // After a report on the picture (flag-image, or the sheet with a picture reason): a photo or an older drawing is taken down by
+  // the report and another one fetched, so the page waits for it like after refresh-image. A memory card is not — the server
+  // records the report and keeps the card (docs/MEMORY_CARDS_DESIGN.md §8) — so there is nothing to wait for: polling would park
+  // the flag-image button for a minute and then end without a change. The toast (`zh.word.reported`) only thanks, for either.
+  const awaitNextImage = useCallback(
+    (d: WordDetail) => {
+      if (!d.image.word_layer) startImagePoll(d.word.id, d.image.url);
+    },
+    [startImagePoll],
+  );
+
   const flagImage = useCallback(async () => {
     if (!data) return;
     try {
       await reportWord(data.word.id, { target: 'image', reason: 'irrelevant_image' });
       toast.success(zh.word.reported);
-      startImagePoll(data.word.id, data.image.url);
+      awaitNextImage(data);
     } catch (e) {
       toast.error(errorMessage(e));
     }
-  }, [data, startImagePoll, toast]);
+  }, [awaitNextImage, data, toast]);
 
   // ---- generateExamples ---------------------------------------------------------------------------------------
   const requestContent = useCallback(async () => {
@@ -286,7 +304,7 @@ export default function WordDetailPage() {
       toast.success(zh.word.reported);
       setReportOpen(false);
       setNote('');
-      if (body.target === 'image') startImagePoll(data.word.id, data.image.url);
+      if (body.target === 'image') awaitNextImage(data);
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
@@ -352,6 +370,11 @@ export default function WordDetailPage() {
   const timeZone = settings?.timezone;
   const dueSentence = mine && state === 'learning' ? formatDueSentence(mine.srs.due_at, mine.srs.step) : null;
   const pos = formatPos(word.pos);
+  const showImages = settings?.show_images ?? true;
+  const imageWord = settings?.image_word ?? true;
+  // the mnemonic lines do not wait for the content: a memory card's hook comes with the picture (design D5, as on the study
+  // card) — and goes with it when the picture could not be loaded: then the content's own mnemonic, as with pictures off
+  const memory = memoryLines(data.image, showImages && failedSrc !== imageSrc(data.image, imageWord), content && data.content_state === 'ready' && !deferred ? content.mnemonic_zh : null);
 
   return (
     <section className="page word-detail">
@@ -452,11 +475,14 @@ export default function WordDetailPage() {
 
       <WordImage
         image={data.image}
-        showImages={settings?.show_images ?? true}
+        showImages={showImages}
+        imageWord={imageWord}
         alt={content?.image_alt_zh ?? null}
         onRefresh={() => void refreshImage()}
         onFlag={() => void flagImage()}
         refreshing={imageRefreshing}
+        onFailed={setFailedSrc}
+        onLoaded={(loadedSrc) => setFailedSrc((f) => (f === loadedSrc ? null : f))}
         className="word-detail__image"
       />
 
@@ -482,12 +508,6 @@ export default function WordDetailPage() {
                 </ul>
               </>
             )}
-            {content.mnemonic_zh && (
-              <>
-                <h3 className="word-detail__subtitle">{zh.study.mnemonic}</h3>
-                <p className="word-detail__mnemonic">{content.mnemonic_zh}</p>
-              </>
-            )}
           </>
         ) : (
           <>
@@ -507,6 +527,13 @@ export default function WordDetailPage() {
                 {zh.word.generateExamples}
               </Button>
             )}
+          </>
+        )}
+        {memory && (
+          <>
+            <h3 className="word-detail__subtitle">{zh.study.mnemonic}</h3>
+            <p className="word-detail__mnemonic">{memory.text}</p>
+            {memory.note && <p className="word-detail__mnemonic-note">{memory.note}</p>}
           </>
         )}
       </section>

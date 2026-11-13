@@ -1,0 +1,13 @@
+#!/bin/sh
+# studio/tools/check — check.py under the studio's own virtualenv (studio/.venv: fonttools + skia-pathops + defusedxml,
+# see studio/README.md), with the repository's backend on PYTHONPATH: the sanitiser and the memory-card structure check are
+# the app's own code (backend/wd/images/), not a copy. Works from any directory; every path comes from this file's location.
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+py="$repo/studio/.venv/bin/python"
+if [ ! -x "$py" ]; then
+  echo "studio/tools/check: $py not found — create the studio's virtualenv first:" >&2
+  echo "  cd $repo && python3.12 -m venv studio/.venv && studio/.venv/bin/pip install -r studio/requirements.txt" >&2
+  exit 2
+fi
+PYTHONPATH="$repo/backend${PYTHONPATH:+:$PYTHONPATH}" exec "$py" "$here/check.py" "$@"

@@ -42,7 +42,7 @@ def test_0015_adds_dance_mode_with_its_default_and_keeps_rows(settings, tmp_path
         assert (15, "dance_mode") in result.applied and db.current_version(c) >= 15
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         info = {r["name"]: r for r in c.execute("PRAGMA table_info(user_settings)")}
-        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_cols + ["dance_mode"]  # appended, nothing rebuilt
+        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_cols + ["dance_mode", "image_word"]  # appended, nothing rebuilt (0021's image_word rides along, test_db_0021.py)
         assert info["dance_mode"]["type"] == "TEXT" and info["dance_mode"]["notnull"] == 1 and info["dance_mode"]["dflt_value"] == "'full'"
         assert [tuple(r) for r in c.execute("SELECT user_id, accent, zh_examples, auto_pronounce, stages_json FROM user_settings ORDER BY user_id")] == before
         assert [r[0] for r in c.execute("SELECT dance_mode FROM user_settings")] == ["full", "full"]

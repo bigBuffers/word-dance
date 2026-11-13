@@ -150,6 +150,14 @@
   line-height: 1.6;
 }
 
+/* a memory card's sound / meaning caveat under its hook: a quieter second line (smaller, muted), never a second mnemonic */
+.study-card__mnemonic-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
 .study-card__notice {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);

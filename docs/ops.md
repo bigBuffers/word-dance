@@ -127,7 +127,9 @@ step install.sh runs after `import-seed`) and `0015_dance_mode.sql` (the 单词�
 `docs/releases/2026-11-auth-signup-1a.md`: two new tables `identities` / `login_codes`, nullable columns on `users` and
 `sessions`, one backfill `UPDATE users SET password_set_at = created_at`) and `0019_family.sql` (the guardian + child release,
 `docs/releases/2026-11-auth-signup-1b.md`: the `family_codes` table, `users.profile_prompted_at`, `sessions.guardian_gate_at`; no data
-step) are additive. Rehearse before the real run: copy the database to a
+step) and `0021_memory_cards.sql` (the 记忆图卡 release, `docs/MEMORY_CARDS_DESIGN.md` §3.4: three `ADD COLUMN`s —
+`user_settings.image_word` defaulting to 1, the nullable `word_images.hook_zh` / `note_zh`; no data step, a restart applies it,
+and it rolls back by `git checkout` alone — the cards themselves are a separate step, below; restart in either direction while nobody is in the middle of a session: a 推荐词 graded 不熟悉 whose answer never reached the device is re-sent afterwards and answered from the response stored with it, which the new code brings up to date when the old code stored it, while the old code answers a response stored by the new one with 500 until the new code is back) are additive. Rehearse before the real run: copy the database to a
 private directory and `.venv/bin/python -I scripts/rehearse_migration.py <copy>` (applies the pending files through the
 real runner and exits 0 only when every check of the release note passes — SQLite ≥ 3.26 on the box), then
 `wd check db` after the upgrade for the eight invariants (the four stage-model lines and, from schema 14, the four
@@ -155,6 +157,57 @@ ls -1t /home/sqin/word-dance-data/frontend-releases                     # newest
 cd /home/sqin/word-dance-data && ln -sfn frontend-releases/<previous> frontend.tmp && mv -T frontend.tmp frontend
 sudo systemctl restart word-dance                                       # wd serve resolves the symlink at startup
 ```
+
+记忆图卡 (the picture cards drawn offline in `studio/`; `docs/MEMORY_CARDS_DESIGN.md`, DESIGN §9) are data, not code: they are
+imported **after** the release that brings migration 0021 is live, and only on the owner's go for that batch. Nothing is fetched or
+generated — the command reads the reviewed files, validates and sanitises each one, and activates it; the picture a word had
+before stays in `images/` as `superseded`.
+
+```bash
+cd /home/sqin/word-Dance                                                      # Mac: the checkout, with WD_DATA_DIR=/Users/sqin/word-dance-data
+wd backup                                                                     # word_images rows change; the files only ever get added
+wd images-import studio/cards --manifest studio/manifest.json --dry-run       # every check, nothing written; fix whatever is `rejected` in studio/ first
+wd images-import studio/cards --manifest studio/manifest.json                 # `N imported, N unchanged, N rejected`; exit 1 = something was rejected
+wd images-import studio/cards --manifest studio/manifest.json --only moon     # one word (or a few) of the manifest
+```
+
+A second run of the same manifest is `unchanged` for every card already in place (a corrected `hook_zh` / `note_zh` / `alt_zh` is
+written onto the unchanged card, and a card whose file is missing from `images/` — an incomplete copy to another server, images
+restored from an older archive than the database — gets it back: `unchanged … (file restored)`); a redrawn file is a new picture and
+supersedes the earlier card. A card that could not be stored (`rejected: could not store …` — disk full, the database locked) does
+not end the run: the summary is still printed, exit 1, and a second run finishes the batch. A manifest in which two keys name one
+word (`moon` and `Moon`) is refused whole, exit 2 — the key is the lower-case lemma, and so is the file name. Learners see a card at their next
+page load (the media URL is new, so no cache is stale); 设置 → 图片上显示单词 switches the word layer per learner. Check afterwards:
+`sqlite3 "file:$WD_DATA_DIR/word-dance.db?mode=ro" "SELECT COUNT(*) FROM word_images WHERE status='active' AND prompt_version LIKE 'memo-%'"`
+and one card in the browser, with and without `?plain=1`.
+
+Import while no picture job is **running**
+(`sqlite3 "file:$WD_DATA_DIR/word-dance.db?mode=ro" "SELECT type, COUNT(*) FROM jobs WHERE type IN ('fetch_image','generate_svg') AND status = 'running' GROUP BY 1"`
+prints nothing): a job that started before the import looked at the word's picture as it was then and can still activate its own
+find over the card a few seconds later. Queued jobs are no concern — unless an admin asked for them (API.md 69) they meet the guard
+when they run. Those an admin did ask for are the ones that replace a card when their turn comes; list them, with their word:
+`sqlite3 "file:$WD_DATA_DIR/word-dance.db?mode=ro" "SELECT j.id, j.type, w.lemma FROM jobs j JOIN words w ON w.id = json_extract(j.payload_json, '$.word_id') WHERE j.type IN ('fetch_image','generate_svg') AND j.status = 'queued' AND (json_extract(j.payload_json, '$.requested') = 1 OR json_extract(j.payload_json, '$.provider') IS NOT NULL OR json_extract(j.payload_json, '$.query') IS NOT NULL)"`
+(nothing printed = none queued; for a listed lemma that is in the manifest, let the job finish first or import that word again
+with `--only` afterwards). A card lost either way comes back with a second run of the import (the line that is not `unchanged` names it).
+
+Rollback of the pictures (a batch the owner does not like after all; before rolling the code back below 0021's release, so no
+learner is left with a card the old UI cannot switch):
+
+```bash
+wd images-import --undo studio/manifest.json --dry-run                        # what would come back for each word
+wd images-import --undo studio/manifest.json                                  # each card → superseded; the previous picture (or the template card) is active again
+```
+
+`--undo` touches only the manifest's words whose active picture is a memory card, deletes nothing, and can be undone by importing
+again. Each such word goes back to what it showed when its card arrived: the newest earlier picture that is not a card, or the
+template card when a report had taken that picture down (older pictures are not revived) or no earlier file is left — with
+`image_state` `failed` when the word had been fetched for before, so the nightly retry still looks for a photo. A card is never
+replaced by the automatic paths (换一张 is not offered on it, and a `fetch_image` job for such a word ends `skipped: memory_card`),
+and a learner's 不合适 on a card is only recorded: the report waits in 管理 → 内容反馈 and the card stays up. What does replace one is
+the operator's own decision: 换图 on that report (`refetch_image`, API.md 71 — the card becomes `rejected`; the next whole-manifest
+import lists it `retired` and leaves it down, `--only <lemma>` brings it back, `--undo` reports the word `kept`), the admin's 换图 on
+the word (API.md 69) and `wd fetch-image <word>` — and `wd images-prune` removes the rows and files of cards of words nobody has
+studied for N days like any other image (import again to restore them).
 
 Dry runs: `deploy/install.sh --dry-run` prints every mutating step with a leading `+` and changes nothing;
 `deploy/install.sh --help` lists the options (`--with-caddy DOMAIN`, `--with-nginx DOMAIN`, `--with-ecdict`,
@@ -222,7 +275,7 @@ that scenario — the moved directory is untouched.
 | Fresh install, nobody can log in | `GET /api/health` → `needs_setup:true`; login page says the first account becomes admin | open the site and register (first account = admin, no invite needed) — or `wd create-admin` on the box |
 | Need more accounts in `invite` mode | registration page asks for a code | `wd invite --uses 5 --days 7` (printed once) or 管理 → 邀请码 |
 | Openverse 429 | provider cooldown in the overview | nothing; Wikimedia continues; optionally register an Openverse app key |
-| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies — never while a 预生成/prewarm plan is running, and note that the nightly retry re-fetches a studied word's failed image, so pruning only ever costs a re-download), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move the data directory to a bigger disk — the §5 procedure: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh --move-data` (without the flag a differing `WD_DATA_DIR` is refused; never a hand-edited unit; later upgrades follow the unit by themselves) |
+| Disk low | admin health `disk_free_bytes` | `wd images-prune --unused-days 365` (cached files of words nobody studies — never while a 预生成/prewarm plan is running, and note that the nightly retry re-fetches a studied word's failed image, so pruning only ever costs a re-download; a pruned 记忆图卡 is not re-fetched — run `wd images-import studio/cards --manifest studio/manifest.json` again, §4), `claude-logs/` is pruned to 14 days automatically, trim `backups/` by hand, or move the data directory to a bigger disk — the §5 procedure: stop → `mv` → fix `WD_DATA_DIR=` in the moved `.env` → `WD_DATA_DIR=<new> deploy/install.sh --move-data` (without the flag a differing `WD_DATA_DIR` is refused; never a hand-edited unit; later upgrades follow the unit by themselves) |
 | Service down for days | first tick builds **today's** batches only (back *before* a user's push time → built in the normal window, published + delivered at push time; back *after* it → published at once, e-mail/webhook `skipped` when > 6 h late); `downtime` event; history shows 「服务器离线」 | nothing — missed days are not back-filled by design |
 | A job is `dead` | 管理 → 任务 (or `GET /api/admin/jobs?status=dead`) with `last_error` | fix the cause (auth, budget, provider), then 重试 / `POST /api/admin/jobs/requeue-dead`; nightly maintenance requeues dead content/lookup jobs once |
 | Second instance / stray CLI | log `lease_busy`; `wd worker-once` / `wd tick` / `wd restore` exit 2 「word-dance.service is running …」 | never drain the queue next to the service — watch `journalctl -u word-dance -f` or `GET /api/admin/jobs`; stop the service first if you really must. A `lease_busy` right after a crash restart is normal: the service retries every 30 s and logs `lease_acquired` once the dead instance's 90-s lease expires |

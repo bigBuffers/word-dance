@@ -63,9 +63,20 @@ Disabled unless the operator supplies an API key (`WD_PIXABAY_KEY`, `WD_PEXELS_K
 ### 3.4 Generated images
 
 - **AI 生成示意图** — flat-style SVG concept cards drawn by Claude (section 4) when no acceptable photo exists for a word a user studies; sanitised server-side before storage (`provider='claude_svg'`, `license='generated'`). The picture contains no text (the sanitiser drops any `<text>`/`<tspan>` the model emits, so the card never spells the word), and the SVG file carries a generation marker `<desc id="aigc-label">…</desc>` naming the generator, the project, the model and the date, so a copied file still identifies itself as AI-generated.
+- **记忆图卡** — picture cards for selected words (the 小学 list first): one SVG with a text-free scene and, as its top layer, the word itself woven into the picture. They are drawn by Claude (section 4) in an offline studio (`studio/`), validated and reviewed there, and imported by the operator with `wd images-import`; they are stored and labelled exactly like the AI concept cards (`provider='claude_svg'`, `license='generated'`, the `<desc id="aigc-label">` marker, the caption 「AI 生成示意图」). The scene contains no text; the only letters on a card are the glyph outlines of section 3.5.
 - **系统生成卡片** — a deterministic text-only SVG rendered from dictionary data when neither a photo nor an AI card is available.
 
-Neither contains third-party material; both are labelled as generated in the UI.
+None of them contains third-party material other than the letterforms of section 3.5; all are labelled as generated in the UI.
+
+### 3.5 Letterforms in the picture cards — Andika (SIL Open Font License 1.1)
+
+| | |
+|---|---|
+| Work | **Andika**, a literacy typeface by SIL International (<https://software.sil.org/andika/>) — the weight used is Andika Bold |
+| Copyright | Copyright (c) 2004-2022 SIL International (<http://www.sil.org/>), with Reserved Font Names "Andika" and "SIL" |
+| Licence | SIL Open Font License, Version 1.1 — full text in [`studio/fonts/OFL.txt`](studio/fonts/OFL.txt) and at <https://openfontlicense.org/open-font-license-official-text/> |
+| Where it is used | The word on a 记忆图卡 is made of Andika glyph **outlines converted to SVG paths** (`<path id="wa-…">` inside `<g id="word-art">`) by `studio/tools/letters.py`; a pupil copies what the card shows, so the letterforms are the font's own, never redrawn. The font file itself (`studio/fonts/Andika-Bold.ttf`) is a tool of the offline studio: it is kept in this repository unmodified, next to its licence, and is **not** shipped to, embedded in or loaded by the web app — no device needs the font installed. |
+| Why this is permitted | The OFL allows the font to be used, embedded and redistributed with any software provided the copyright notice and licence accompany the Font Software (they do, in `studio/fonts/`) and the fonts are not sold by themselves; documents and pictures created with the font are not restricted by the licence, and the Reserved Font Names are not used for any derived font (none is made). |
 
 ## 4. AI-generated text — Claude Code (Anthropic)
 
@@ -82,8 +93,9 @@ Backend packages (FastAPI, uvicorn, Pydantic, bcrypt, httpx, Pillow, defusedxml,
 
 | Where | What is shown |
 |---|---|
-| Under every picture | `图片：{title} · {creator} · {license} ↗` linking to the source page; `AI 生成示意图` / `系统生成卡片` for generated images |
+| Under every picture | `图片：{title} · {creator} · {license} ↗` linking to the source page; `AI 生成示意图` / `系统生成卡片` for generated images (a 记忆图卡 is an `AI 生成示意图`) |
 | 设置 → 关于与数据来源 | version, ECDICT (MIT), the word-list sources (curriculum / examination-authority lists and the CET syllabi), the picture providers, the 「例句由 AI 生成」 notice |
+| `/legal/licenses.html` (开源许可与数据来源) | the ECDICT MIT notice and licence text, the word-list scope, the picture notes, and the Andika copyright notice with its SIL OFL 1.1 reference for the letters on the 记忆图卡 |
 | API | `ImageMeta.attribution` (`license`, `license_url`, `landing_url`, `text`) on every word image ([`docs/API.md`](docs/API.md) §9) |
 | Repository | this file, [`data/seed/ATTRIBUTION.md`](data/seed/ATTRIBUTION.md) (generated per build), [`data/lists/README.md`](data/lists/README.md) (provenance of the official lists), [`data/licenses/ECDICT-LICENSE`](data/licenses/ECDICT-LICENSE), [`LICENSE`](LICENSE) |
 

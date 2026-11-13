@@ -64,6 +64,7 @@ def test_get_settings_defaults(client: TestClient, alice):
         "auto_pronounce": True,
         "accent": "en-US",
         "dance_mode": "full",
+        "image_word": True,
         "email_enabled": False,
         "webhook_enabled": False,
         "webhook_url": None,
@@ -111,6 +112,7 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
     st = r.json()
     assert st["push_time"] == "21:00" and st["daily_new_count"] == 20 and st["zh_examples"] == "always" and st["accent"] == "en-GB" and st["show_images"] is False
     assert st["dance_mode"] == "off" and client.get("/api/settings").json()["dance_mode"] == "off"
+    assert st["image_word"] is True  # 记忆图卡: untouched by a save that does not name it (its own round trip is test_image_word_round_trip)
     assert st["timezone"] == "Asia/Shanghai" and st["stages"] == ["xs", "zk"] and st["max_reviews"] == 60  # untouched
     assert st["next_push_at"] == "2026-10-14T13:00:00Z"  # 21:00 Shanghai later today
     frozen_clock.advance(minutes=5)
@@ -131,6 +133,28 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
     assert r.status_code == 200 and r.json()["timezone"] == "Europe/London" and r.json()["push_enabled"] is False and r.json()["stages"] == ["zk", "gk"]
 
 
+def test_image_word_round_trip(client: TestClient, alice, settings):
+    """Settings.image_word (migration 0021, docs/MEMORY_CARDS_DESIGN.md §3.3): 「图片上显示单词」 — true by default, a boolean on
+    endpoint 15, stored 0 / 1, and read back by endpoint 14 and /api/auth/me; an explicit null is "no change" like on every flag."""
+    assert client.get("/api/settings").json()["image_word"] is True and client.get("/api/auth/me").json()["settings"]["image_word"] is True
+    r = client.put("/api/settings", json={"image_word": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["image_word"] is False and r.json()["show_images"] is True and r.json()["dance_mode"] == "full"  # nothing else moved
+    assert client.get("/api/settings").json()["image_word"] is False and client.get("/api/auth/me").json()["settings"]["image_word"] is False
+    c = db.connect(settings.db_path)
+    try:
+        assert c.execute("SELECT image_word FROM user_settings WHERE user_id = ?", (alice["id"],)).fetchone()[0] == 0
+    finally:
+        c.close()
+    assert client.put("/api/settings", json={"image_word": None, "push_time": "09:00"}).json()["image_word"] is False
+    assert client.put("/api/settings", json={"image_word": True}).json()["image_word"] is True
+    c = db.connect(settings.db_path)
+    try:
+        assert c.execute("SELECT image_word FROM user_settings WHERE user_id = ?", (alice["id"],)).fetchone()[0] == 1
+    finally:
+        c.close()
+
+
 @pytest.mark.parametrize(
     "body,field",
     [
@@ -147,6 +171,7 @@ def test_partial_update_recomputes_next_push_at(client: TestClient, alice, setti
         ({"current_stage": "gk"}, "current_stage"),  # stored stages are xs/zk
         ({"zh_examples": "never"}, "zh_examples"),
         ({"dance_mode": "loud"}, "dance_mode"),
+        ({"image_word": "sometimes"}, "image_word"),
         ({"accent": "en-AU"}, "accent"),
         ({"webhook_format": "slack"}, "webhook_format"),
         ({"nickname": "x"}, "nickname"),

@@ -19,7 +19,7 @@ const settings: Settings = {
   stages: ['cet4', 'cet6'],
   current_stage: 'cet4',
   show_images: true,
-  zh_examples: 'tap', dance_mode: 'full',
+  zh_examples: 'tap', dance_mode: 'full', image_word: true,
   auto_pronounce: false,
   accent: 'en-US',
   email_enabled: false,

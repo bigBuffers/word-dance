@@ -482,6 +482,10 @@ function LearnSection({ settings }: { settings: Settings }) {
         <Switch label={zh.settings.showImages} checked={settings.show_images} onChange={(v) => void save({ show_images: v })} />
       </div>
       <div className="settings__row">
+        {/* memory cards (docs/MEMORY_CARDS_DESIGN.md §3.7): off → `WordImage` asks for the same picture without its word layer; photos and older drawings have none and stay as they are */}
+        <Switch label={zh.settings.imageWord} description={zh.settings.imageWordHint} checked={settings.image_word} onChange={(v) => void save({ image_word: v })} />
+      </div>
+      <div className="settings__row">
         <span id="settings-zh">{zh.settings.zhExamples}</span>
         <Segmented
           size="sm"

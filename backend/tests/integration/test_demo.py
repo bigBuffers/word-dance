@@ -49,7 +49,7 @@ def test_demo_is_public_and_lists_the_allow_listed_words_in_order(client: TestCl
         assert word["id"] == ids[word["lemma"]] and word["my_state"] is None and word["is_public"] is True and word["stages"] == ["xs", "zk"]
         assert word["translation_short"] == TRANSLATIONS[word["lemma"]] and word["phonetic"] == PHONETICS[word["lemma"]]
         assert item["content"] is None
-        assert item["image"] == {"id": None, "url": f"/media/demo/{word['id']}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None}
+        assert item["image"] == {"id": None, "url": f"/media/demo/{word['id']}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
         dance = item["dance"]
         assert dance is not None and "".join(dance["letters"]) == word["display"] and dance["source"] == "rule" and dance["semantic"] is None
     # the card route: public, cached, the SVG headers of the media routes
@@ -102,7 +102,7 @@ def test_demo_serves_the_active_claude_svg_and_the_active_content(client: TestCl
     content_id = int(dbconn.execute("INSERT INTO word_contents(word_id, version, prompt_version, model, content_json, status) VALUES (?, 1, 'content-v1', 'claude-sonnet-5-5', ?, 'active') RETURNING id", (up, json.dumps(content, ensure_ascii=False))).fetchone()[0])
     dbconn.execute("UPDATE words SET active_image_id = ?, image_state = 'ready', active_content_id = ?, content_state = 'ready' WHERE id = ?", (image_id, content_id, up))
     item = client.get("/api/demo").json()["items"][0]
-    assert item["image"] == {"id": image_id, "url": f"/media/demo/{up}.svg", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": "一个向上的箭头", "attribution": None}
+    assert item["image"] == {"id": image_id, "url": f"/media/demo/{up}.svg", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": "一个向上的箭头", "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
     assert item["content"]["meaning_zh"] == "向上" and item["content"]["examples"][0]["en"] == "Look up at the sky." and item["word"]["content_state"] == "ready"
     r = client.get(f"/media/demo/{up}.svg")
     assert r.status_code == 200 and r.text == svg and r.headers["cache-control"] == "public, max-age=86400" and r.headers["content-security-policy"] == SVG_CSP
@@ -112,3 +112,22 @@ def test_demo_serves_the_active_claude_svg_and_the_active_content(client: TestCl
     assert item["image"]["kind"] == "card" and item["image"]["provider"] == "card_svg" and item["image"]["url"] == f"/media/demo/{up}.svg"
     r = client.get(f"/media/demo/{up}.svg")
     assert r.status_code == 200 and r.text.startswith("<svg") and "向上" in r.text  # the template card carries the active meaning
+
+
+def test_demo_shows_a_memory_card_with_its_word_and_no_plain_variant(client: TestClient, dbconn, settings):
+    """记忆图卡 on a demo word (docs/MEMORY_CARDS_DESIGN.md §3.3): the public route serves the whole card — a guest has no
+    `image_word` setting to switch off — so the demo's ImageMeta keeps `word_layer: false` (the URL has no `?plain=1`) and carries
+    no hook; the route ignores the parameter."""
+    from wd.images import activate_memo
+
+    up = insert_word(dbconn, "up")
+    card = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><g id="scene"><rect width="800" height="500" fill="#9CD3F5"/></g>'
+        '<g id="word-art"><path id="wa-0-u" d="M300 200H340V260Z" fill="#fff"/><path id="wa-1-p" d="M360 200H400V280Z" fill="#fff"/></g></svg>'
+    )
+    image_id = activate_memo(dbconn, settings, up, card, alt_zh="朵朵把风筝举上天", hook_zh="u 像杯子，p 把它举起来。", note_zh=None, model="claude-fable-5-2", prompt_version="memo-1", now="2026-10-14T00:00:00Z")
+    item = client.get("/api/demo").json()["items"][0]
+    assert item["image"] == {"id": image_id, "url": f"/media/demo/{up}.svg", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": "朵朵把风筝举上天", "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
+    full = client.get(f"/media/demo/{up}.svg")
+    assert full.status_code == 200 and '<g id="word-art"' in full.text and "wa-0-u" in full.text
+    assert client.get(f"/media/demo/{up}.svg?plain=1").text == full.text

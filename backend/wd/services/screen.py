@@ -134,6 +134,32 @@ def today_counts_for(conn: sqlite3.Connection, user_id: int, batch: dict[str, An
     return batches.today_counts(conn, batch, batches.visible_items(conn, user_id, int(batch["id"])), now=now, cfg=cfg)
 
 
+# ``ImageMeta`` fields that did not exist when older responses were stored whole in ``review_logs.result_json``, with what they
+# mean for a picture of that time: the three of migration 0021 (记忆图卡) — every picture stored before it was a photo, an
+# online drawing or the template card, none of them a card with a word layer and a hook
+STORED_IMAGE_DEFAULTS: dict[str, Any] = {"word_layer": False, "hook_zh": None, "note_zh": None}
+
+
+def upgrade_stored(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring a response snapshot read back from ``review_logs.result_json`` up to today's DTO, in place (``ScreenResponse``
+    here, ``GradeResponse`` in ``batches._stored_grade``).
+
+    The snapshot is the whole response as the build of its day wrote it, and its ``study_item.image`` is an ``ImageMeta``: one
+    stored before the 记忆图卡 release has no ``word_layer`` / ``hook_zh`` / ``note_zh``. The response models take no defaults
+    (API.md §9 is the contract, and a default would hide a real omission in ``image_meta``), so without this the replay of a
+    不熟悉 that was committed before the deploy and never acknowledged — the tablet asleep, the request in flight at the
+    restart — fails response validation: a 500 the client treats as transient and re-sends for ever. Only missing keys are
+    filled; a snapshot of today is answered as stored. The other direction has no fix here: a response stored by this build
+    carries the three keys, and the build before it (``extra='forbid'``) answers its replay 500 until this one is back
+    (docs/ops.md §4)."""
+    item = data.get("study_item")
+    image = item.get("image") if isinstance(item, dict) else None
+    if isinstance(image, dict):
+        for key, value in STORED_IMAGE_DEFAULTS.items():
+            image.setdefault(key, value)
+    return data
+
+
 def _stored_response(conn: sqlite3.Connection, user_id: int, client_event_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT result_json FROM review_logs WHERE user_id = ? AND client_event_id = ?",
@@ -147,6 +173,7 @@ def _stored_response(conn: sqlite3.Connection, user_id: int, client_event_id: st
         data = None
     if not isinstance(data, dict):
         data = {"word_id": None, "verdict": None, "mine": None, "added_to_today": False, "study_item": None, "today": None}
+    upgrade_stored(data)
     data["duplicate"] = True
     return data
 
@@ -253,4 +280,4 @@ def apply_verdict(
         return response
 
 
-__all__ = ["apply_verdict", "has_study_row", "new_quota_room", "screen_next", "study_item_dict", "today_counts_for"]
+__all__ = ["apply_verdict", "has_study_row", "new_quota_room", "screen_next", "study_item_dict", "today_counts_for", "upgrade_stored"]

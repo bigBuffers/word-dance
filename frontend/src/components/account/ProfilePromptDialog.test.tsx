@@ -18,7 +18,7 @@ const legacy: User = {
 };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
-  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
+  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
 const server: ServerFlags = { version: '0.1.0', registration_mode: 'verified', email_configured: false, ai_enabled: true, images_enabled: true, dev: false, needs_setup: false, audio: false, audio_key: '', audio_zh: false, sms_enabled: true, wechat_enabled: false, qq_enabled: false, apple_enabled: false };

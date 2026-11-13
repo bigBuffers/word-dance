@@ -124,3 +124,18 @@ backup: ## Snapshot the live database with retention (wd backup --keep-daily 14 
 clean: ## Remove build outputs and caches inside the checkout (never the data directory)
 	rm -rf frontend/dist .pytest_cache backend/.pytest_cache backend/build backend/*.egg-info .coverage htmlcov
 	find backend -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# The 记忆图卡 studio (studio/README.md) is not part of the app and not part of `make test`: its tools need fonttools and
+# skia-pathops, which are no dependencies of the app, so they live in their own small virtualenv (gitignored;
+# STUDIO_PYTHON picks the interpreter). Like `setup` above, the venv is created when missing and its packages are
+# installed on EVERY run: a no-op that needs no network once they are there, and the thing that repairs a venv whose
+# first install died half-way — an unreachable index leaves studio/.venv/bin/python behind, so a recipe that installs
+# only when the interpreter is missing would skip the install for ever and die with `No module named pytest`.
+# The tests validate the tools AND every approved card in studio/cards against the repository's own sanitiser and
+# structure check (backend/wd/images/) — run this after touching either side.
+STUDIO_PYTHON ?= python3.12
+.PHONY: studio-check
+studio-check: ## Memory-card studio: studio/.venv (created when missing, its packages installed on every run — a no-op without network once they are there), then studio/tests (tools + every card in studio/cards)
+	test -x studio/.venv/bin/python || $(STUDIO_PYTHON) -m venv studio/.venv
+	studio/.venv/bin/pip install -q --disable-pip-version-check -r studio/requirements.txt pytest
+	studio/.venv/bin/python -m pytest -q -p no:cacheprovider studio/tests

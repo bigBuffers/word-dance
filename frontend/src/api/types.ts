@@ -110,6 +110,7 @@ export interface Settings {
   stages: Stage[]; current_stage: Stage;   // Stage string on the wire; the server stores the 1–5 index (§9.1)
   show_images: boolean; zh_examples: 'tap' | 'always'; auto_pronounce: boolean; accent: 'en-US' | 'en-GB';
   dance_mode: DanceMode;                // 单词之舞: full = spelling + stress (card show) + semantic dance (reveal); form_only skips the semantic dance; off = plain headword
+  image_word: boolean;                  // 记忆图卡: show the word woven into the picture (default true); false → the client asks for the picture without it (`?plain=1`, endpoint 52)
   email_enabled: boolean; webhook_enabled: boolean; webhook_url: string | null; webhook_format: WebhookFormat;
   next_push_at: string | null;          // read-only
   email_verified: boolean;              // read-only
@@ -165,6 +166,8 @@ export interface ImageMeta {
   provider: 'wikimedia' | 'openverse' | 'pixabay' | 'pexels' | 'claude_svg' | 'card_svg';
   mime: 'image/jpeg' | 'image/svg+xml'; width: number | null; height: number | null;
   alt_zh: string | null; attribution: Attribution | null;      // null for the card
+  word_layer: boolean;                                        // 记忆图卡 (a drawing whose last layer `#word-art` is the word itself): `url` + '?plain=1' is the same picture without the word (endpoint 52); false for photos, older drawings and the template card
+  hook_zh: string | null; note_zh: string | null;             // 记忆图卡 only: the memory hook the picture acts out, and an optional sound / meaning caveat — the 记忆 section shows them instead of content.mnemonic_zh; null otherwise
 }
 export interface WordDetail {
   word: WordBrief & {

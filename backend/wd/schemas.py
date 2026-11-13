@@ -244,6 +244,7 @@ class Settings(Model):
     auto_pronounce: bool
     accent: Literal["en-US", "en-GB"]
     dance_mode: DanceMode
+    image_word: bool
     email_enabled: bool
     webhook_enabled: bool
     webhook_url: str | None
@@ -1059,6 +1060,7 @@ class SettingsUpdateRequest(Model):
     auto_pronounce: bool | None = None
     accent: Literal["en-US", "en-GB"] | None = None
     dance_mode: DanceMode | None = None
+    image_word: bool | None = None
     email_enabled: bool | None = None
     webhook_enabled: bool | None = None
     webhook_url: str | None = None
@@ -1245,6 +1247,10 @@ class Attribution(Model):
 
 
 class ImageMeta(Model):
+    """API.md §9 ``ImageMeta``. ``word_layer`` / ``hook_zh`` / ``note_zh`` describe a 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.3;
+    ``images.memo.is_memo``): ``url + '?plain=1'`` is the same picture without the word (endpoint 52), and the hook is what the
+    记忆 section shows instead of ``content.mnemonic_zh``. Photos, older drawings and the template card: ``false`` / ``null`` / ``null``."""
+
     id: int | None
     url: str
     kind: Literal["photo", "svg", "card"]
@@ -1254,6 +1260,9 @@ class ImageMeta(Model):
     height: int | None
     alt_zh: str | None
     attribution: Attribution | None
+    word_layer: bool
+    hook_zh: str | None
+    note_zh: str | None
 
 
 class WordForm(Model):

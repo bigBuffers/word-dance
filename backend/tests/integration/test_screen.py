@@ -3,6 +3,7 @@ services.screen.apply_verdict with a local stand-in for WP4's batches.append_to_
 
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
 
@@ -279,6 +280,29 @@ def test_screen_page_verdict_carries_todays_counts_when_a_batch_exists(client: T
     first = client.post("/api/screen/verdict", json={"client_event_id": event, "word_id": word_id(settings, "abandon"), "verdict": "unfamiliar"}).json()
     again = client.post("/api/screen/verdict", json={"client_event_id": event, "word_id": word_id(settings, "abandon"), "verdict": "unfamiliar"}).json()
     assert again["duplicate"] is True and again["today"] == first["today"] and first["today"]["new"] == 1
+
+
+def test_a_verdict_stored_before_migration_0021_replays_with_todays_image_meta(client: TestClient, settings, alice):
+    """The stored ScreenResponse carries study_item.image as the build of its day wrote it; one from before the 记忆图卡 release has
+    no word_layer / hook_zh / note_zh and must still replay as a valid response (services.screen.upgrade_stored)."""
+    run(settings, "INSERT INTO push_batches(user_id, local_date, timezone, status, trigger) VALUES (?, '2026-10-14', 'Asia/Shanghai', 'published', 'manual')", (alice,))
+    event = str(uuid.uuid4())
+    body = {"client_event_id": event, "word_id": word_id(settings, "absorption"), "verdict": "unfamiliar"}
+    first = client.post("/api/screen/verdict", json=body).json()
+    assert first["study_item"]["image"]["word_layer"] is False and first["duplicate"] is False
+    stored = json.loads(q1(settings, "SELECT result_json FROM review_logs WHERE client_event_id = ?", (event,)))
+    for key in ("word_layer", "hook_zh", "note_zh"):
+        del stored["study_item"]["image"][key]  # the snapshot as ea77832 wrote it
+    run(settings, "UPDATE review_logs SET result_json = ? WHERE client_event_id = ?", (json.dumps(stored, ensure_ascii=False), event))
+    r = client.post("/api/screen/verdict", json=body)
+    assert r.status_code == 200, r.text
+    again = r.json()
+    assert again["duplicate"] is True and {k: v for k, v in again.items() if k != "duplicate"} == {k: v for k, v in first.items() if k != "duplicate"}
+    # a stored response without a study item (known / skip / no room today) has nothing to bring up to date
+    from wd.services import screen
+
+    assert screen.upgrade_stored({"study_item": None, "today": None}) == {"study_item": None, "today": None}
+    assert screen.upgrade_stored({"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h"}}}) == {"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h", "note_zh": None}}}
 
 
 def test_in_batch_verdict_on_yesterdays_batch_checks_todays_quota(client: TestClient, settings, alice):

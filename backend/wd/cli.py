@@ -54,7 +54,7 @@ COMMAND_OWNERS: dict[str, tuple[str, ...]] = {
     "wd.jobs.scheduler": ("tick",),
     "wd.services.batches": ("build-batch", "push-now"),
     "wd.ai.consolidate": ("consolidate",),
-    "wd.images.handler": ("fetch-image", "images-prune", "images-retry"),
+    "wd.images.handler": ("fetch-image", "images-prune", "images-retry", "images-import"),
     "wd.diag": ("stats", "check", "logs"),
     "wd.services.learn_order": ("learn-order",),
     "wd.ai.dance": ("dance-annotate",),

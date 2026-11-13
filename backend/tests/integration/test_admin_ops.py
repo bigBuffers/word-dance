@@ -514,6 +514,7 @@ def test_regenerate_uses_the_r_suffix_and_refetch_image_enqueues(client: TestCli
     assert r.status_code == 202, r.text
     fetch = queue.get_job(seeded, r.json()["job_id"])
     assert fetch.type == "fetch_image" and fetch.payload["word_id"] == wid and fetch.payload["provider"] == "openverse" and fetch.payload["query"] == "red apple" and fetch.priority == 10
+    assert fetch.payload["requested"] is True  # the admin's refetch is the one fetch_image that may replace a 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.6)
     assert seeded.execute("SELECT image_state FROM words WHERE id = ?", (wid,)).fetchone()[0] == "queued"
     assert client.post("/api/admin/words/999999/refetch-image", json={}).status_code == 404
     assert client.post(f"/api/admin/words/{wid}/refetch-image", json={"provider": "bing"}).status_code == 400

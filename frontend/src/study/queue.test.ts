@@ -30,7 +30,7 @@ const noUndo: [UndoActions] extends [never] ? true : false = true;
 // ---- fixtures ---------------------------------------------------------------------------------------
 const T0 = '2026-10-14T08:00:00.000Z';
 const at = (offsetMs: number, base = T0) => new Date(Date.parse(base) + offsetMs).toISOString();
-const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null };
+const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null };
 const counts: TodayCounts = { total: 0, done: 0, review: 0, review_done: 0, new: 0, new_done: 0, screen: 0, screen_done: 0, extra: 0, extra_done: 0, pending_content: 0, deferred_reviews: 0 };
 
 function item(id: number, over: Partial<StudyItem> = {}): StudyItem {

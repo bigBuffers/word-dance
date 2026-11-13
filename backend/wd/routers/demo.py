@@ -61,7 +61,9 @@ def _active_svg(conn: sqlite3.Connection, request: Request, word_id: int) -> tup
 
 
 def demo_image_meta(conn: sqlite3.Connection, request: Request, row: dict[str, Any]) -> dict[str, Any]:
-    """API.md 77: ``ImageMeta`` pointing at the public demo route; ``svg`` / ``claude_svg`` for an active Claude SVG, else the card."""
+    """API.md 77: ``ImageMeta`` pointing at the public demo route; ``svg`` / ``claude_svg`` for an active Claude SVG, else the card.
+    ``word_layer`` / ``hook_zh`` / ``note_zh`` stay the card's ``false`` / ``null`` / ``null`` even when that SVG is a 记忆图卡: the
+    demo route has no ``?plain=1`` (a guest has no ``image_word`` setting to switch off) and the demo card shows no 记忆 section."""
     word_id = int(row["id"])
     meta = card_meta(word_id)
     meta["url"] = f"/media/demo/{word_id}.svg"

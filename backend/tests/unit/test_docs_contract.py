@@ -15,7 +15,12 @@ DESIGN §7.1 and the runbooks describe what the code does; each test here pins o
   eight ``wd check db`` invariant names in ``diag`` order; DEPLOY §9 lists ``learn-order`` with the options the parser registers;
   FRONTEND §5.5 / §8 and zh.ts carry the 学习顺序 label while the wire value stays ``freq``;
 * API.md §9's ``ts`` block is ``frontend/src/api/types.ts`` verbatim (header comment excluded) — the frozen DTO contract, which
-  ``scripts/check_contract.py`` only compares with ``schemas.py`` (单词之舞 P3 review).
+  ``scripts/check_contract.py`` only compares with ``schemas.py`` (单词之舞 P3 review);
+* 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md): migration 0021 is the design's §3.4 block statement for statement and DEPLOY §5 / §10 and
+  ops.md §4 call it additive; DEPLOY §9 lists ``images-import`` with exactly the options the parser registers and ops.md §4 shows the
+  import and the ``--undo``; DESIGN §9 names every element and attribute ``sanitize_svg`` keeps under ``effects=True`` and the caption
+  limits of the store; API.md 15 / 29 / 52 / 69 / §9.1 describe ``image_word``, the ``skipped: memory_card`` result, ``?plain=1`` and
+  the ``requested`` refetch; DESIGN §0.3 binds the two UI terms the settings switch uses.
 """
 
 from __future__ import annotations
@@ -410,3 +415,78 @@ def test_learning_order_copy_and_release_note():
         "data/seed/learn_order.json",
     ):
         assert needle in release, needle
+
+
+# ------------------------------------------------------------------------- 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md)
+def test_memory_card_docs_match_the_code():
+    """The memory-card release changes a migration, a CLI command, the sanitiser, a media parameter and two DTOs; each is described
+    in the contract docs, and each description is pinned to the code here so neither side moves alone."""
+    from wd import cli, db
+    from wd.images import handler, memo, sanitize_svg, store
+
+    # migration 0021 = the design's §3.4 SQL block, statement for statement
+    design = doc("MEMORY_CARDS_DESIGN.md")
+    block = re.search(r"### 3\.4 .*?```sql\n(.*?)```", design, re.S)
+    assert block
+    statements = [line.strip() for line in (db.MIGRATIONS_DIR / "0021_memory_cards.sql").read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("--")]
+    assert statements == [line.strip() for line in block.group(1).splitlines() if line.strip()]
+    deploy = doc("DEPLOY.md")
+    upgrade = section(doc("ops.md"), "## 4. Upgrade and rollback")
+    assert "`0021_memory_cards.sql`" in section(deploy, "## 5. Backups and restore") and "`0021_memory_cards.sql`" in section(deploy, "## 10. Upgrade and rollback")
+    assert "`0021_memory_cards.sql`" in upgrade
+
+    # DEPLOY §9: both forms of the command, with exactly the parser's options, under its owning module; ops.md §4 shows both
+    cli_ref = section(deploy, "## 9. CLI reference")
+    usages = re.findall(r"`images-import ([^`]*)`", cli_ref)
+    assert usages == ["DIR --manifest FILE [--dry-run] [--only LEMMA …]", "--undo FILE [--dry-run] [--only LEMMA …]"], usages
+    choices = cli.build_parser()._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+    registered = {o for o in choices["images-import"]._option_string_actions if o.startswith("--") and o != "--help"}
+    assert {o for usage in usages for o in re.findall(r"--[a-z][a-z-]*", usage)} == registered, registered
+    assert cli_ref.index("`images-import DIR") < cli_ref.index("[`wd.images.handler`, WP6]") and "images-import" in cli.COMMAND_OWNERS["wd.images.handler"]
+    assert f"below schema {handler.MEMO_FROM_VERSION}" in cli_ref and handler.MEMO_FROM_VERSION == 21
+    assert "wd images-import studio/cards --manifest studio/manifest.json --dry-run" in upgrade and "wd images-import --undo studio/manifest.json" in upgrade
+
+    # DESIGN §9: what clean(effects=True) keeps, the structure rule's constants, the caption limits; §0.3 binds the UI terms
+    design_doc = doc("DESIGN.md")
+    images = section(design_doc, "## 9. Image pipeline")
+    bullet = next(line for line in images.splitlines() if line.startswith("* **记忆图卡**"))
+    for name in sorted(sanitize_svg.EFFECT_ELEMENTS | sanitize_svg.EFFECT_ATTRS):
+        assert f"`{name}`" in bullet, name
+    assert f'viewBox="{memo.VIEWBOX}"' in bullet and f'<g id="{memo.SCENE_ID}">' in bullet and f'<g id="{memo.WORD_LAYER_ID}">' in bullet
+    assert f"`prompt_version` starts with `{memo.PROMPT_PREFIX}`" in bullet and "≤ 60 KB" in bullet and memo.MAX_BYTES == 60_000
+    # the blur budget of the gate and the two rules the card mode of the sanitiser adds: the numbers are memo.py's
+    assert f"at most {memo.MAX_FILTERED} elements with a `filter` other than `none`, at most {memo.MAX_FILTER_PRIMITIVES} `feGaussianBlur` / `feDropShadow` in one `<filter>`" in bullet
+    assert f"one or two plain numbers from 0 to {memo.MAX_STD_DEVIATION}" in bullet and "no `style` attribute and no attribute value that holds a backslash" in bullet
+    assert f"`hook_zh` ≤ {store.HOOK_MAX_CHARS} characters, `note_zh` ≤ {store.NOTE_MAX_CHARS}, `alt_zh` ≤ {store.ALT_MAX_CHARS}" in bullet
+    assert f'{{"skipped": "{handler.SKIPPED_MEMORY_CARD}"}}' in images
+    # the label of the settings switch is the frontend's (zh.ts ↔ FRONTEND §8); the glossary and the settings table quote whatever it is
+    label = re.search(r"imageWord: '([^']+)'", (REPO / "frontend" / "src" / "i18n" / "zh.ts").read_text(encoding="utf-8"))
+    assert label, "zh.ts has no settings.imageWord"
+    glossary = section(design_doc, "### 0.3 Binding zh-CN glossary")
+    assert "| 记忆图卡 |" in glossary and f"| {label.group(1)} |" in glossary
+    assert f"| `image_word` | {label.group(1)} | 1 |" in section(design_doc, "### 6.1 Per-user settings")
+
+    # API.md: the endpoints the release touches
+    api = doc("API.md")
+    assert "`image_word` a boolean" in endpoint(api, 14)  # 14 and 15 share one paragraph
+    assert f'`result_json {{"skipped": "{handler.SKIPPED_MEMORY_CARD}"}}`' in endpoint(api, 29)
+    media = endpoint(api, 52)
+    assert "`?plain=1`" in media and f"`{memo.WORD_LAYER_OPEN}`" in media and "`plain=0`" in media
+    assert "`requested: true`" in next(line for line in api.splitlines() if line.startswith("**68 `"))  # 68 and 69 share one paragraph
+    notes = section(api, "### 9.1 Field notes")
+    assert "* `ImageMeta.word_layer` / `hook_zh` / `note_zh`" in notes and "* `Settings.image_word` (`user_settings.image_word`, migration 0021" in notes
+    assert "word_layer:false, hook_zh:null, note_zh:null}" in notes  # the template card's ImageMeta, spelled out
+    catalogue = section(api, "## 2. Endpoint catalogue")
+    assert "| 52 | GET | `/media/images/{path}` | U | cached photo / sanitised SVG; `?plain=1`: a 记忆图卡 without its word layer |" in catalogue
+
+    # who takes a card down: a learner's 不合适 is only recorded (28), the admin's refetch_image on that report rejects it (71) — and
+    # what the import and its rollback then do with such a word, in the three places an operator reads
+    assert "**A report on a 记忆图卡 is only recorded**" in endpoint(api, 28) and "| 28 | POST | `/api/words/{id}/report` | U | report content/image/dictionary (a 记忆图卡 is only reported) |" in catalogue
+    assert "the one way a report takes a 记忆图卡 down" in endpoint(api, 70)  # 70 and 71 share one paragraph
+    assert "is **only recorded** (API.md 28" in bullet and "verdict `retired`" in bullet and "`rejected: could not store`" in bullet
+    assert "`retired`" in cli_ref and "`rejected: could not store …`" in cli_ref and "`retired`" in upgrade and "`rejected: could not store …`" in upgrade
+    assert f"`model` is 1–{store.MODEL_MAX_CHARS} printable characters" in bullet and f"`model` 1–{store.MODEL_MAX_CHARS} printable characters" in cli_ref
+
+    # ATTRIBUTION.md: the font whose outlines are on the cards
+    attribution = (REPO / "ATTRIBUTION.md").read_text(encoding="utf-8")
+    assert "Andika" in attribution and "SIL Open Font License, Version 1.1" in attribution and "Copyright (c) 2004-2022 SIL International" in attribution

@@ -18,7 +18,7 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 const user: User = { id: 7, username: 'u_ab23cd45', display_name: '', email: null, email_verified: false, role: 'user', onboarding_state: 'pending', created_at: ISO, has_password: false, phone_masked: null, needs_profile: true, age_band: null, account_kind: 'learner', is_child: false, needs_profile_prompt: false, providers: ['wechat_mini'] };
 const settings: Settings = {
   timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: true, daily_new_count: 10, daily_screen_count: 15, max_reviews: 60, stages: ['xs'], current_stage: 'xs',
-  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
+  show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, email_enabled: false, webhook_enabled: false, webhook_url: null, webhook_format: 'generic',
   next_push_at: null, email_verified: false, updated_at: ISO,
 };
 const ticket = (id = TICKET, code = '123456'): WechatTicket => ({ ticket: id, pairing_code: code, expires_in_s: 180, qr_url: `/api/auth/wechat/ticket/${id}/qr` });

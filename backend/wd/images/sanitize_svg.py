@@ -7,7 +7,7 @@ handlers, ``href`` / ``xlink:href``, ``style`` containing ``url(``, ``<script>``
 ``viewBox`` (the root's own when valid, else ``0 0 800 500``), drops ``width``/``height`` on the root and
 re-serialises by hand so nothing unexpected can survive. Input and output are capped at 60 KB.
 
-Two repairs and one option (design/images/SYNTHESIS.md §3.1.4, PLAN §5.1 C3):
+Two repairs and two options (design/images/SYNTHESIS.md §3.1.4, PLAN §5.1 C3; docs/MEMORY_CARDS_DESIGN.md §3.1):
 
 * a bare ``&`` — anything but the five XML entities and a numeric reference — is rewritten to ``&amp;`` before the
   parse (:data:`BARE_AMP_RE`, applied by :func:`repair_bare_ampersands` outside ``<![CDATA[…]]>`` sections, where a
@@ -18,6 +18,22 @@ Two repairs and one option (design/images/SYNTHESIS.md §3.1.4, PLAN §5.1 C3):
 * ``clean(svg, allow_text=False)`` drops ``<text>`` / ``<tspan>`` with their subtrees (``<title>`` / ``<desc>`` stay):
   the store calls it that way for every Claude drawing, so "the picture carries no text" is guaranteed by code, not by
   the prompt (``word_images.text_free = 1``);
+* ``clean(svg, effects=True)`` additionally keeps what a 记忆图卡 is painted with — :data:`EFFECT_ELEMENTS` (``filter`` with
+  its two primitives ``feGaussianBlur`` / ``feDropShadow``, and ``clipPath``) and :data:`EFFECT_ATTRS` — and nothing else of
+  SVG's filter vocabulary: ``feImage`` loads a URL, the other primitives and ``mask`` / ``pattern`` / ``use`` are not needed and
+  stay dropped. The two attributes that reference another element, ``filter`` and ``clip-path``, are held to :data:`EFFECT_REF_RE`:
+  ``none`` or exactly ONE ``url(#local-id)`` — stricter than the paint rule of ``fill`` / ``stroke``, because a filter value is
+  a *list* (``url(#a) url(other.svg#b)`` is valid CSS there, while a second ``url()`` after a paint is not) and neither a
+  CSS filter function nor a basic shape is part of the card contract. Two more rules of this mode keep that true one
+  attribute further: a card has NO ``style`` attribute — every one is dropped, not only those with ``url(`` (CSS says
+  ``filter:blur(…)``, ``clip-path:circle(…)``, ``image-set('https://…')`` there, past both rules and past the blur budget
+  of ``memo.check_structure``) — and no attribute value with a backslash survives: ``u\\72l(#g)`` is ``url(#g)`` to a
+  browser (a CSS escape; it paints the gradient) and to none of the patterns here. ``href`` / ``xlink:href`` are dropped on
+  these elements like on every other (a ``<filter href>`` would inherit from another document), so a cleaned card
+  references nothing outside itself. Only :func:`wd.images.store.prepare_memo` (the offline cards of ``wd images-import``)
+  and the studio's validator pass the flag; every other caller — the online ``generate_svg`` drawings — keeps the output it
+  had, byte for byte (a plain ``style`` and an escaped paint included: those drawings are shown through ``<img>`` under the
+  media route's CSP, and changing what they get would be a change of its own);
 * :func:`with_label` inserts the implicit AIGC marker ``<desc id="aigc-label">…</desc>`` right after the root's opening
   tag; a model-supplied ``id="aigc-label"`` is dropped by the attribute filter, so a labelled file carries exactly one.
 """
@@ -58,6 +74,13 @@ ALLOWED_ATTRS = frozenset(
 )
 URL_REF_ATTRS = frozenset({"fill", "stroke"})
 LOCAL_URL_RE = re.compile(r"^\s*url\(\s*['\"]?#[A-Za-z_][\w.:-]*['\"]?\s*\)\s*(?:[A-Za-z#][\w#(),.\s%-]*)?$")
+# clean(effects=True) only (module docstring): the blur / drop-shadow / clipping a 记忆图卡 uses. The lists are the whole
+# extension — an element or attribute that is not named here is dropped exactly as without the flag.
+EFFECT_ELEMENTS = frozenset({"filter", "feGaussianBlur", "feDropShadow", "clipPath"})
+EFFECT_ATTRS = frozenset({"filter", "clip-path", "stdDeviation", "in", "result", "clipPathUnits", "filterUnits", "flood-color", "flood-opacity"})
+EFFECT_REF_ATTRS = frozenset({"filter", "clip-path"})
+# `none`, or one reference to an id of the same file with matching (or no) quotes — no list, no fallback, no function
+EFFECT_REF_RE = re.compile(r"""^(?:none|url\(\s*(?:#[A-Za-z_][\w.:-]*|'#[A-Za-z_][\w.:-]*'|"#[A-Za-z_][\w.:-]*")\s*\))$""")
 DOCTYPE_RE = re.compile(r"<!DOCTYPE[^>\[]*(\[[^\]]*\])?\s*>", re.IGNORECASE)
 ENTITY_RE = re.compile(r"<!ENTITY", re.IGNORECASE)
 VIEWBOX_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*$")
@@ -154,7 +177,7 @@ def viewbox_size(svg: str) -> tuple[int, int]:
     return int(round(float(w))), int(round(float(h)))
 
 
-def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool) -> list[tuple[str, str]]:
+def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool, effects: bool = False) -> list[tuple[str, str]]:
     kept: list[tuple[str, str]] = []
     for raw_name, value in attrib.items():
         ns, name = _split_tag(raw_name)
@@ -163,16 +186,21 @@ def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool) -> list[t
         lname = name.lower()
         if lname.startswith("on") or lname in ("href", "xlink:href", "xmlns:xlink"):
             continue
-        if name not in ALLOWED_ATTRS:
+        if name not in ALLOWED_ATTRS and not (effects and name in EFFECT_ATTRS):
             continue
         v = str(value).strip()
         if is_root and name in ("width", "height", "viewBox", "xmlns", "version"):
             continue  # set explicitly below
         if name == "id" and v == LABEL_ID:
             continue  # the AIGC marker id is ours alone (with_label); a model that writes it must not pass as labelled
+        if effects and "\\" in v:
+            continue  # a CSS escape: `u\72l(…)` IS url(…) to a browser and no pattern below reads it that way — a card's numbers, colours, ids and path data need none
         if name == "style":
-            if DANGEROUS_VALUE_RE.search(v):
-                continue
+            if effects or DANGEROUS_VALUE_RE.search(v):
+                continue  # a card carries no CSS at all: `style` would say filter:blur(…) / clip-path:circle(…) / image-set('https://…') past the two rules below
+        elif effects and name in EFFECT_REF_ATTRS:
+            if not EFFECT_REF_RE.match(v):
+                continue  # anything but `none` / one url(#local-id): an external reference, a list, a CSS function
         elif name in URL_REF_ATTRS and "url(" in v.lower():
             if not LOCAL_URL_RE.match(v):
                 continue
@@ -184,16 +212,17 @@ def _clean_attrs(local: str, attrib: dict[str, str], *, is_root: bool) -> list[t
     return kept
 
 
-def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: bool, is_root: bool = False, depth: int = 0, allow_text: bool = True) -> None:
+def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: bool, is_root: bool = False, depth: int = 0, allow_text: bool = True, effects: bool = False) -> None:
     ns, local = _split_tag(el.tag)
-    if ns != SVG_NS or local not in ALLOWED_ELEMENTS or (not allow_text and local in ("text", "tspan")):
+    allowed = local in ALLOWED_ELEMENTS or (effects and local in EFFECT_ELEMENTS)
+    if ns != SVG_NS or not allowed or (not allow_text and local in ("text", "tspan")):
         return  # dropped with its subtree (tail handled by the caller)
     if depth > MAX_DEPTH:
         raise SvgRejected(f"elements nested deeper than {MAX_DEPTH}")
     counter[0] += 1
     if counter[0] > MAX_ELEMENTS:
         raise SvgRejected(f"more than {MAX_ELEMENTS} elements")
-    attrs = _clean_attrs(local, dict(el.attrib), is_root=is_root)
+    attrs = _clean_attrs(local, dict(el.attrib), is_root=is_root, effects=effects)
     if is_root:
         vb = valid_viewbox(el.attrib.get("viewBox")) or DEFAULT_VIEWBOX
         attrs = [("xmlns", SVG_NS), ("viewBox", vb), *attrs]
@@ -210,19 +239,24 @@ def _serialise(el: ET.Element, out: list[str], counter: list[int], *, in_text: b
     if text:
         out.append(escape(text))
     for child in children:
-        _serialise(child, out, counter, in_text=text_mode, depth=depth + 1, allow_text=allow_text)
+        _serialise(child, out, counter, in_text=text_mode, depth=depth + 1, allow_text=allow_text, effects=effects)
         if text_mode and child.tail:
             out.append(escape(child.tail))
     out.append(f"</{local}>")
 
 
-def clean(svg: str, *, allow_text: bool = True) -> str:
+def clean(svg: str, *, allow_text: bool = True, effects: bool = False) -> str:
     """Return a safe, re-serialised SVG string or raise :class:`SvgRejected`.
 
     ``allow_text=False`` additionally drops every ``<text>`` / ``<tspan>`` subtree (``<title>`` / ``<desc>`` are kept):
     the mode :func:`wd.images.store.activate_svg` uses so that a Claude drawing never shows the headword (DESIGN §9,
     CLAUDE_INTEGRATION §6.7). The default keeps the behaviour every other caller (``images.clean_svg``) had before
     PLAN §5.1 C3: only the store's call changed.
+
+    ``effects=True`` keeps :data:`EFFECT_ELEMENTS` and :data:`EFFECT_ATTRS` as well, with ``filter`` / ``clip-path`` limited
+    to ``none`` or one ``url(#local-id)`` (:data:`EFFECT_REF_RE`), and drops every ``style`` attribute and every attribute
+    value with a backslash (a CSS escape) — the 记忆图卡 mode of :func:`wd.images.store.prepare_memo`
+    (docs/MEMORY_CARDS_DESIGN.md §3.1). Without the flag the output is what it was before the flag existed.
     """
     if not isinstance(svg, str):
         raise SvgRejected("svg must be a string")
@@ -230,7 +264,7 @@ def clean(svg: str, *, allow_text: bool = True) -> str:
         raise SvgRejected(f"svg larger than {MAX_BYTES} bytes")
     root = _parse(svg)
     out: list[str] = []
-    _serialise(root, out, [0], in_text=False, is_root=True, allow_text=allow_text)
+    _serialise(root, out, [0], in_text=False, is_root=True, allow_text=allow_text, effects=effects)
     result = "".join(out)
     if len(result.encode("utf-8")) > MAX_BYTES:
         raise SvgRejected(f"svg larger than {MAX_BYTES} bytes after cleaning")

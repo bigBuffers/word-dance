@@ -1,7 +1,9 @@
 // FRONTEND §7: one render test for StudyCard — reveal → grade bar; screen kind → known / unfamiliar;
 // content_state 'failed' → the generate-examples button; content_deferred_until set → the deferred copy,
 // no skeleton, no generate button. PLAN §6 S4: `onlyStages` reaches the WordHeader of all three faces, and a word
-// outside every list keeps its dashed outside-the-lists chip even without a phonetic.
+// outside every list keeps its dashed outside-the-lists chip even without a phonetic. Memory cards (docs/MEMORY_CARDS_DESIGN.md
+// §3.6–3.7): the mnemonic section shows the picture's hook + caveat while the picture is shown (else the content's mnemonic),
+// `imageWord` off asks for the picture without its word layer, and such a picture never offers refresh-image.
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +11,7 @@ import type { Grade, ImageMeta, StudyItem } from '@/api/types';
 import { zh } from '@/i18n/zh';
 import { contentMode, resultLabel, StudyCard } from './StudyCard';
 
-const image: ImageMeta = { id: null, url: '/media/card/5.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null };
+const image: ImageMeta = { id: null, url: '/media/card/5.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null };
 
 function item(over: Partial<StudyItem> = {}): StudyItem {
   return {
@@ -337,5 +339,117 @@ describe('StudyCard semantic dance at the reveal (FRONTEND §5.1.2, §6.5; eleme
     );
     expect(animate.mock.calls.length).toBe(formSteps); // nothing on the back in form_only
     expect(afterReveal).toBeGreaterThan(formSteps);
+  });
+});
+
+describe('StudyCard memory cards (FRONTEND §5.1.2; docs/MEMORY_CARDS_DESIGN.md §3.6–3.7)', () => {
+  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
+  const mnemonic = () => screen.queryByRole('region', { name: zh.study.mnemonic });
+  const lines = () => Array.from(mnemonic()?.querySelectorAll('p') ?? []).map((p) => p.textContent);
+  const src = () => (screen.getByRole('img') as HTMLImageElement).getAttribute('src');
+
+  it("the mnemonic section shows the picture's hook and, in a quieter second line, its caveat — not the content's mnemonic", () => {
+    const both = renderCard({ revealed: true, showImage: true, item: item({ image: memoryCard }) });
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    expect(mnemonic()?.querySelector('.study-card__mnemonic')?.textContent).toBe('HOOK-ZH');
+    expect(mnemonic()?.querySelector('.study-card__mnemonic-note')?.textContent).toBe('NOTE-ZH');
+    expect(screen.queryByText('MNEMONIC-ZH')).toBeNull();
+    both.unmount();
+
+    renderCard({ revealed: true, showImage: true, item: item({ image: { ...memoryCard, note_zh: null } }) });
+    expect(lines()).toEqual(['HOOK-ZH']); // no caveat → one line
+  });
+
+  it("falls back to the content's mnemonic when pictures are hidden or the picture brings no hook", () => {
+    const hidden = renderCard({ revealed: true, showImage: false, item: item({ image: memoryCard }) });
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+    expect(screen.queryByText('HOOK-ZH')).toBeNull();
+    expect(screen.queryByText('NOTE-ZH')).toBeNull();
+    hidden.unmount();
+
+    renderCard({ revealed: true, showImage: true }); // the fixture's template card: no hook
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+  });
+
+  it('the hook comes with the picture, not with the content: it shows while the examples are pending; neither → no section', () => {
+    const waiting = item({ image: memoryCard, content: null, content_state: 'queued' });
+    const pending = renderCard({ revealed: true, showImage: true, item: waiting });
+    expect(screen.getByText(zh.study.contentPending)).toBeTruthy();
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    pending.unmount();
+
+    renderCard({ revealed: true, showImage: false, item: waiting });
+    expect(mnemonic()).toBeNull();
+  });
+
+  it("a picture that could not be loaded takes its hook with it — the content's mnemonic is back —, and only that source's", () => {
+    const handlers = { onReveal: vi.fn(), onGrade: vi.fn(), onMaster: vi.fn(), onSkip: vi.fn() };
+    const card = (imageWord: boolean, over: Partial<StudyItem> = {}) => (
+      <MemoryRouter>
+        <StudyCard item={item({ image: memoryCard, ...over })} revealed zhMode="tap" showImage imageWord={imageWord} preview={preview} {...handlers} />
+      </MemoryRouter>
+    );
+    const { rerender, unmount } = render(card(true));
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    fireEvent.error(screen.getByRole('img'));
+    expect(screen.queryByRole('img')).toBeNull(); // the box is empty …
+    expect(lines()).toEqual(['MNEMONIC-ZH']); // … so the line about the picture goes too, and the content's own mnemonic shows
+    expect(screen.queryByText('NOTE-ZH')).toBeNull();
+
+    // the failure belongs to the source that failed: the other variant is another request, and its hook is not withheld
+    rerender(card(false));
+    expect(src()).toBe('/media/images/ab/0123.svg?plain=1');
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+
+    // back on the source that failed, which is requested again: the content's mnemonic until the picture has arrived
+    rerender(card(true));
+    expect(src()).toBe('/media/images/ab/0123.svg');
+    expect(lines()).toEqual(['MNEMONIC-ZH']);
+    fireEvent.load(screen.getByRole('img'));
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    unmount();
+
+    // no ready content to fall back to → no section at all, rather than a line about a picture that is not there
+    render(card(true, { content: null, content_state: 'queued' }));
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']);
+    fireEvent.error(screen.getByRole('img'));
+    expect(mnemonic()).toBeNull();
+  });
+
+  it('the front face leaks neither the picture nor its hook', () => {
+    renderCard({ showImage: true, item: item({ image: memoryCard }) });
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.queryByText('HOOK-ZH')).toBeNull();
+    expect(mnemonic()).toBeNull();
+  });
+
+  it('imageWord off → the same picture without its word layer (?plain=1); on, and when omitted, the whole picture', () => {
+    const off = renderCard({ revealed: true, showImage: true, imageWord: false, item: item({ image: memoryCard }) });
+    expect(src()).toBe('/media/images/ab/0123.svg?plain=1');
+    expect(lines()).toEqual(['HOOK-ZH', 'NOTE-ZH']); // the hook is about the picture, with or without the word on it
+    off.unmount();
+    const on = renderCard({ revealed: true, showImage: true, imageWord: true, item: item({ image: memoryCard }) });
+    expect(src()).toBe('/media/images/ab/0123.svg');
+    on.unmount();
+    const omitted = renderCard({ revealed: true, showImage: true, item: item({ image: memoryCard }) });
+    expect(src()).toBe('/media/images/ab/0123.svg');
+    omitted.unmount();
+    renderCard({ revealed: true, showImage: true, imageWord: false }); // the template card has no word layer to drop
+    expect(src()).toBe('/media/card/5.svg');
+  });
+
+  it('never offers refresh-image on a memory card while flag-image stays; other images keep both', () => {
+    const onImageRefresh = vi.fn();
+    const onImageFlag = vi.fn();
+    const card = renderCard({ revealed: true, showImage: true, item: item({ image: memoryCard }), onImageRefresh, onImageFlag });
+    expect(queryButton(zh.word.changeImage)).toBeNull();
+    fireEvent.click(button(zh.word.flagImage));
+    expect(onImageFlag).toHaveBeenCalledTimes(1);
+    card.unmount();
+
+    renderCard({ revealed: true, showImage: true, onImageRefresh, onImageFlag });
+    fireEvent.click(button(zh.word.changeImage));
+    expect(onImageRefresh).toHaveBeenCalledTimes(1);
+    expect(button(zh.word.flagImage)).toBeTruthy();
   });
 });

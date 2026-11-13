@@ -89,6 +89,18 @@ describe('zh.ts', () => {
     expect(zh.app.name).toBe('word-Dance');
   });
 
+  it('the image-word hint says which pictures the switch acts on instead of naming them with a term no screen shows', () => {
+    // docs/MEMORY_CARDS_DESIGN.md §3.7 leaves the wording open. The feature's name appears on no screen (such a picture is captioned
+    // like every AI drawing, zh.word.aiImage), so a hint that used it pointed at nothing a learner or parent could look up; it
+    // describes the pictures instead, with the noun of the switch right above it. Lift this once the app itself introduces the name.
+    const FEATURE_NAME = String.fromCharCode(0x8bb0, 0x5fc6, 0x56fe, 0x5361);
+    const PICTURE = String.fromCharCode(0x914d, 0x56fe);
+    expect(zh.settings.imageWordHint).not.toContain(FEATURE_NAME);
+    expect(zh.settings.showImages).toContain(PICTURE);
+    expect(zh.settings.imageWordHint).toContain(PICTURE);
+    expect(zh.settings.imageWord).not.toContain(FEATURE_NAME); // the label never did, and it is quoted across the docs: left alone
+  });
+
   it('formats parameterised strings', () => {
     expect(zh.common.total(4722)).toContain('4722');
     expect(zh.errors.accountLocked(601)).toContain('11');

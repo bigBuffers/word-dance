@@ -721,6 +721,7 @@ def _stored_grade(conn: sqlite3.Connection, user_id: int, client_event_id: str) 
         data = None
     if not isinstance(data, dict) or "item" not in data:
         data = {"item": None, "mine": None, "next_due_zh": "", "mastery_suggested": False, "today": None, "study_item": None}
+    screen.upgrade_stored(data)  # a 推荐词 graded 不熟悉 before the 记忆图卡 release stored its study_item.image without the 0021 fields
     data["duplicate"] = True
     return data
 

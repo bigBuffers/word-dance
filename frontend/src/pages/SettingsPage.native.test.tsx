@@ -52,7 +52,7 @@ beforeEach(() => {
   settings = {
     stages: ['xs'], current_stage: 'xs', timezone: 'Asia/Shanghai', push_time: '08:00', push_enabled: false, email_enabled: false, email_verified: false,
     webhook_enabled: false, webhook_url: null, webhook_format: 'generic', daily_new_count: 5, daily_screen_count: 5, max_reviews: 60,
-    show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', next_push_at: null,
+    show_images: true, zh_examples: 'tap', auto_pronounce: false, accent: 'en-US', dance_mode: 'full', image_word: true, next_push_at: null,
   } as unknown as Settings;
   vi.stubGlobal(
     'fetch',

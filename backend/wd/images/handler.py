@@ -1,6 +1,13 @@
-"""``fetch_image`` job handler (DESIGN §9 pseudo-code) and the ``wd fetch-image`` / ``wd images-prune`` / ``wd images-retry`` commands.
+"""``fetch_image`` job handler (DESIGN §9 pseudo-code) and the ``wd fetch-image`` / ``wd images-prune`` / ``wd images-retry`` /
+``wd images-import`` commands.
 
-    fetch_image {word_id, exclude?: [str], provider?: str, query?: str, retry?: true}      (IoWorker, one job at a time)
+    fetch_image {word_id, exclude?: [str], provider?: str, query?: str, retry?: true, requested?: true}      (IoWorker, one job at a time)
+      the active image is a 记忆图卡 (memo.is_memo) and the job is not an admin's explicit one (requested, or a provider / query
+          override — API.md 69) → nothing is searched: result {"skipped": "memory_card"}, image_state back to 'ready'. A reviewed
+          card is never traded for a stock picture by 换一张, a retry or a content re-generation (docs/MEMORY_CARDS_DESIGN.md §3.6).
+          A learner's 不合适 on a card queues no fetch at all (it is only recorded, API.md 28); the admin's resolution of that
+          report with refetch_image (API.md 71) rejects the card first, so the fetch it queues finds no card and is not held
+          back; `wd fetch-image` is the operator's own decision
       function word (style.skip_image: dominant pos ∈ {prep, conj, det, pron, art, int, inf}) and no admin provider/query
           → no provider request, no SVG (PLAN §5.1 C5): image_state = 'failed', result skipped "function word: card only";
             an image that is already active (an earlier photo, an admin-requested SVG) is kept and image_state stays 'ready',
@@ -22,6 +29,23 @@
           30 days, only while studied — the job then carries retry: true, which this handler ignores) or, after a provider
           outage, by the operator's library-wide sweep `wd images-retry --since ISO` (service.retry_failed_since: every
           failed word whose only attempt since then found no photo, at priority 90 — Wikimedia only, no SVG, no retry flag)
+
+``wd images-import DIR --manifest FILE [--dry-run] [--only LEMMA …]`` is how 记忆图卡 enter (docs/MEMORY_CARDS_DESIGN.md §3.5): the
+cards are drawn and reviewed offline in ``studio/`` — no job, no provider, no Claude call here. ``FILE`` is
+``{"prompt_version": "memo-1", "model": "…", "cards": {"<lemma>": {"alt_zh", "hook_zh", "note_zh"}}}`` and the picture of a lemma is
+``DIR/<lemma>.svg`` (the lemma as ``words.lemma`` stores it — lower-case, single spaces — with the spaces written ``_``; two keys that
+name one word make the manifest unusable). Word by word: the lemma must be a public, unmerged word; ``store.prepare_memo`` cleans the
+file (``effects=True``) and checks the card structure and the captions; a card that is already the word's active picture is
+``unchanged`` (its captions are still brought up to the manifest's, and its file is written back when ``images/`` lost it); a card an
+admin took down after a report (the very picture, ``rejected`` — ``store.retired_memo``) stays down, verdict ``retired``, unless the
+lemma is named with ``--only``; anything else is activated by ``store.store_memo`` — the very text that was checked and compared, not
+cleaned a second time — and the old picture becomes ``superseded`` and keeps its file. A card that cannot be stored (disk full, the
+database locked beyond the retries) is that card's ``rejected: could not store``; the run goes on. It always ends with ``imported /
+unchanged / rejected`` and every reason, exit 1 when anything was rejected; ``--dry-run`` validates everything and writes nothing.
+``wd images-import --undo FILE`` is the rollback: for every lemma of the manifest whose active picture is a memory card,
+``store.undo_memo`` supersedes it and puts the word back on what it showed when the card arrived — its newest earlier picture that is
+no card, unless a report had taken that one down; then, and when no earlier file is left, the template card (``image_state`` ``failed``
+when the word's fetch chain had run before, else ``none``). A word whose card an admin took down is ``kept`` as it is.
 """
 
 from __future__ import annotations
@@ -30,10 +54,12 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import sqlite3
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Iterable
 
 from .. import db
@@ -42,7 +68,7 @@ from ..config import ConfigError, Settings, ensure_dirs
 from ..interfaces import ImageProvider, Job, ProviderError
 from ..jobs import queue
 from ..jobs.registry import JobContext, register
-from . import fetch, providers, quota, select, service, store, style
+from . import fetch, memo, providers, quota, sanitize_svg, select, service, store, style
 
 log = logging.getLogger("wd.images")
 
@@ -62,6 +88,8 @@ STATUS_READY = "ready"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 STATUS_SVG_QUEUED = "svg_queued"
+SKIPPED_MEMORY_CARD = service.SKIPPED_MEMORY_CARD  # result_json {"skipped": "memory_card"}: a fetch that left a 记忆图卡 in place (docs/MEMORY_CARDS_DESIGN.md §3.6); service.chain_was_tried reads it back
+MEMO_FROM_VERSION = 21  # migration 0021: word_images.hook_zh / note_zh
 
 
 @dataclass
@@ -313,9 +341,18 @@ def fetch_for_word(
     )
 
 
+def explicit_request(payload: dict[str, Any]) -> bool:
+    """Is this ``fetch_image`` payload an admin's explicit decision about the word's picture? ``requested: true`` (API.md 69,
+    ``service.admin_refetch``) or a ``provider`` / ``query`` override — the same notion that lets a function word be fetched.
+    Only such a job may replace a 记忆图卡."""
+    provider, query = payload.get("provider"), payload.get("query")
+    return payload.get("requested") is True or (isinstance(provider, str) and bool(provider)) or (isinstance(query, str) and bool(query.strip()))
+
+
 @register("fetch_image")
 def handle_fetch_image(ctx: JobContext, jobs: list[Job]) -> None:
-    """Handler contract: every job ends ``done`` (``result_json`` = :class:`FetchOutcome`) or ``fail``ed."""
+    """Handler contract: every job ends ``done`` (``result_json`` = :class:`FetchOutcome`, or ``{"skipped": "memory_card"}`` for a
+    job that left a 记忆图卡 in place — the ``generate_svg`` spelling of a skip) or ``fail``ed."""
     for job in jobs:
         conn = ctx.db()
         try:
@@ -330,7 +367,10 @@ def handle_fetch_image(ctx: JobContext, jobs: list[Job]) -> None:
             provider = payload.get("provider") if isinstance(payload.get("provider"), str) else None
             query = payload.get("query") if isinstance(payload.get("query"), str) else None
             try:
-                outcome = fetch_for_word(ctx, conn, word_id, exclude=exclude, provider=provider, query=query, priority=job.priority, now=ctx.now())
+                # docs/MEMORY_CARDS_DESIGN.md §3.6: a 换一张 from a client that still shows the button, an automatic retry, a
+                # content job's fetch — none of them may trade a reviewed 记忆图卡 for whatever the providers return
+                keep_card = not explicit_request(payload) and memo.is_memo(service.active_image_row(conn, word_id))
+                outcome = None if keep_card else fetch_for_word(ctx, conn, word_id, exclude=exclude, provider=provider, query=query, priority=job.priority, now=ctx.now())
             except Exception as e:  # noqa: BLE001 — a provider/DB hiccup must not take the IoWorker down
                 log.exception("fetch_image job %d crashed", job.id, extra={"job_id": job.id, "job_type": job.type})
                 if queue.fail(conn, job.id, f"{e.__class__.__name__}: {e}"[:1000], now=ctx.now()) == "dead":
@@ -340,6 +380,12 @@ def handle_fetch_image(ctx: JobContext, jobs: list[Job]) -> None:
                     # an image is active (PLAN §5.1 C7; impl-review final M-3)
                     has_active = service.active_image_row(conn, word_id) is not None
                     store.set_image_state(conn, word_id, STATUS_READY if has_active else STATUS_FAILED, now=ctx.now())
+                continue
+            if outcome is None:
+                # the card stays active; enqueue_fetch wrote `queued`, so the state goes back to `ready` like on every kept image
+                store.set_image_state(conn, word_id, STATUS_READY, now=ctx.now())
+                queue.finish(conn, job.id, {"skipped": SKIPPED_MEMORY_CARD}, now=ctx.now())
+                log.info("fetch_image skipped for word %d (memory card kept)", word_id, extra={"job_id": job.id, "job_type": job.type, "event": "image_skipped"})
                 continue
             queue.finish(conn, job.id, outcome.as_result(), now=ctx.now())
             log.info(
@@ -503,6 +549,252 @@ def cmd_images_retry(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------- wd images-import (docs/MEMORY_CARDS_DESIGN.md §3.5)
+class ManifestError(ValueError):
+    """The manifest of ``wd images-import`` cannot be used at all (unreadable, not the documented shape) — exit 2, nothing done."""
+
+
+def load_manifest(path: str | Path) -> dict[str, Any]:
+    """``{"prompt_version", "model", "cards": {lemma: {"alt_zh"?, "hook_zh"?, "note_zh"?}}}`` read and shape-checked; the
+    per-card content (lengths, the version label) is ``store.prepare_memo``'s to judge, card by card. Keys are matched to
+    ``words.lemma`` in normalised form (:func:`normalise_lemma`), so two keys that differ only in case or spacing name ONE word:
+    worked in turn they would import it twice — the last hook winning, a second file silently superseding the first — and such
+    a manifest is refused whole. So is one that holds half a surrogate pair (``"\\ud83c"`` — legal JSON, not text): it can be
+    written neither into a file nor into the database, and would end the real run with ``UnicodeEncodeError`` in the middle of
+    a batch the dry run had passed."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except OSError as e:
+        raise ManifestError(f"cannot read {path}: {e.strerror or e}") from e
+    except UnicodeEncodeError as e:
+        raise ManifestError(f"{path} holds a lone surrogate escape (\\ud800–\\udfff without its pair), which is not text that can be stored: {e.object[max(0, e.start - 12):e.end]!r}") from e
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ManifestError(f"{path} is not UTF-8 JSON: {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("cards"), dict) or not data["cards"]:
+        raise ManifestError(f'{path} must be {{"prompt_version": "memo-1", "model": "…", "cards": {{"<lemma>": {{…}}}}}} with at least one card')
+    for key in ("prompt_version", "model"):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise ManifestError(f"{path}: {key!r} must be a non-empty string")
+    seen: dict[str, str] = {}
+    for lemma, card in data["cards"].items():
+        if not isinstance(card, dict):
+            raise ManifestError(f"{path}: cards[{lemma!r}] must be an object with alt_zh / hook_zh / note_zh")
+        first = seen.setdefault(normalise_lemma(lemma), lemma)
+        if first != lemma:
+            raise ManifestError(f"{path}: cards[{first!r}] and cards[{lemma!r}] name the same word")
+    return data
+
+
+def manifest_lemmas(manifest: dict[str, Any], only: Iterable[str] | None) -> tuple[list[str], list[str]]:
+    """``(the manifest keys to work on, the --only values the manifest does not have)``; without ``--only`` every key, in file order."""
+    cards = manifest["cards"]
+    if not only:
+        return list(cards), []
+    by_lemma = {normalise_lemma(key): key for key in cards}
+    chosen: list[str] = []
+    missing: list[str] = []
+    for value in only:
+        key = by_lemma.get(normalise_lemma(value))
+        if key is None:
+            missing.append(value)
+        elif key not in chosen:
+            chosen.append(key)
+    return chosen, missing
+
+
+def normalise_lemma(text: str) -> str:
+    """A manifest key the way ``words.lemma`` is stored: lower-case, single spaces (``Ice  Cream`` → ``ice cream``)."""
+    return " ".join(str(text).lower().split())
+
+
+def card_file(directory: Path, key: str) -> Path | None:
+    """``DIR/<lemma>.svg`` with the lemma's spaces written ``_``; None for a key that could name a file outside ``DIR``. The name
+    is built from the lemma the key is looked up as, not from the key's spelling: ``Ice  Cream`` reads ``ice_cream.svg`` and
+    ``Monday`` reads ``monday.svg`` on every file system, not only on the Mac's case-insensitive one."""
+    name = normalise_lemma(key).replace(" ", "_")
+    if not name or name.startswith(".") or "/" in name or "\\" in name or "\0" in name:
+        return None
+    return directory / f"{name}.svg"
+
+
+def public_word(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
+    """The public, unmerged word a manifest key names (§3.5) — a private custom word or a merged duplicate never gets a card."""
+    return conn.execute(
+        "SELECT id, lemma, display FROM words WHERE lemma = ? AND is_public = 1 AND merged_into_word_id IS NULL", (normalise_lemma(key),)
+    ).fetchone()
+
+
+@dataclass
+class ImportReport:
+    imported: list[str]
+    unchanged: list[str]
+    rejected: list[tuple[str, str]]  # (lemma, every reason joined)
+    recaptioned: list[str]  # among `unchanged`: the picture was the same, its captions were brought up to the manifest's
+    restored: list[str] = field(default_factory=list)  # among `unchanged`: the card's file was missing from images/ and is written back (dry run: would be)
+    retired: list[tuple[str, int]] = field(default_factory=list)  # (lemma, image id): this very card was taken down by an admin after a report — left down, not an error
+
+
+def import_cards(conn: sqlite3.Connection, cfg: Settings, directory: Path, manifest: dict[str, Any], *, only: Iterable[str] | None = None, dry_run: bool = False, now: str | None = None) -> ImportReport:
+    """The loop of ``wd images-import`` (module docstring): one verdict per manifest lemma, each card in its own transaction.
+    ``dry_run`` runs every check — the word, the file, the sanitiser, the structure, the captions, the comparison with the
+    active picture and with a card an admin took down — and writes nothing. A failure to store one card (``OSError``,
+    ``sqlite3.Error``) is that card's verdict and never ends the run: the cards before it are committed and live, and the
+    operator needs the summary to know which."""
+    now = now or now_iso()
+    report = ImportReport([], [], [], [])
+    keys, missing = manifest_lemmas(manifest, only)
+    for value in missing:
+        report.rejected.append((value, "not in the manifest"))
+    for key in keys:
+        entry = manifest["cards"][key]
+        word = public_word(conn, key)
+        if word is None:
+            report.rejected.append((key, "unknown lemma (no public, unmerged word)"))
+            continue
+        file = card_file(directory, key)
+        if file is None or not file.is_file():
+            report.rejected.append((key, f"no file {file or directory / (key.replace(' ', '_') + '.svg')}"))  # the path that was looked for
+            continue
+        try:
+            if file.stat().st_size > sanitize_svg.MAX_BYTES:
+                raise store.MemoRejected([f"the file is {file.stat().st_size} bytes, the sanitiser takes at most {sanitize_svg.MAX_BYTES}"])
+            card = store.prepare_memo(
+                file.read_text(encoding="utf-8"), str(word["display"]), alt_zh=entry.get("alt_zh"), hook_zh=entry.get("hook_zh"), note_zh=entry.get("note_zh"),
+                model=manifest["model"], prompt_version=manifest["prompt_version"],
+            )
+        except (OSError, UnicodeDecodeError) as e:
+            report.rejected.append((key, f"cannot read {file}: {e}"))
+            continue
+        except store.MemoRejected as e:
+            report.rejected.append((key, "; ".join(e.problems)))
+            continue
+        word_id = int(word["id"])
+        try:
+            active = service.active_image_row(conn, word_id)
+            on_disk = store.stored_memo(active, card)
+            if on_disk is not None:  # the word's active picture is this very card
+                restored = store.restore_memo_file(cfg, on_disk, dry_run=dry_run)  # "run the import again" is the repair for a card whose file images/ lost
+                recaptioned = store.set_memo_captions(conn, int(active["id"]), card, dry_run=dry_run)  # a corrected hook must not need a redrawn picture to arrive
+                report.unchanged.append(key)  # only now: a card whose file or captions could not be written is `rejected` below, never both
+                if recaptioned:
+                    report.recaptioned.append(key)
+                if restored:
+                    report.restored.append(key)
+                continue
+            # a learner's 不合适 only records a report; an admin who then resolved it with refetch_image took THIS picture down. A
+            # whole-manifest run (the next batch's) must not bring it back as one more `imported` line — naming the word does
+            retired = None if only else store.retired_memo(conn, word_id, card)
+            if retired is not None:
+                report.retired.append((key, int(retired["id"])))
+                continue
+            if not dry_run:
+                store.store_memo(conn, cfg, word_id, card, now=now)  # the very text that was checked and compared: not cleaned a second time
+        except (OSError, sqlite3.Error) as e:  # disk full, images/ not writable, the database locked beyond the BEGIN IMMEDIATE retries
+            report.rejected.append((key, f"could not store: {e}"))
+            continue
+        report.imported.append(key)
+    return report
+
+
+@dataclass
+class UndoReport:
+    restored: list[tuple[str, str]]  # (lemma, what is active again: "<provider> image <id>")
+    to_card: list[str]
+    kept: list[str]  # the active picture is not a memory card: nothing to undo
+    unknown: list[str]
+
+
+def undo_cards(conn: sqlite3.Connection, cfg: Settings, manifest: dict[str, Any], *, only: Iterable[str] | None = None, dry_run: bool = False, now: str | None = None) -> UndoReport:
+    """``wd images-import --undo FILE``: ``store.undo_memo`` for every lemma of the manifest (or of ``--only``). A word that goes
+    back to the template card gets ``image_state = 'failed'`` when its fetch chain has run before (``service.chain_was_tried``) —
+    the state it had before the card, and the only one the retry rules pick a studied word up from — and ``'none'`` otherwise."""
+    now = now or now_iso()
+    report = UndoReport([], [], [], [])
+    keys, missing = manifest_lemmas(manifest, only)
+    report.unknown.extend(missing)
+    for key in keys:
+        word = public_word(conn, key)
+        if word is None:
+            report.unknown.append(key)
+            continue
+        verdict, row = store.undo_memo(conn, cfg, int(word["id"]), now=now, dry_run=dry_run, tried=service.chain_was_tried(conn, int(word["id"])))
+        if verdict == "restored" and row is not None:
+            report.restored.append((key, f"{row['provider']} image {int(row['id'])}"))
+        elif verdict == "card":
+            report.to_card.append(key)
+        else:
+            report.kept.append(key)
+    return report
+
+
+def cmd_images_import(args: argparse.Namespace) -> int:
+    """``wd images-import DIR --manifest FILE [--dry-run] [--only LEMMA …]`` · ``wd images-import --undo FILE [--dry-run] [--only LEMMA …]``."""
+    if bool(args.undo) == bool(args.manifest) or (args.manifest and not args.dir) or (args.undo and args.dir):
+        print("wd images-import: pass DIR --manifest FILE to import, or --undo FILE alone to roll an import back", file=sys.stderr)
+        return 2
+    try:
+        manifest = load_manifest(args.undo or args.manifest)
+    except ManifestError as e:
+        print(f"wd images-import: {e}", file=sys.stderr)
+        return 2
+    directory = Path(args.dir).expanduser() if args.dir else Path()
+    if args.manifest and not directory.is_dir():
+        print(f"wd images-import: {directory} is not a directory", file=sys.stderr)
+        return 2
+    cfg = _settings()
+    if cfg is None:
+        return 2
+    ensure_dirs(cfg)
+    conn = db.connect(cfg.db_path)
+    try:
+        version = db.current_version(conn)
+        if version < MEMO_FROM_VERSION:
+            print(f"wd images-import: schema version {version} has no word_images.hook_zh (migration {MEMO_FROM_VERSION:04d}) — run `wd migrate` first", file=sys.stderr)
+            return 1
+        would = "would be " if args.dry_run else ""
+        if args.undo:
+            undone = undo_cards(conn, cfg, manifest, only=args.only, dry_run=args.dry_run)
+            for lemma, what in undone.restored:
+                print(f"  undone     {lemma} → {what} {would}active again")
+            for lemma in undone.to_card:
+                print(f"  undone     {lemma} → {would}back on the template card (no earlier picture to restore)")
+            for lemma in undone.kept:
+                print(f"  kept       {lemma}: the active picture is not a memory card")
+            for lemma in undone.unknown:
+                print(f"  unknown    {lemma}: not in the manifest or no public, unmerged word")
+            n = len(undone.restored) + len(undone.to_card)
+            print(
+                f"images-import --undo: {n} memory card(s) {would}superseded ({len(undone.restored)} word(s) back on the previous picture, "
+                f"{len(undone.to_card)} on the template card), {len(undone.kept)} kept, {len(undone.unknown)} unknown" + (" — dry run, nothing written" if args.dry_run else "")
+            )
+            return 1 if undone.unknown else 0
+        report = import_cards(conn, cfg, directory, manifest, only=args.only, dry_run=args.dry_run)
+    finally:
+        conn.close()
+    for lemma in report.imported:
+        print(f"  imported   {lemma}" if not args.dry_run else f"  ok         {lemma} (would be imported)")
+    for lemma in report.unchanged:
+        notes = [f"captions {would}updated"] if lemma in report.recaptioned else []
+        if lemma in report.restored:
+            notes.append("file missing from images/ — a real run restores it" if args.dry_run else "file restored")
+        print(f"  unchanged  {lemma}" + (f" ({'; '.join(notes)})" if notes else ""))
+    for lemma, image_id in report.retired:
+        print(f"  retired    {lemma}: an admin took this very card down after a report (image {image_id}) — left as it is; pass --only {shlex.quote(lemma)} to bring it back")
+    for lemma, reason in report.rejected:
+        print(f"  rejected   {lemma}: {reason}")
+    details = [f"{len(report.recaptioned)} with new captions"] if report.recaptioned else []
+    if report.restored:
+        details.append(f"{len(report.restored)} with a missing file" if args.dry_run else f"{len(report.restored)} with the file restored")
+    unchanged = f" ({', '.join(details)})" if details else ""
+    retired = f", {len(report.retired)} retired" if report.retired else ""  # not an error: the exit code stays the rejections'
+    print(
+        f"images-import: {len(report.imported)} {would}imported, {len(report.unchanged)} unchanged{unchanged}, {len(report.rejected)} rejected{retired} "
+        f"({manifest['prompt_version']}, {manifest['model']})" + (" — dry run, nothing written" if args.dry_run else "")
+    )
+    return 1 if report.rejected else 0
+
+
 def register_cli(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("fetch-image", help="fetch a photo for one word now and print the attribution (manual check; DEPLOY §9)")
     p.add_argument("word", help="lemma or word id")
@@ -531,3 +823,14 @@ def register_cli(sub: argparse._SubParsersAction) -> None:
         ),
     )
     p.set_defaults(func=cmd_images_retry)
+
+    p = sub.add_parser(
+        "images-import",
+        help="import 记忆图卡 made in studio/ (DIR/<lemma>.svg + a manifest): validate, sanitise, activate; --undo FILE puts the previous pictures back",
+    )
+    p.add_argument("dir", nargs="?", default=None, metavar="DIR", help="directory holding <lemma>.svg for every card of the manifest (spaces in a lemma written _)")
+    p.add_argument("--manifest", metavar="FILE", default=None, help='JSON: {"prompt_version": "memo-1", "model": "…", "cards": {"<lemma>": {"alt_zh", "hook_zh", "note_zh"}}}')
+    p.add_argument("--undo", metavar="FILE", default=None, help="roll back instead: every lemma of this manifest whose active picture is a memory card gets its previous picture (or the template card) back")
+    p.add_argument("--dry-run", action="store_true", help="check everything, write nothing")
+    p.add_argument("--only", nargs="+", metavar="LEMMA", default=None, help="work on these lemmas of the manifest only")
+    p.set_defaults(func=cmd_images_import)

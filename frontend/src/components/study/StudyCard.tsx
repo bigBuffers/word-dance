@@ -1,13 +1,14 @@
 // StudyCard — the front/back card of the study session (FRONTEND §4, §5.1).
 // Front: headword, phonetic, 🔊, stage chips, kind badge, hint (cloze of the first example), reveal.
 // Back: meaning (Claude `meaning_zh`, else the ECDICT translation), image, highlighted examples,
-// collocations, mnemonic, confusable chips, collapsible dictionary, SRS line and the "next-due" preview; grade bar
+// collocations, mnemonic (a memory card's own hook + caveat while its picture is shown — switched on and not failed to
+// load —, else the content's mnemonic: `memoryLines`), confusable chips, collapsible dictionary, SRS line and the "next-due" preview; grade bar
 // unfamiliar · hard · good + mastered (primary with suggested badge when `mastery_suggested`) · skip. The grade bar
 // publishes its height through `useBottomBarOffset`, so toasts stack above the buttons instead of covering them.
 // `screen` items show screen card with known / unfamiliar / skip directly (reveal peeks). Content states (§5.1.5):
 // queued & not deferred → skeleton + zh.study.contentPending; `content_deferred_until` set → budget-deferred copy,
 // no skeleton, no generateExamples; none/failed → dictionary copy + generateExamples. Buttons disable while a grade is in flight.
-import type { MouseEvent, ReactNode } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import type { DanceMode, Grade, ScreenVerdict, Stage, StudyItem } from '@/api/types';
 import { Button } from '@/components/ui/Button';
@@ -23,7 +24,7 @@ import { cloze, containsForm } from '@/utils/highlight';
 import { formatPos } from '@/utils/pos';
 import { formatMonthDay } from '@/utils/srsPreview';
 import { ExampleList } from './ExampleList';
-import { WordImage } from './WordImage';
+import { imageSrc, memoryLines, WordImage } from './WordImage';
 import './study.css';
 
 export interface StudyCardProps {
@@ -35,6 +36,8 @@ export interface StudyCardProps {
   onSkip: () => void;
   zhMode: 'tap' | 'always';
   showImage: boolean;
+  /** `settings.image_word`: false shows a memory card without its word layer (`WordImage`); omitted → with it, the server default. */
+  imageWord?: boolean;
   /** "next-due" strings per grade (utils/srsPreview `previewAll`). */
   preview: Record<Grade, string>;
   /** hint cloze shown on the front (key H). */
@@ -127,6 +130,7 @@ export function StudyCard({
   onSkip,
   zhMode,
   showImage,
+  imageWord = true,
   preview,
   hint = false,
   onHint,
@@ -153,6 +157,9 @@ export function StudyCard({
   const semanticEnabled = danceMode === 'full';
   // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
   const barRef = useBottomBarOffset<HTMLDivElement>();
+  // the picture source that could not be loaded, as `WordImage` reports it — the source and not a flag, so the failure is
+  // never held against another picture (the other variant after `imageWord` changed); cleared when that source arrives after all
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const isScreen = item.kind === 'screen';
   const forms = [word.lemma, word.display, ...word.forms];
   const firstExample = content?.examples.find((ex) => containsForm(ex.en, forms)) ?? content?.examples[0] ?? null;
@@ -164,6 +171,10 @@ export function StudyCard({
   const pos = formatPos(word.pos);
   const showBack = readOnly || revealed;
   const result = resultLabel(item.result);
+  // the mnemonic section does not wait for the content: a memory card's hook comes with the picture (design D5) — and goes
+  // with it: under a box left empty by a failed request (a flaky connection; the session itself keeps working offline) the
+  // hook would be a line about a picture that is not there, so the content's own mnemonic shows as it does with pictures off
+  const memory = memoryLines(item.image, showImage && failedSrc !== imageSrc(item.image, imageWord), mode === 'ready' ? content?.mnemonic_zh : null);
 
   const header = (
     <header className="study-card__top">
@@ -271,12 +282,6 @@ export function StudyCard({
               </ul>
             </section>
           )}
-          {content.mnemonic_zh && (
-            <section className="study-card__section" aria-label={zh.study.mnemonic}>
-              <h3 className="study-card__section-title">{zh.study.mnemonic}</h3>
-              <p className="study-card__mnemonic">{content.mnemonic_zh}</p>
-            </section>
-          )}
         </>
       );
       break;
@@ -336,13 +341,23 @@ export function StudyCard({
           <WordImage
             image={item.image}
             showImages={showImage}
+            imageWord={imageWord}
             alt={content?.image_alt_zh ?? null}
             onRefresh={readOnly ? undefined : onImageRefresh}
             onFlag={readOnly ? undefined : onImageFlag}
             refreshing={imageRefreshing}
+            onFailed={setFailedSrc}
+            onLoaded={(loadedSrc) => setFailedSrc((f) => (f === loadedSrc ? null : f))}
           />
         )}
         {contentBlock}
+        {memory && (
+          <section className="study-card__section" aria-label={zh.study.mnemonic}>
+            <h3 className="study-card__section-title">{zh.study.mnemonic}</h3>
+            <p className="study-card__mnemonic">{memory.text}</p>
+            {memory.note && <p className="study-card__mnemonic-note">{memory.note}</p>}
+          </section>
+        )}
         {word.confusables.length > 0 && (
           <section className="study-card__section" aria-label={zh.study.confusable}>
             <h3 className="study-card__section-title">{zh.study.confusable}</h3>

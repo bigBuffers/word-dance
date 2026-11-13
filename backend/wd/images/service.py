@@ -1,10 +1,17 @@
 """Image service functions used by the word routes (WP3) and the admin endpoints (TASKS §I, WP6).
 
-* :func:`image_meta` — the API.md ``ImageMeta`` for a word; falls back to the template card (never None).
-* :func:`reject_active_image` — report flow (API.md 28): active image → ``rejected``, ``fetch_image`` enqueued with
-  the rejected image excluded; returns the job id.
+* :func:`image_meta` — the API.md ``ImageMeta`` for a word; falls back to the template card (never None). A 记忆图卡
+  (``memo.is_memo``: a Claude drawing whose ``prompt_version`` is ``memo-…``, docs/MEMORY_CARDS_DESIGN.md §3) says so with
+  ``word_layer: true`` — its URL plus ``?plain=1`` is the same picture without the word (API.md 52) — and carries its
+  ``hook_zh`` / ``note_zh``; every other picture and the card answer ``false`` / ``null`` / ``null``.
+* :func:`reject_active_image` — report flow (API.md 28, 71): active image → ``rejected``, ``fetch_image`` enqueued with
+  the rejected image excluded; returns the job id. The learner's route (28) does not come here for a 记忆图卡
+  (:func:`wears_memory_card`): one tap on 不合适 is recorded as a report and the reviewed card stays up; taking it down is
+  the admin's decision when resolving that report (71, ``refetch_image``), which does come here — the card is ``rejected``
+  before the fetch is queued, so that fetch is not held back by the guard of ``handler.handle_fetch_image``.
 * :func:`request_refresh` — 换一张 (API.md 29): ``fetch_image`` with ``exclude`` = the current image's ref/sha.
-* :func:`admin_refetch` — API.md 69 (``provider`` / ``query`` overrides).
+* :func:`admin_refetch` — API.md 69 (``provider`` / ``query`` overrides; the job carries ``requested: true`` — the one
+  ``fetch_image`` that may replace a 记忆图卡, see ``handler.handle_fetch_image``).
 * :func:`word_is_studied` — DESIGN §9: in a bank (``new``/``learning``) or in an open batch.
 * :func:`retry_if_failed` / :func:`retry_failed_studied` — the failed-image retry rules of DESIGN §9 (PLAN §5.1 C7,
   D-images-13): a word whose chain failed is fetched again only while somebody studies it, at most every
@@ -30,7 +37,7 @@ from typing import Any, Mapping
 from ..clock import now_iso, parse_iso, to_iso
 from ..db import maybe_tx
 from ..jobs import queue
-from . import style
+from . import memo, style
 from .store import attribution_line
 
 CARD_WIDTH, CARD_HEIGHT = 800, 500
@@ -45,6 +52,7 @@ RETRY_NIGHTLY_LIMIT = 50  # like PREFETCH_LIMIT: one night's worth of IoWorker w
 RETRY_NIGHTLY_PRIORITY = 30  # same lane as the prefetch content jobs (below bank p20, above prewarm p90)
 OUTAGE_SWEEP_PRIORITY = 90  # = handler.PREWARM_PRIORITY: Wikimedia only (PREWARM_SKIP_PROVIDERS), no automatic SVG, no Claude cost
 STATUS_FAILED_OUTCOME = "failed"  # handler.STATUS_FAILED in result_json: the chain ran and found no acceptable photo (a function word's result is `skipped`)
+SKIPPED_MEMORY_CARD = "memory_card"  # result_json {"skipped": "memory_card"} of a fetch_image job that left a 记忆图卡 in place and searched nothing (handler.handle_fetch_image)
 
 
 def card_meta(word_id: int) -> dict[str, Any]:
@@ -59,6 +67,9 @@ def card_meta(word_id: int) -> dict[str, Any]:
         "height": CARD_HEIGHT,
         "alt_zh": None,
         "attribution": None,
+        "word_layer": False,
+        "hook_zh": None,
+        "note_zh": None,
     }
 
 
@@ -69,6 +80,13 @@ def active_image_row(conn: sqlite3.Connection, word_id: int) -> sqlite3.Row | No
     ).fetchone()
 
 
+def wears_memory_card(conn: sqlite3.Connection, word_id: int) -> bool:
+    """Is the word's active image a 记忆图卡 (``memo.is_memo``)? The question behind ``ImageMeta.word_layer``, asked by the
+    learner's report route before anything is rejected (API.md 28: on a card the report is only recorded) — the same test
+    ``handler.handle_fetch_image`` makes before it lets a fetch run."""
+    return memo.is_memo(active_image_row(conn, word_id))
+
+
 def image_meta(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
     """``ImageMeta`` for the word's active photo / Claude SVG, else the card fallback (card URL obeys the visibility
     rule through the media route, so this function itself needs no user)."""
@@ -77,6 +95,8 @@ def image_meta(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
         return card_meta(word_id)
     provider = str(row["provider"])
     is_svg = provider == "claude_svg"
+    is_memo = memo.is_memo(row)  # 记忆图卡: the picture has a word layer the media route can cut off, and its own memory hook
+    columns = row.keys()  # hook_zh / note_zh are migration 0021: a row read from a database behind it still serialises
     attribution = None
     if not is_svg:
         attribution = {
@@ -98,6 +118,9 @@ def image_meta(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
         "height": row["height"],
         "alt_zh": row["alt_zh"],
         "attribution": attribution,
+        "word_layer": is_memo,
+        "hook_zh": (row["hook_zh"] or None) if is_memo and "hook_zh" in columns else None,
+        "note_zh": (row["note_zh"] or None) if is_memo and "note_zh" in columns else None,
     }
 
 
@@ -121,7 +144,8 @@ def _word_exists(conn: sqlite3.Connection, word_id: int) -> bool:
 
 def merge_fetch_payloads(existing: dict[str, Any], requested: dict[str, Any]) -> dict[str, Any]:
     """The payload a live ``fetch_image`` job must carry to honour a later request for the same word: the union of
-    both ``exclude`` lists and the latest ``provider`` / ``query`` override (a request without one keeps the job's)."""
+    both ``exclude`` lists, the latest ``provider`` / ``query`` override (a request without one keeps the job's) and
+    ``requested`` once either side has it (an admin's refetch folded into a learner's job stays an admin's refetch)."""
     merged = dict(existing)
     exclude = [str(x) for x in (existing.get("exclude") or []) if x]
     for x in requested.get("exclude") or []:
@@ -132,6 +156,8 @@ def merge_fetch_payloads(existing: dict[str, Any], requested: dict[str, Any]) ->
     for key in ("provider", "query"):
         if requested.get(key):
             merged[key] = requested[key]
+    if requested.get("requested") is True:
+        merged["requested"] = True
     return merged
 
 
@@ -183,13 +209,16 @@ def enqueue_fetch(
     priority: int = 10,
     now: str | None = None,
     retry: bool = False,
+    requested: bool = False,
 ) -> int:
-    """``fetch_image {word_id, exclude?, provider?, query?, retry?}`` on the live key ``image:<word_id>`` + ``image_state='queued'``.
+    """``fetch_image {word_id, exclude?, provider?, query?, retry?, requested?}`` on the live key ``image:<word_id>`` + ``image_state='queued'``.
 
     A request that meets a live job for the word is merged into it (``exclude`` union, latest ``provider`` / ``query``)
     while that job is still ``queued``; when it is already ``running`` with an older payload, a follow-up job runs after
     it — so a 换一张 ``exclude`` or an API.md 69 override is never silently dropped by the dedupe UPSERT. ``retry=True``
-    marks an automatic retry (``payload.retry = true``, counted by :func:`auto_retries_30d`); the handler ignores the key."""
+    marks an automatic retry (``payload.retry = true``, counted by :func:`auto_retries_30d`); the handler ignores the key.
+    ``requested=True`` (``payload.requested = true``) marks the admin's explicit refetch of API.md 69 — the only job the
+    handler lets replace a 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.6)."""
     now = now or now_iso()
     payload: dict[str, Any] = {"word_id": int(word_id)}
     if exclude:
@@ -200,6 +229,8 @@ def enqueue_fetch(
         payload["query"] = query
     if retry:
         payload["retry"] = True
+    if requested:
+        payload["requested"] = True
     with maybe_tx(conn):  # BEGIN IMMEDIATE: the read-merge-write below cannot interleave with a claim
         job_id = queue.enqueue(conn, "fetch_image", payload, dedupe_key=FETCH_DEDUPE.format(word_id=int(word_id)), priority=int(priority), now=now)
         if not _fold_into_live(conn, job_id, payload, now):
@@ -237,12 +268,13 @@ def request_refresh(conn: sqlite3.Connection, word_id: int, *, priority: int = 1
 
 
 def admin_refetch(conn: sqlite3.Connection, word_id: int, *, provider: str | None = None, query: str | None = None, priority: int = 10, now: str | None = None) -> int | None:
-    """API.md 69: a new image, optionally from one provider (``claude_svg`` goes straight to ``generate_svg``) or for a custom query."""
+    """API.md 69: a new image, optionally from one provider (``claude_svg`` goes straight to ``generate_svg``) or for a custom query.
+    The job is ``requested``: an admin's decision replaces even a 记忆图卡, which no learner-side fetch does."""
     now = now or now_iso()
     with maybe_tx(conn):
         if not _word_exists(conn, word_id):
             return None
-        return enqueue_fetch(conn, word_id, exclude=exclude_for(conn, word_id), provider=provider, query=(query or "").strip() or None, priority=priority, now=now)
+        return enqueue_fetch(conn, word_id, exclude=exclude_for(conn, word_id), provider=provider, query=(query or "").strip() or None, priority=priority, now=now, requested=True)
 
 
 def word_is_studied(conn: sqlite3.Connection, word_id: int, now: str | None = None) -> bool:
@@ -283,6 +315,21 @@ def last_fetch_finished_at(conn: sqlite3.Connection, word_id: int) -> str | None
         (key, pattern),
     ).fetchone()
     return str(row[0]) if row and row[0] else None
+
+
+def chain_was_tried(conn: sqlite3.Connection, word_id: int) -> bool:
+    """Has a ``fetch_image`` job of the word ever ended after looking for a picture? Any finished one counts but those the
+    记忆图卡 guard ended unrun (``{"skipped": "memory_card"}`` — the word wore a card, nothing was searched, so the job says
+    nothing about the word without it). ``wd images-import --undo`` asks this for a word that goes back to the template card:
+    a word the chain had been tried for was ``failed`` before its card arrived and must come back ``failed``, the one state
+    :func:`retry_due` and the sweeps select — as ``none`` a studied word with ready content would never be fetched again."""
+    key, pattern = _fetch_keys(word_id)
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE type = 'fetch_image' AND status IN ('done','dead','cancelled') AND (dedupe_key = ? OR dedupe_key LIKE ?) "
+        "AND COALESCE(json_extract(result_json, '$.skipped'), '') != ? LIMIT 1",
+        (key, pattern, SKIPPED_MEMORY_CARD),
+    ).fetchone()
+    return row is not None
 
 
 def auto_retries_30d(conn: sqlite3.Connection, word_id: int, now: str) -> int:

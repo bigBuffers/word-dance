@@ -222,7 +222,7 @@ def test_all_providers_fail_svg_rules(ctx, conn, cfg, mock_http, pinned_dns, con
         assert conn.execute("SELECT image_state FROM words WHERE id=?", (w,)).fetchone()[0] == "failed"
         meta = image_meta(conn, w)
         ImageMeta.model_validate(meta)
-        assert meta == {"id": None, "url": f"/media/card/{w}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None}
+        assert meta == {"id": None, "url": f"/media/card/{w}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
     bank_svg = svg_jobs(conn, bank_word)
     assert len(bank_svg) == 1 and bank_svg[0]["priority"] == 20 and bank_svg[0]["dedupe_key"] == f"svg:{bank_word}" and bank_svg[0]["status"] == "queued"
     assert json.loads(job(conn, jobs[bank_word])["result_json"])["svg_job_id"] == bank_svg[0]["id"]
@@ -461,7 +461,7 @@ def test_admin_refetch_payload_provider_and_query(ctx, conn, mock_http, pinned_d
     wid = insert_word(conn, "apple")
     jid = service.admin_refetch(conn, wid, provider="openverse", query="green apple", now=ctx.now())
     payload = json.loads(job(conn, jid)["payload_json"])
-    assert payload == {"word_id": wid, "provider": "openverse", "query": "green apple"}
+    assert payload == {"word_id": wid, "provider": "openverse", "query": "green apple", "requested": True}  # requested: an admin's explicit refetch (API.md 69)
     queue.run_once(ctx)
     assert mock_http.calls_to("commons.wikimedia.org") == []
     assert mock_http.calls_to("api.openverse.org")[0].url.params["q"] == "green apple"
@@ -478,6 +478,10 @@ def test_merge_fetch_payloads():
     assert merge({"word_id": 1, "exclude": ["a"]}, {"word_id": 1, "exclude": ["b", "a"]}) == {"word_id": 1, "exclude": ["a", "b"]}
     assert merge({"word_id": 1, "provider": "openverse", "query": "x"}, {"word_id": 1, "exclude": ["a"]}) == {"word_id": 1, "provider": "openverse", "query": "x", "exclude": ["a"]}
     assert merge({"word_id": 1, "query": "x"}, {"word_id": 1, "provider": "wikimedia", "query": "y"}) == {"word_id": 1, "query": "y", "provider": "wikimedia"}
+    # requested (an admin's refetch, API.md 69) is sticky in both directions: folded into a learner's job, or met by a learner's later 换一张
+    assert merge({"word_id": 1, "exclude": ["a"]}, {"word_id": 1, "requested": True}) == {"word_id": 1, "exclude": ["a"], "requested": True}
+    assert merge({"word_id": 1, "requested": True}, {"word_id": 1, "exclude": ["a"]}) == {"word_id": 1, "requested": True, "exclude": ["a"]}
+    assert merge({"word_id": 1}, {"word_id": 1, "requested": "yes"}) == {"word_id": 1}  # only a JSON true counts
 
 
 def test_enqueue_fetch_merges_a_later_request_into_the_queued_job(ctx, conn, mock_http, pinned_dns):
@@ -490,7 +494,7 @@ def test_enqueue_fetch_merges_a_later_request_into_the_queued_job(ctx, conn, moc
     jid = service.admin_refetch(conn, wid, provider="openverse", query="green apple", now=ctx.now())
     assert jid == plain
     j = job(conn, jid)
-    assert json.loads(j["payload_json"]) == {"word_id": wid, "provider": "openverse", "query": "green apple"} and j["priority"] == 10
+    assert json.loads(j["payload_json"]) == {"word_id": wid, "provider": "openverse", "query": "green apple", "requested": True} and j["priority"] == 10
     queue.run_once(ctx)
     assert mock_http.calls_to("commons.wikimedia.org") == [] and mock_http.calls_to("api.openverse.org")[0].url.params["q"] == "green apple"
     first = active_image(conn, wid)
@@ -519,7 +523,7 @@ def test_enqueue_fetch_queues_a_follow_up_behind_a_running_job(ctx, conn, mock_h
     j2 = service.admin_refetch(conn, wid, provider="openverse", query="green apple", now=ctx.now())
     follow = job(conn, j2)
     assert j2 != j1 and follow["dedupe_key"] == f"image:{wid}:r1" and follow["status"] == "queued" and follow["priority"] == 10
-    assert json.loads(follow["payload_json"]) == {"word_id": wid, "exclude": [first["provider_ref"], first["sha256"]], "provider": "openverse", "query": "green apple"}
+    assert json.loads(follow["payload_json"]) == {"word_id": wid, "exclude": [first["provider_ref"], first["sha256"]], "provider": "openverse", "query": "green apple", "requested": True}
     assert json.loads(job(conn, j1)["payload_json"]) == {"word_id": wid, "exclude": [first["provider_ref"], first["sha256"]]}  # the running job is left alone
     # a third request while the first still runs folds into the queued follow-up (no r2)
     assert service.admin_refetch(conn, wid, query="apple pie", now=ctx.now()) == j2

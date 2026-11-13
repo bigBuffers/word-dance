@@ -117,7 +117,7 @@ LOCKOUT_RESET_S = 24 * 3600  # a failure streak older than this (and not locked)
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_PUSH_TIME = "08:00"
 
-SETTINGS_BOOL_COLUMNS = ("push_enabled", "show_images", "auto_pronounce", "email_enabled", "webhook_enabled")
+SETTINGS_BOOL_COLUMNS = ("push_enabled", "show_images", "auto_pronounce", "image_word", "email_enabled", "webhook_enabled")
 
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home", ".arpa", ".test", ".example", ".invalid", ".intranet", ".corp")
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -950,6 +950,7 @@ def settings_row_to_dto(row: Mapping[str, Any]) -> dict[str, Any]:
         "auto_pronounce": bool(int(row["auto_pronounce"])),
         "accent": row["accent"],
         "dance_mode": row.get("dance_mode") or "full",  # 0015 column; the DDL default when a row predates the migration
+        "image_word": bool(int(row["image_word"])) if row.get("image_word") is not None else True,  # 0021 column (记忆图卡: the word on the picture); the DDL default when a row predates the migration
         "email_enabled": bool(int(row["email_enabled"])),
         "webhook_enabled": bool(int(row["webhook_enabled"])),
         "webhook_url": row["webhook_url"],

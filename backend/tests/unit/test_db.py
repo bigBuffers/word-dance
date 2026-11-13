@@ -420,7 +420,7 @@ def test_upgrade_0011_renumbers_stages_and_rebuilds_two_tables(settings, tmp_pat
         if (16, "word_dances") in result.applied:
             expected_cols.extend(["active_dance_id", "dance_state"])  # 0016_word_dances.sql: two ADD COLUMNs (test_db_0016.py)
         assert words_cols == expected_cols
-        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == [*before_settings_cols, "dance_mode"]  # 0011 keeps the list; 0015 appends one column
+        assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == [*before_settings_cols, "dance_mode", "image_word"]  # 0011 keeps the list; 0015 and 0021 append one column each
         ddl = {r["name"]: r["sql"] for r in c.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('words', 'user_settings')")}
         assert "CHECK (stage_min BETWEEN 1 AND 5)" in ddl["words"] and "CHECK (stage_xs   IN (0,1))" in ddl["words"]
         assert "CHECK (difficulty BETWEEN 1 AND 5)" in ddl["words"]  # unchanged scale

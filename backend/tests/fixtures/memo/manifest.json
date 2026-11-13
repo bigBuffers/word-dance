@@ -1,0 +1,11 @@
+{
+ "prompt_version": "memo-1",
+ "model": "claude-fable-5-2",
+ "cards": {
+  "moon": {
+   "alt_zh": "中秋夜的湖边，朵朵指着天上又大又圆的月亮，团子伸出爪子去捞水里的月亮，兔子灯在一旁亮着。",
+   "hook_zh": "两个 o 像两轮圆月：天上一个，水里一个，oo 读长音 /uː/。",
+   "note_zh": "注意：book、look 里的 oo 读短音 /ʊ/。"
+  }
+ }
+}

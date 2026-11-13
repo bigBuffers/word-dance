@@ -1,0 +1,13 @@
+#!/bin/sh
+# studio/tools/letters — letters.py under the studio's own virtualenv (studio/.venv: fonttools lives only there, see
+# studio/README.md). PYTHONPATH carries the repository's backend like studio/tools/check does, so both wrappers start the
+# same interpreter with the same environment. Works from any directory; every path comes from this file's location.
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+py="$repo/studio/.venv/bin/python"
+if [ ! -x "$py" ]; then
+  echo "studio/tools/letters: $py not found — create the studio's virtualenv first:" >&2
+  echo "  cd $repo && python3.12 -m venv studio/.venv && studio/.venv/bin/pip install -r studio/requirements.txt" >&2
+  exit 2
+fi
+PYTHONPATH="$repo/backend${PYTHONPATH:+:$PYTHONPATH}" exec "$py" "$here/letters.py" "$@"

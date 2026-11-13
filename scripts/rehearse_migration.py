@@ -46,6 +46,11 @@ designed):
   defaulting to ``'pending'`` and ``created_account`` to 0; no other table gained a column and ``users`` / ``sessions`` / ``identities`` keep
   their rows; when the file ran here the table is empty; the ``kind`` / ``status`` CHECKs and the ``bind_user_id`` / ``user_id`` FK probes are
   rejected, a pending login ticket is storable;
+* 0021 (whenever ``schema_migrations`` holds 21; docs/MEMORY_CARDS_DESIGN.md §3.4, 记忆图卡): ``user_settings.image_word`` is appended last
+  (INTEGER NOT NULL DEFAULT 1) and ``word_images.hook_zh`` / ``note_zh`` are its last two columns (nullable TEXT, no default); the
+  ``user_settings`` / ``word_images`` row counts are unchanged; when the file ran here every settings row has ``image_word = 1``, no image
+  has a caption and no row is a memory card (``prompt_version LIKE 'memo-%'``) — otherwise the number of cards is printed; the
+  ``image_word`` CHECK probe is rejected and 0 is storable;
 * the ``wd check db`` stage invariants hold on the migrated copy and, from 0014, the four learning-order lines
   (``learn_order.check_lines`` — the same code ``wd check db`` runs); a second run applies nothing; an empty database
   migrates from 0001 to the same version with 30 tables and the ``v_bank`` view;
@@ -528,6 +533,39 @@ def check_0020(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ra
     rep.check("a pending login ticket is storable (status defaults to pending)", ok, detail[:60])
 
 
+def check_0021(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
+    """user_settings.image_word and word_images.hook_zh / note_zh appended — 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.4; mirrors
+    backend/tests/unit/test_db_0021.py on the operator's copy). Three ADD COLUMNs, no table, no index, no data step: the cards
+    themselves arrive later through `wd images-import`."""
+    settings_cols = columns(conn, "user_settings")
+    rep.check("user_settings.image_word appended last", bool(settings_cols) and settings_cols[-1]["name"] == "image_word", str([c["name"] for c in settings_cols[-2:]]))
+    col = next((c for c in settings_cols if c["name"] == "image_word"), None)
+    rep.check("user_settings.image_word INTEGER NOT NULL DEFAULT 1", col is not None and col["type"] == "INTEGER" and col["notnull"] == 1 and str(col["dflt_value"]) == "1", str(tuple(col)) if col else "missing")
+    image_cols = columns(conn, "word_images")
+    rep.check("word_images.hook_zh / note_zh appended last", [c["name"] for c in image_cols[-2:]] == ["hook_zh", "note_zh"], str([c["name"] for c in image_cols[-3:]]))
+    captions = [c for c in image_cols if c["name"] in ("hook_zh", "note_zh")]
+    rep.check("word_images.hook_zh / note_zh TEXT, nullable, no default", len(captions) == 2 and all(c["type"] == "TEXT" and c["notnull"] == 0 and c["dflt_value"] is None for c in captions), str([tuple(c) for c in captions]))
+    n_settings = int(scalar(conn, "SELECT COUNT(*) FROM user_settings"))
+    n_images = int(scalar(conn, "SELECT COUNT(*) FROM word_images"))
+    rep.check("user_settings row count unchanged (no rebuild)", n_settings == before["counts"].get("user_settings", n_settings), f"{n_settings} rows")
+    rep.check("word_images row count unchanged (no rebuild)", n_images == before["counts"].get("word_images", n_images), f"{n_images} rows")
+    cards = int(scalar(conn, "SELECT COUNT(*) FROM word_images WHERE provider = 'claude_svg' AND prompt_version LIKE 'memo-%'"))
+    if ran_here:
+        rep.check("image_word = 1 on every settings row (the word stays on the picture until a learner switches it off)", int(scalar(conn, "SELECT COUNT(*) FROM user_settings WHERE image_word != 1")) == 0, f"{n_settings} rows")
+        rep.check("hook_zh / note_zh NULL on every image (no card imported yet)", int(scalar(conn, "SELECT COUNT(*) FROM word_images WHERE hook_zh IS NOT NULL OR note_zh IS NOT NULL")) == 0, f"{n_images} rows")
+        rep.check("no memory card yet (prompt_version LIKE 'memo-%')", cards == 0, f"{cards} row(s)")
+    else:
+        active = int(scalar(conn, "SELECT COUNT(*) FROM words w JOIN word_images wi ON wi.id = w.active_image_id WHERE wi.status = 'active' AND wi.provider = 'claude_svg' AND wi.prompt_version LIKE 'memo-%'"))
+        rep.info("memory cards", f"{cards} row(s), {active} active")
+    if n_settings:
+        ok, detail = rejected(conn, "UPDATE user_settings SET image_word = 2 WHERE user_id = (SELECT MIN(user_id) FROM user_settings)")
+        rep.check("image_word = 2 rejected", ok, detail[:60])
+        ok, detail = accepted(conn, "UPDATE user_settings SET image_word = 0 WHERE user_id = (SELECT MIN(user_id) FROM user_settings)")
+        rep.check("image_word = 0 storable", ok, detail[:60])
+    else:
+        rep.skip("image_word CHECK probe", "no rows in user_settings")
+
+
 def check_0014(rep: Report, conn: sqlite3.Connection, before: dict[str, Any], ran_here: bool) -> None:
     """words.learn_rank, the learning order recomputed on the copy (DESIGN §2.9; docs/analysis/2026-11-06-learn-order/DESIGN.md)."""
     cols = {r["name"]: r for r in columns(conn, "words")}
@@ -685,6 +723,10 @@ def rehearse(target: Path, *, keep_empty_db: bool = False) -> int:
             check_0020(rep, conn, before, ran_here=20 in applied_versions)
         else:
             rep.skip("0020 checks", "not recorded in schema_migrations")
+        if 21 in recorded:
+            check_0021(rep, conn, before, ran_here=21 in applied_versions)
+        else:
+            rep.skip("0021 checks", "not recorded in schema_migrations")
         if db.current_version(conn) >= STAGE_INVARIANTS_FROM_VERSION:
             check_invariants(rep, conn)
 

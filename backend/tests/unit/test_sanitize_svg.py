@@ -269,3 +269,166 @@ def test_with_label_inserts_one_desc_after_root():
         s.with_label("<html/>", "x")
     with pytest.raises(s.SvgRejected):
         s.with_label(" " + cleaned, "x")
+
+
+# ------------------------------------------------- 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.1): clean(effects=True)
+EFFECTS_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><defs>'
+    '<filter id="glow" x="-20%" y="-20%" width="140%" height="140%" filterUnits="objectBoundingBox"><feGaussianBlur stdDeviation="6" in="SourceGraphic" result="b"/></filter>'
+    '<filter id="shadow"><feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#3A1B44" flood-opacity=".35"/></filter>'
+    '<clipPath id="win" clipPathUnits="userSpaceOnUse"><rect x="10" y="10" width="200" height="120"/></clipPath></defs>'
+    '<g id="scene"><circle cx="160" cy="120" r="60" fill="#FFF5C4" filter="url(#glow)"/><rect width="800" height="500" fill="#234" clip-path="url(#win)"/></g>'
+    '<g id="word-art" filter="url(#shadow)"><path id="wa-0-m" d="M0 0H8V10Z" fill="#fff"/></g></svg>'
+)
+
+
+def test_effects_keeps_filters_and_clip_paths_and_the_default_still_drops_them():
+    """`clean(effects=True)` is the 记忆图卡 mode: `filter` with feGaussianBlur / feDropShadow, `clipPath` and the nine attributes
+    of §3.1 survive, `filter` / `clip-path` as `url(#local-id)`; without the flag the very same input loses every one of them
+    — the online drawings' output is what it was before the flag existed."""
+    out = s.clean(EFFECTS_SVG, allow_text=False, effects=True)
+    assert out == EFFECTS_SVG  # already canonical: nothing dropped, nothing reordered
+    assert tags(out) == ["svg", "defs", "filter", "feGaussianBlur", "filter", "feDropShadow", "clipPath", "rect", "g", "circle", "rect", "g", "path"]
+    assert s.clean(out, allow_text=False, effects=True) == out  # idempotent
+    plain = s.clean(EFFECTS_SVG, allow_text=False)
+    assert plain == s.clean(EFFECTS_SVG, allow_text=False, effects=False)
+    assert tags(plain) == ["svg", "defs", "g", "circle", "rect", "g", "path"]  # filter / clipPath subtrees gone (the rect inside the clipPath with it)
+    for gone in ("filter", "clip-path", "stdDeviation", "flood-", "clipPath", "feGaussianBlur", "feDropShadow", "url("):
+        assert gone not in plain, gone
+    assert '<circle cx="160" cy="120" r="60" fill="#FFF5C4"/>' in plain and '<g id="word-art">' in plain
+    assert s.EFFECT_ELEMENTS == {"filter", "feGaussianBlur", "feDropShadow", "clipPath"}
+    assert s.EFFECT_ATTRS == {"filter", "clip-path", "stdDeviation", "in", "result", "clipPathUnits", "filterUnits", "flood-color", "flood-opacity"}
+    assert not (s.EFFECT_ELEMENTS & s.ALLOWED_ELEMENTS) and not (s.EFFECT_ATTRS & s.ALLOWED_ATTRS)  # the default lists are untouched
+    assert s.URL_REF_ATTRS == {"fill", "stroke"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("url(https://evil.example/f.svg#f)", id="absolute-url"),
+        pytest.param("url(//evil.example/f.svg#f)", id="scheme-relative"),
+        pytest.param("url(other.svg#f)", id="relative-file"),
+        pytest.param("url(data:image/svg+xml;base64,AAAA#f)", id="data-url"),
+        pytest.param("url(#a) url(other.svg#b)", id="list-with-external"),
+        pytest.param("url(#a) url(#b)", id="list-of-locals"),
+        pytest.param("url(#a) blur(4px)", id="url-then-function"),
+        pytest.param("blur(4px)", id="css-function"),
+        pytest.param("drop-shadow(0 0 4px red)", id="css-drop-shadow"),
+        pytest.param("circle(50%)", id="basic-shape"),
+        pytest.param("path('M0 0L10 10')", id="path-shape"),
+        pytest.param("url('#a\")", id="mismatched-quotes"),
+        pytest.param("u\\72l(#a)", id="css-escape"),
+        pytest.param("\\75rl(https://evil.example/f.svg#f)", id="css-escape-external"),
+        pytest.param("URL(#a)", id="upper-case"),
+        pytest.param("url(#a);background:url(//evil)", id="css-injection"),
+        pytest.param("javascript:alert(1)", id="javascript"),
+        pytest.param("url()", id="empty-url"),
+        pytest.param("url(#)", id="empty-id"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_effects_filter_and_clip_path_take_one_local_reference_only(value):
+    """Think like an attacker: a filter value is a LIST in CSS, so the paint rule of fill / stroke (one url, then a fallback)
+    would let `url(#a) url(other.svg#b)` through; under effects the two reference attributes are `none` or exactly one
+    `url(#local-id)` — nothing that names another document, no function, no second reference."""
+    for attr in ("filter", "clip-path"):
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="10" height="10" fill="red" {attr}="{value.replace(chr(34), "&quot;")}"/></svg>'
+        out = s.clean(svg, allow_text=False, effects=True)
+        assert out == '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="10" height="10" fill="red"/></svg>', (attr, value)
+
+
+@pytest.mark.parametrize("value", ["url(#a)", "url( #a )", "url('#a')", 'url("#a")', "none", "url(#blur-2.b:c)"])
+def test_effects_local_reference_forms_are_kept(value):
+    for attr in ("filter", "clip-path"):
+        quoted = value.replace('"', "&quot;")
+        out = s.clean(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="1" height="1" {attr}="{quoted}"/></svg>', effects=True)
+        assert ET.fromstring(out)[0].get(attr) == value, (attr, value)
+
+
+def test_effects_never_admits_what_loads_scripts_or_references_out():
+    """The effect elements are the two primitives a card needs and nothing else of the filter vocabulary: feImage (loads a
+    URL), the other primitives, mask / pattern / use / image / foreignObject / script / style / animate stay dropped with
+    their subtrees; href / xlink:href / on* / style are dropped ON the new elements like on any other; a dangerous value in
+    one of the new plain attributes is dropped; text inside a clipPath goes with allow_text=False."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 800 500"><defs>'
+        '<filter id="f" href="https://evil.example/x.svg#f" xlink:href="#g" onload="x()" style="filter:url(https://evil.example/y.svg#f)" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">'
+        '<feImage href="https://evil.example/pixel.png"/><feImage xlink:href="#secret"/><feGaussianBlur stdDeviation="3" in="url(#x)" result="javascript:alert(1)" edgeMode="wrap" onbegin="x()"/>'
+        '<feDropShadow dx="1" dy="1" stdDeviation="2" flood-color="url(https://evil.example/c)" flood-opacity="expression(alert(1))"/>'
+        '<feDisplacementMap in="SourceGraphic" in2="b" scale="40"/><feTurbulence baseFrequency=".05"/><feColorMatrix type="saturate" values="0"/>'
+        '<feMerge><feMergeNode in="b"/></feMerge><feFlood flood-color="red"/><feComposite in="a" in2="b"/><feBlend mode="screen"/><feOffset dx="1"/><feMorphology radius="1"/>'
+        '<animate attributeName="x" values="0;1"/><set attributeName="href" to="javascript:alert(1)"/></filter>'
+        '<clipPath id="c"><text x="1" y="9">moon</text><use href="#other"/><image href="https://evil.example/i.png"/><circle cx="5" cy="5" r="5"/><script>alert(1)</script></clipPath>'
+        '<mask id="m"><rect width="1" height="1"/></mask><pattern id="p"><rect width="1" height="1"/></pattern><style>rect{filter:url(https://evil.example/z.svg#f)}</style>'
+        '</defs><rect width="10" height="10" filter="url(#f)" clip-path="url(#c)" mask="url(#m)" fill="url(#p)"/>'
+        '<foreignObject width="10" height="10"><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject><script>alert(2)</script></svg>'
+    )
+    out = s.clean(svg, allow_text=False, effects=True)
+    assert out == (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><defs><filter id="f"><feGaussianBlur stdDeviation="3"/><feDropShadow dx="1" dy="1" stdDeviation="2"/></filter>'
+        '<clipPath id="c"><circle cx="5" cy="5" r="5"/></clipPath></defs><rect width="10" height="10" filter="url(#f)" clip-path="url(#c)" fill="url(#p)"/></svg>'
+    )
+    lowered = out.lower()
+    for gone in ("evil", "href", "javascript", "expression", "feimage", "script", "onload", "onbegin", "mask", "<pattern", "<style", "<text", "<use", "<image", "foreignobject", "animate", "<set"):
+        assert gone not in lowered, gone
+    # entities and the size / depth limits are the parser's and apply to this mode unchanged
+    with pytest.raises(s.SvgRejected, match="entity"):
+        s.clean('<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><filter id="f"><feGaussianBlur stdDeviation="&x;"/></filter></svg>', effects=True)
+    with pytest.raises(s.SvgRejected, match="60000"):
+        s.clean('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f">' + '<feGaussianBlur stdDeviation="3"/>' * 2000 + "</filter></svg>", effects=True)
+
+
+# what CSS can say past the two reference attributes: a `style` (with and without an escape, a function that takes a URL without
+# url(), a plain blur) and a CSS escape in a paint, a colour and — written as XML character references — a stroke
+CSS_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" style="background-image:image-set(\'https://evil.example/p.png\' 1x)"><defs>'
+    '<linearGradient id="g"><stop offset="0" stop-color="u\\72l(https://evil.example/c)"/></linearGradient><filter id="f"><feGaussianBlur stdDeviation="3"/></filter></defs>'
+    '<rect width="800" height="500" fill="#123" style="filter:\\75rl(https://evil.example/f.svg#f) blur(4000px);clip-path:circle(40%)"/>'
+    '<rect width="8" height="8" fill="u\\72l(https://evil.example/p.svg#g)"/>'
+    '<rect width="8" height="8" fill="#00f" style="filter:blur(6px)"/>'
+    '<rect width="8" height="8" fill="red" style="fill: blue"/>'
+    '<rect width="8" height="8" stroke="&#92;75rl(#g)" flood-color="u&#x5C;72l(#g)" filter="url(#f)"/></svg>'
+)
+
+
+def test_effects_drops_every_style_and_every_css_escape_and_the_default_mode_keeps_what_it_kept():
+    """A 记忆图卡 carries no CSS at all (studio/STUDIO.md §1). A `style` attribute says everything the two reference attributes
+    may not — `filter:blur(…)`, `clip-path:circle(…)`, `image-set('https://…')`, a second document — and a CSS escape spells
+    `url(` so that no pattern here reads it: `u\\72l(#g)` in a fill paints the gradient, `filter:\\75rl(#f)` in a style blurs
+    (seen in Chrome). Under effects both go, wherever they stand, and only the attribute goes: the five shapes stay. The
+    default mode — the online drawings, shown through <img> under the route's CSP — writes for the same input exactly what
+    it wrote before the flag existed, pinned here as a string: hardening that mode is a change of its own, announced as one."""
+    out = s.clean(CSS_SVG, allow_text=False, effects=True)
+    assert out == (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><defs><linearGradient id="g"><stop offset="0"/></linearGradient><filter id="f"><feGaussianBlur stdDeviation="3"/></filter></defs>'
+        '<rect width="800" height="500" fill="#123"/><rect width="8" height="8"/><rect width="8" height="8" fill="#00f"/><rect width="8" height="8" fill="red"/><rect width="8" height="8" filter="url(#f)"/></svg>'
+    )
+    for gone in ("style", "\\", "evil.example", "blur(", "circle(", "image-set"):
+        assert gone not in out, gone
+    assert tags(out).count("rect") == 5 and s.clean(out, allow_text=False, effects=True) == out
+    plain = s.clean(CSS_SVG, allow_text=False)
+    assert plain == s.clean(CSS_SVG, allow_text=False, effects=False) == (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" style="background-image:image-set(\'https://evil.example/p.png\' 1x)"><defs>'
+        '<linearGradient id="g"><stop offset="0" stop-color="u\\72l(https://evil.example/c)"/></linearGradient></defs>'
+        '<rect width="800" height="500" fill="#123" style="filter:\\75rl(https://evil.example/f.svg#f) blur(4000px);clip-path:circle(40%)"/>'
+        '<rect width="8" height="8" fill="u\\72l(https://evil.example/p.svg#g)"/>'
+        '<rect width="8" height="8" fill="#00f" style="filter:blur(6px)"/>'
+        '<rect width="8" height="8" fill="red" style="fill: blue"/>'
+        '<rect width="8" height="8" stroke="\\75rl(#g)"/></svg>'
+    )
+    # with text allowed (images.clean_svg) the two modes differ in the same way and in nothing else
+    assert s.clean(CSS_SVG, effects=True) == out and s.clean(CSS_SVG) == plain
+    # a backslash is no part of an id, a number or a path either: the attribute goes, the element stays
+    odd = s.clean('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><g id="a\\62" style="opacity:.5"><path d="M0 0\\H8V8Z" fill="#fff" transform="translate(4\\ 0)"/></g></svg>', effects=True)
+    assert odd == '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><g><path fill="#fff"/></g></svg>'
+
+
+def test_effects_reproduces_the_studio_validator_on_an_approved_card(fixtures_dir):
+    """tests/fixtures/memo/moon.svg is one of the ten approved sample cards as the studio's validator cleaned it (its own
+    allow-list extension, which this flag makes official): cleaning it again changes nothing, and the default mode — what
+    an online drawing gets — strips every blur and shadow from it."""
+    card = (fixtures_dir / "memo" / "moon.svg").read_text(encoding="utf-8")
+    assert s.clean(card, allow_text=False, effects=True) == card
+    assert {"filter", "feGaussianBlur", "feDropShadow"} <= set(tags(card))
+    flat = s.clean(card, allow_text=False)
+    assert not ({"filter", "feGaussianBlur", "feDropShadow", "clipPath"} & set(tags(flat))) and " filter=" not in flat and len(flat) < len(card)
