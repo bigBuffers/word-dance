@@ -209,13 +209,23 @@ def test_manifest_and_cards_name_the_same_lemmas_within_the_import_limits():
         assert 0 < len(cap["alt_zh"]) <= 200 and 0 < len(cap["hook_zh"]) <= 60 and len(cap["note_zh"]) <= 60, lemma  # MEMORY_CARDS_DESIGN §3.4
 
 
+# Cards that carry a warning ON PURPOSE — their art direction asks for exactly what the checker points at. Each is pinned by
+# the start of its message, so a new warning on these cards, or any warning on another card, still fails.
+EXPECTED_WARNINGS = {
+    "physical education": ["smallest word-art letter is 72 px em"],  # eighteen letters on one line: STUDIO §3 allows 64 px for long words
+    "child": ["wa-2-i: dotless glyph"],  # the hook: the dot of the i is the ball the child has thrown (a drawn object, checked in the render)
+}
+
+
 @pytest.mark.parametrize("lemma", LEMMAS)
 def test_check_accepts_each_approved_card(tmp_path, lemma):
     word = headword(lemma)
+    expected = EXPECTED_WARNINGS.get(lemma, [])
     code, report = run_check(card_path(lemma), tmp_path, "--word", word, "--no-render")
-    assert (code, report["ok"], report["errors"], report["warnings"]) == (0, True, [], [])
+    assert (code, report["ok"], report["errors"]) == (0, True, [])
+    assert len(report["warnings"]) == len(expected) and all(w.startswith(e) for w, e in zip(report["warnings"], expected)), report["warnings"]
     assert report["clean_bytes"] <= check.TARGET_BYTES and report["blurred_elements"] <= check.MAX_BLURRED
-    assert min(report["word_art"]["letter_em_px"]) >= check.WARN_FONT_PX
+    assert min(report["word_art"]["letter_em_px"]) >= (check.MIN_FONT_PX if any("px em" in e for e in expected) else check.WARN_FONT_PX)
     assert "".join(c[1] for c in report["word_art"]["letter_centres"]) == "".join(ch for ch in word if ch.isalnum())
     # what the tool wrote is what the import stores: the repository's sanitiser in the memory-card mode, accepted by the
     # repository's structure check, and the word layer comes off cleanly (the picture `?plain=1` serves)
@@ -716,9 +726,10 @@ def test_gallery_is_one_page_with_every_card_inlined(tmp_path):
     assert "<text" not in page and "{{" not in page
     # a lemma of the manifest without its file is left out, said on stderr, and fails the run
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({**MANIFEST, "cards": {**MANIFEST["cards"], "ice cream": {"alt_zh": "…", "hook_zh": "…", "note_zh": ""}}}, ensure_ascii=False), encoding="utf-8")
-    p = subprocess.run([sys.executable, str(TOOLS / "build_gallery.py"), "--manifest", str(manifest), "--out", str(out), "--only", "moon", "ice cream"], capture_output=True, text=True)
-    assert p.returncode == 1 and "skip ice cream" in p.stderr and "ice_cream.svg" in p.stderr
+    assert not (CARDS / "polar_bear.svg").exists()  # a lemma no card has been drawn for (`ice cream` served here until its card arrived)
+    manifest.write_text(json.dumps({**MANIFEST, "cards": {**MANIFEST["cards"], "polar bear": {"alt_zh": "…", "hook_zh": "…", "note_zh": ""}}}, ensure_ascii=False), encoding="utf-8")
+    p = subprocess.run([sys.executable, str(TOOLS / "build_gallery.py"), "--manifest", str(manifest), "--out", str(out), "--only", "moon", "polar bear"], capture_output=True, text=True)
+    assert p.returncode == 1 and "skip polar bear" in p.stderr and "polar_bear.svg" in p.stderr
     assert out.read_text(encoding="utf-8").count('<article class="card"') == 1
     # a card that quotes its references (url('#sky'), url("#ws"), url( #lc ) — the sanitiser keeps them, the app paints them)
     # is shown painted on the page the owner approves the import from: the references follow their ids
