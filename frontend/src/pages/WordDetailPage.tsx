@@ -387,6 +387,9 @@ export default function WordDetailPage() {
           as="h1"
           accent={settings?.accent}
           dance={(settings?.dance_mode ?? 'full') !== 'off' ? word.dance : undefined}
+          // the page shows the meaning anyway, so an opened word dances once by itself — spelling + stress, then its meaning in
+          // 'full' mode — when the header mounts (the skeleton is shown between two words, so each word mounts its own header)
+          autoplay={(settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
           replay={(settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
           semanticEnabled={(settings?.dance_mode ?? 'full') === 'full'}
         />

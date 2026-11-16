@@ -9,11 +9,12 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getWordImage, reportWord } from '@/api/endpoints';
-import type { Content, ImageMeta, UserWord, WordDetail } from '@/api/types';
+import type { Content, DanceMode, ImageMeta, UserWord, WordDetail } from '@/api/types';
+import { dancePlan } from '@/components/word/dances';
 import { ToastProvider } from '@/components/ui/Toast';
 import { zh } from '@/i18n/zh';
 
-const h = vi.hoisted(() => ({ detail: null as unknown, settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap', dance_mode: 'full' as 'full' | 'off', image_word: true } }));
+const h = vi.hoisted(() => ({ detail: null as unknown, settings: { timezone: 'Asia/Shanghai', accent: 'en-US', show_images: false, zh_examples: 'tap', dance_mode: 'full' as DanceMode, image_word: true } }));
 
 vi.mock('@/api/endpoints', () => ({
   getWord: vi.fn(() => Promise.resolve(h.detail)),
@@ -157,8 +158,29 @@ describe('WordDetailPage', () => {
 
 describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
   const spec = { version: 1 as const, letters: ['a', 'ban', 'don'], stress: 1, marks: { double: [] as [number, number][], silent: [] as number[] }, semantic: null, source: 'rule' as const };
+  const animate = vi.fn();
   beforeEach(() => {
     h.settings.dance_mode = 'full';
+    Object.defineProperty(Element.prototype, 'animate', { value: animate, configurable: true });
+  });
+  afterEach(() => {
+    delete (Element.prototype as unknown as { animate?: unknown }).animate;
+    h.settings.dance_mode = 'full';
+  });
+
+  it.each(['full', 'form_only'] as const)('%s: a newly opened word dances before clicking the voice button, which can replay it', async (mode) => {
+    h.settings.dance_mode = mode;
+    h.detail = detailOf(mineRow({ state: 'new' }), { dance: spec });
+    renderDetail();
+    await screen.findByRole('heading', { level: 1, name: 'abandon' });
+    const steps = dancePlan(spec, 'currentColor').length;
+    expect(animate).toHaveBeenCalledTimes(steps);
+
+    fireEvent.click(screen.getByRole('button', { name: zh.word.remove })); // unrelated page state (a confirm dialog) must not replay the dance
+    expect(animate).toHaveBeenCalledTimes(steps);
+    fireEvent.click(within(dialog()).getByRole('button', { name: zh.common.cancel }));
+    fireEvent.click(screen.getByRole('button', { name: zh.word.replayDance })); // no speech engine in jsdom
+    expect(animate).toHaveBeenCalledTimes(2 * steps);
   });
 
   it('shows the syllable chips and a dancing headword named after the word', async () => {
@@ -178,6 +200,7 @@ describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
     await screen.findByRole('heading', { level: 1 });
     expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
     expect(container.querySelector('.dword')).toBeNull();
+    expect(animate).not.toHaveBeenCalled();
   });
 });
 

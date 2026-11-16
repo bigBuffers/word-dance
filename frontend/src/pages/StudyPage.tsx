@@ -205,12 +205,12 @@ export default function StudyPage() {
   const currentDisplay = current?.word.display ?? null;
   const autoPronounce = settings?.auto_pronounce ?? false;
   const accent = settings?.accent ?? 'en-US';
-  // word dance (FRONTEND §5.1.1, §6.5): a card plays the dance when its front face mounts on a word's first exposures —
-  // new / review / extra cards with srs.repetitions < 3, never screen items (`danceAutoplay`, played in the mount's layout
-  // phase so the word never flashes whole first); 🔊 (WordHeader) and key P (`danceToken`) replay it at any time
+  // word dance (FRONTEND §5.1.1, §6.5): every card plays the dance when it shows — the front face of a new / review / extra
+  // card and a screen (recommended-word) card alike, however often the word has been reviewed (`danceAutoplay`, played in the mount's layout phase
+  // so the word never flashes whole first); 🔊 (WordHeader) and key P (`danceToken`) replay it at any time
   const danceMode = settings?.dance_mode ?? 'full';
   const [danceToken, setDanceToken] = useState(0);
-  const danceAutoplay = danceMode !== 'off' && current !== null && current.kind !== 'screen' && (current.kind === 'new' || (current.mine?.srs.repetitions ?? 0) < 3);
+  const danceAutoplay = danceMode !== 'off' && current !== null;
   useEffect(() => {
     shownAt.current = Date.now();
     setHint(false);
@@ -564,7 +564,7 @@ export default function StudyPage() {
       p: () => {
         if (!current) return;
         speak(current.word.display, accent);
-        if (danceMode !== 'off' && current.kind !== 'screen') setDanceToken((t) => t + 1);
+        if (danceMode !== 'off') setDanceToken((t) => t + 1);
       },
       z: () => setZhForced((v) => !v),
       h: () => setHint((v) => !v),

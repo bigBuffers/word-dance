@@ -65,7 +65,7 @@ export interface StudyCardProps {
   danceMode?: DanceMode;
   /** Replay counter from the page (key P), see `WordHeader.playToken`. */
   danceToken?: number;
-  /** Play the dances on this card's first exposures (the page decides): the spelling + stress dance when the front face mounts, the semantic dance when the back mounts at the reveal. */
+  /** Play the dances when this card shows (the page decides): the spelling + stress dance when the front face — or a screen (recommended-word) card — mounts, the semantic dance when the back mounts at the reveal. */
   danceAutoplay?: boolean;
 }
 
@@ -152,8 +152,9 @@ export function StudyCard({
   danceAutoplay = false,
 }: StudyCardProps) {
   const { word, content, mine } = item;
-  // screen items never dance (FRONTEND §5.1.1): the spec is withheld, so the header renders the plain headword
-  const dance = danceMode !== 'off' && item.kind !== 'screen' ? word.dance : undefined;
+  // every kind of card dances (FRONTEND §5.1.1); a screen (recommended-word) card plays the spelling + stress dance only — its header never gets the
+  // semantic (`semanticEnabled={false}` below), so the word's first show gives the spelling away, never the meaning
+  const dance = danceMode !== 'off' ? word.dance : undefined;
   const semanticEnabled = danceMode === 'full';
   // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
   const barRef = useBottomBarOffset<HTMLDivElement>();
@@ -199,7 +200,8 @@ export function StudyCard({
       <article className={cx('study-card', 'study-card--screen', className)} role="group" aria-label={word.display}>
         {header}
         <div className="study-card__face study-card__front">
-          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" />
+          {/* a new word's first show: the spelling + stress dance, like a card front — no stage object, pose colour or ghosts, and 🔊 / P replay 'form' only */}
+          <WordHeader word={word} size="lg" as="h2" accent={accent} onlyStages={onlyStages} className="study-card__word" dance={dance} playToken={danceToken} autoplay={danceAutoplay ? 'form' : false} semanticEnabled={false} />
           {showBack ? (
             <p className="study-card__peek" lang="zh-CN">
               {meaning}

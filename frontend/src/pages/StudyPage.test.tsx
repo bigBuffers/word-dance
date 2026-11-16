@@ -372,21 +372,25 @@ describe('StudyPage word dance (FRONTEND §5.1.1, §6.5; element.animate stubbed
     expect(animate.mock.calls.length).toBe(2 * steps);
   });
 
-  it('a review with three repetitions keeps the chips but does not dance on show; a screen item never dances', async () => {
-    vi.mocked(getToday).mockResolvedValue(today([danced(1, { kind: 'review', mine: mine(1, { state: 'learning', srs: { ...mine(1).srs, repetitions: 3, interval_days: 8 } }) })]));
+  it('a review past its third repetition dances on show like a new card; a screen item dances too and key P replays it', async () => {
+    vi.mocked(getToday).mockResolvedValue(today([danced(1, { kind: 'review', mine: mine(1, { state: 'learning', srs: { ...mine(1).srs, repetitions: 7, interval_days: 30 } }) })]));
     const first = renderStudy();
     await vi.waitFor(() => expect(first.container.querySelector('.dword')).not.toBeNull());
     expect(screen.getByRole('list', { name: zh.word.syllables })).toBeTruthy();
-    expect(animate).not.toHaveBeenCalled();
+    const reviewSteps = animate.mock.calls.length;
+    expect(reviewSteps).toBeGreaterThan(0); // no "first three reviews only" any more: every card dances when it shows
     first.unmount();
+    animate.mockClear();
 
-    vi.mocked(getToday).mockResolvedValue(today([danced(2, { kind: 'screen' })]));
+    vi.mocked(getToday).mockResolvedValue(today([danced(1, { kind: 'screen' })])); // the spec spells w1
     const second = renderStudy();
-    await vi.waitFor(() => expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('w2'));
-    expect(second.container.querySelector('.dword')).toBeNull();
-    expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
+    await vi.waitFor(() => expect(second.container.querySelector('.dword')).not.toBeNull());
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('w1');
+    expect(within(screen.getByRole('list', { name: zh.word.syllables })).getAllByRole('listitem').map((c) => c.textContent)).toEqual(['w', '1']);
+    const steps = animate.mock.calls.length;
+    expect(steps).toBe(reviewSteps); // the same spelling + stress dance on a recommended word's first show
     fireEvent.keyDown(window, { key: 'p' });
     await flush();
-    expect(animate).not.toHaveBeenCalled();
+    expect(animate.mock.calls.length).toBe(2 * steps);
   });
 });

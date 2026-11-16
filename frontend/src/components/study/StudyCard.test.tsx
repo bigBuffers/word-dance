@@ -279,13 +279,17 @@ describe('StudyCard word dance (FRONTEND §5.1.1, §6.5)', () => {
     expect(screen.getByRole('list', { name: zh.word.syllables })).toBeTruthy();
   });
 
-  it('a screen item never dances: plain headword, no chips, even with danceMode full and a spec', () => {
+  it('a screen item carries the dancing headword and the syllable chips too; danceMode off keeps it plain', () => {
     const danced = item({ kind: 'screen' });
     danced.word = { ...danced.word, dance: spec };
-    const { container } = renderCard({ item: danced, danceMode: 'full', danceToken: 1, danceAutoplay: true });
+    const first = renderCard({ item: danced, danceMode: 'full', danceToken: 1, danceAutoplay: true });
+    expect(within(screen.getByRole('list', { name: zh.word.syllables })).getAllByRole('listitem').map((c) => c.textContent)).toEqual(['a', 'ban', 'don']);
+    expect(first.container.querySelector('.dword')).not.toBeNull();
+    expect(screen.getByRole('heading', { level: 2, name: 'abandon' }).textContent).toBe('abandon');
+    first.unmount();
+    const second = renderCard({ item: danced });
     expect(screen.queryByRole('list', { name: zh.word.syllables })).toBeNull();
-    expect(container.querySelector('.dword')).toBeNull();
-    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('abandon');
+    expect(second.container.querySelector('.dword')).toBeNull();
   });
 
   it('danceMode off (the default) and a null spec render the plain headword without chips', () => {
@@ -339,6 +343,38 @@ describe('StudyCard semantic dance at the reveal (FRONTEND §5.1.2, §6.5; eleme
     );
     expect(animate.mock.calls.length).toBe(formSteps); // nothing on the back in form_only
     expect(afterReveal).toBeGreaterThan(formSteps);
+  });
+
+  it('a screen item plays the spelling + stress dance when it shows — never the meaning, not even in full mode or after the peek', () => {
+    const front = renderCard({ item: (() => { const it = item(); it.word = { ...it.word, dance: spec }; return it; })(), danceMode: 'full', danceToken: 0, danceAutoplay: true });
+    const formSteps = animate.mock.calls.length; // what a card front plays
+    front.unmount();
+    animate.mockClear();
+
+    const danced = item({ kind: 'screen' });
+    danced.word = { ...danced.word, dance: spec };
+    const { rerender, onReveal, onGrade, onMaster, onSkip, onRequestContent, container } = renderCard({ item: danced, danceMode: 'full', danceToken: 0, danceAutoplay: true });
+    expect(formSteps).toBeGreaterThan(0);
+    expect(animate.mock.calls.length).toBe(formSteps); // the same form dance, on show
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBeNull(); // no stage object, pose or ghosts: the meaning stays hidden
+    rerender(
+      <MemoryRouter>
+        <StudyCard item={danced} revealed zhMode="tap" showImage={false} preview={preview} onReveal={onReveal} onGrade={onGrade} onMaster={onMaster} onSkip={onSkip} onRequestContent={onRequestContent} danceMode="full" danceToken={0} danceAutoplay />
+      </MemoryRouter>,
+    );
+    expect(animate.mock.calls.length).toBe(formSteps); // the peek shows the meaning as text; the header does not remount and nothing replays
+    expect(container.querySelector('.dword-stage')?.getAttribute('data-primitive')).toBeNull();
+    rerender(
+      <MemoryRouter>
+        <StudyCard item={danced} revealed zhMode="tap" showImage={false} preview={preview} onReveal={onReveal} onGrade={onGrade} onMaster={onMaster} onSkip={onSkip} onRequestContent={onRequestContent} danceMode="full" danceToken={1} danceAutoplay />
+      </MemoryRouter>,
+    );
+    expect(animate.mock.calls.length).toBe(2 * formSteps); // key P (the page's token): the form dance again, still no meaning
+
+    animate.mockClear();
+    const quiet = renderCard({ item: danced, danceMode: 'full', danceToken: 0 }); // the page decides: without danceAutoplay nothing plays on show
+    expect(animate).not.toHaveBeenCalled();
+    quiet.unmount();
   });
 });
 

@@ -30,7 +30,7 @@ export interface WordHeaderProps {
   className?: string;
   /**
    * word dance: the word's `DanceSpec` (`null` = the word has no spec, the letters render plain); omitted = the feature is off for
-   * this view (`settings.dance_mode === 'off'`, lists, screening).
+   * this view (`settings.dance_mode === 'off'`, lists, the standalone screening deck).
    */
   dance?: DanceSpec | null;
   /** Replay counter driven by the page (key P); 🔊 adds its own replays on top. */
