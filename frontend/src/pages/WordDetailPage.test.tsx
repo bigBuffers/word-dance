@@ -146,6 +146,44 @@ describe('WordDetailPage', () => {
     expect(screen.queryByText('n:4/v:96')).toBeNull();
   });
 
+  it("the meaning leads the page: the card's own once the content is ready, else what the lists show — never under the dictionary title", async () => {
+    const content: Content = {
+      word: 'abandon', valid: true, meaning_zh: ' CARD-MEANING ', meaning_en: 'to leave', examples: [{ en: 'She abandoned hope.', zh: 'EXAMPLE-ZH' }], collocations: [], mnemonic_zh: 'MNEMONIC-ZH',
+      image_keywords: [], image_alt_zh: 'ALT-ZH', difficulty: 2, version: 1, prompt_version: 'content_v2', model: 'sonnet', created_at: '2026-10-13T00:00:00Z',
+    };
+    const lead = (c: HTMLElement) => Array.from(c.querySelectorAll('.word-detail__meaning')).map((el) => `${el.parentElement?.className}: ${el.textContent}`);
+    const dictionary = () => screen.getByRole('region', { name: zh.study.dictionary });
+
+    h.detail = { ...detailOf(mineRow(), { translation_short: 'LIST-MEANING' }), content, content_state: 'ready' };
+    const ready = renderDetail();
+    await screen.findByText('CARD-MEANING');
+    expect(lead(ready.container)).toEqual(['word-detail__head: CARD-MEANING']); // once, in the header — no longer above the examples
+    expect(within(dictionary()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['v. give up', 'n. wild abandon']);
+    expect(dictionary().compareDocumentPosition(ready.container.querySelector('.word-detail__meaning')!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    ready.unmount();
+
+    // content on its way (or deferred): the content's meaning is not shown yet, the list's is
+    h.detail = { ...detailOf(mineRow(), { translation_short: 'LIST-MEANING' }), content, content_state: 'queued', content_deferred_until: '2026-10-14T00:00:00Z' };
+    const waiting = renderDetail();
+    await screen.findByText(zh.study.contentDeferred);
+    expect(lead(waiting.container)).toEqual(['word-detail__head: LIST-MEANING']);
+    waiting.unmount();
+
+    // a word nothing is known about yet: no empty line, and the short meaning is not repeated as a "dictionary" line
+    h.detail = detailOf(mineRow(), { translation_short: '', translation: null });
+    const bare = renderDetail();
+    await screen.findByText(zh.study.contentFailed);
+    expect(lead(bare.container)).toEqual([]);
+    expect(within(dictionary()).queryAllByRole('listitem')).toEqual([]);
+    bare.unmount();
+
+    h.detail = detailOf(mineRow(), { translation_short: 'LIST-MEANING', translation: null });
+    renderDetail();
+    await screen.findByText('LIST-MEANING');
+    expect(screen.getAllByText('LIST-MEANING')).toHaveLength(1);
+    expect(within(dictionary()).queryByText('LIST-MEANING')).toBeNull();
+  });
+
   it('a never-graded bank row reads "not reviewed yet" instead of a zeroth review', async () => {
     h.detail = detailOf(mineRow({ state: 'new', srs: { ease: 2.5, interval_days: 0, step: 0, repetitions: 0, lapses: 0, consecutive_good: 0, due_at: null, last_graded_at: null, mastery_suggested: false } }));
     renderDetail();

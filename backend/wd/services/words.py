@@ -59,6 +59,13 @@ DEFERRAL_THRESHOLD_S = 300  # API.md 24: a run_after more than 5 minutes ahead i
 MAX_MERGE_HOPS = 8
 MAX_CONFUSABLES = 6
 TRANSLATION_SHORT_LEN = 60
+# The WHERE clause of a Chinese search over `words w` (endpoints 20 / 33; named parameter :like, already LIKE-escaped): the text is
+# looked for where a learner has seen it — the dictionary's lines and the meaning on the word's card, which is what the lists show
+# (short_meaning): 「项目」 has to find `project`, whose dictionary entry does not have the word
+ZH_SEARCH_SQL = (
+    "(w.translation LIKE :like ESCAPE '\\' OR EXISTS (SELECT 1 FROM word_contents wc WHERE wc.id = w.active_content_id "
+    "AND wc.status = 'active' AND json_valid(wc.content_json) AND json_extract(wc.content_json, '$.meaning_zh') LIKE :like ESCAPE '\\'))"
+)
 HISTORY_LIMIT = 20
 
 # zh reasons for Invalid (served as the invalid_word error message / LookupPreview.reason_zh)
@@ -234,13 +241,49 @@ def stages_of(row: Mapping[str, Any]) -> list[str]:
     return [s for s in STAGES if int(row.get(f"stage_{s}") or 0)]
 
 
+def _clip_short(line: str) -> str:
+    return line if len(line) <= TRANSLATION_SHORT_LEN else line[: TRANSLATION_SHORT_LEN - 1] + "…"
+
+
 def translation_short(translation: str | None) -> str:
-    """First translation line, ≤ 60 chars (API.md §9.1)."""
+    """First translation line, ≤ 60 chars — the dictionary's opening line as it stands; what a list shows is
+    :func:`short_meaning`."""
     for line in (translation or "").split("\n"):
         line = line.strip()
         if line:
-            return line if len(line) <= TRANSLATION_SHORT_LEN else line[: TRANSLATION_SHORT_LEN - 1] + "…"
+            return _clip_short(line)
     return ""
+
+
+def short_meaning(word: Mapping[str, Any], content_meaning: str | None = None) -> str:
+    """``WordBrief.translation_short`` (API.md §9.1): the Chinese a list shows next to a word, one line of ≤ 60 chars — the
+    meaning written for its card (the active content's ``meaning_zh``), else the dictionary's main sense
+    (``ai.dance.dictionary_sense``: the ``translation`` line of the dominant part of speech), else ``''``. The dictionary's first
+    line alone misled: ECDICT orders its lines by part of speech and opens ``cover`` with 「n. 盖子, 封面, 藉口」 although the
+    word is a verb 75 % of the time, and its whole entry for ``project`` has no 「项目」."""
+    from ..ai import dance as annotate  # local import: services → ai must not become a module cycle at import time
+
+    text = " ".join(str(content_meaning or "").split()) or annotate.dictionary_sense(word)
+    return _clip_short(text)
+
+
+def content_meanings(conn: sqlite3.Connection, content_ids: Iterable[Any]) -> dict[int, str]:
+    """``meaning_zh`` of the active ``word_contents`` rows among ``content_ids``, by content id (one query per 500). Read with
+    ``json_extract``, so a list page does not parse a page of whole ``Content`` objects; a row that is not active, cannot be
+    parsed or has no meaning is left out."""
+    ids = sorted({int(i) for i in content_ids if i is not None})
+    out: dict[int, str] = {}
+    for chunk_start in range(0, len(ids), 500):
+        chunk = ids[chunk_start : chunk_start + 500]
+        marks = ",".join("?" * len(chunk))
+        for cid, meaning in conn.execute(
+            "SELECT id, CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.meaning_zh') END "
+            f"FROM word_contents WHERE status = 'active' AND id IN ({marks})",
+            chunk,
+        ):
+            if isinstance(meaning, str) and meaning.strip():
+                out[int(cid)] = meaning
+    return out
 
 
 def _bool_or_none(v: Any) -> bool | None:
@@ -268,16 +311,23 @@ def _my_state(conn: sqlite3.Connection, word_id: int, user_id: int) -> str | Non
 
 def word_brief(conn: sqlite3.Connection, row: sqlite3.Row | Mapping[str, Any], user_id: int) -> dict[str, Any]:
     """API.md ``WordBrief`` from a ``words`` row. A row that already carries ``my_state`` (joined by the caller) is used
-    as is; otherwise the user's ``user_words.state`` is looked up."""
+    as is; otherwise the user's ``user_words.state`` is looked up. The same holds for ``content_meaning`` (the active
+    content's ``meaning_zh``, filled in for a whole page by :func:`word_briefs`), which :func:`short_meaning` turns into
+    ``translation_short``."""
     r = _as_dict(row)
     my_state = r["my_state"] if "my_state" in r else _my_state(conn, int(r["id"]), user_id)
+    if "content_meaning" in r:
+        meaning = r["content_meaning"]
+    else:
+        cid = r.get("active_content_id")
+        meaning = None if cid is None else content_meanings(conn, [cid]).get(int(cid))
     return {
         "id": int(r["id"]),
         "lemma": r["lemma"],
         "display": r["display"],
         "kind": r["kind"],
         "phonetic": r.get("phonetic") or None,
-        "translation_short": translation_short(r.get("translation")),
+        "translation_short": short_meaning(r, meaning),
         "stages": stages_of(r),
         "stage_min": r.get("stage_min"),
         "cet6_star": bool(r.get("cet6_star") or 0),
@@ -294,8 +344,13 @@ def word_brief(conn: sqlite3.Connection, row: sqlite3.Row | Mapping[str, Any], u
 
 
 def word_briefs(conn: sqlite3.Connection, rows: Iterable[sqlite3.Row | Mapping[str, Any]], user_id: int) -> list[dict[str, Any]]:
-    """``word_brief`` for a list with one ``user_words`` query (lists of up to a page)."""
+    """``word_brief`` for a list with one ``user_words`` query and one ``word_contents`` query (lists of up to a page)."""
     dicts = [_as_dict(r) for r in rows]
+    meanings = content_meanings(conn, [r.get("active_content_id") for r in dicts if "content_meaning" not in r])
+    for r in dicts:
+        if "content_meaning" not in r:
+            cid = r.get("active_content_id")
+            r["content_meaning"] = None if cid is None else meanings.get(int(cid))
     missing = [int(r["id"]) for r in dicts if "my_state" not in r]
     states: dict[int, str] = {}
     for chunk_start in range(0, len(missing), 500):
@@ -830,11 +885,13 @@ __all__ = [
     "Invalid",
     "Normalised",
     "Resolution",
+    "ZH_SEARCH_SQL",
     "active_content",
     "add_form",
     "card_image_meta",
     "confusables_for",
     "content_deferred_until",
+    "content_meanings",
     "derive_kind",
     "enqueue_lookup",
     "follow_merge",
@@ -849,6 +906,7 @@ __all__ = [
     "normalise_input",
     "normalise_lemma",
     "resolve",
+    "short_meaning",
     "stages_of",
     "suffix_rule_maps",
     "translation_short",

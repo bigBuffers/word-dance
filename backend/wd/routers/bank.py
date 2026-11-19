@@ -67,7 +67,7 @@ def bank_list(
             where.append("(w.lemma >= :q AND w.lemma < :q || '~')")
             params["q"] = key
         elif s:
-            where.append("w.translation LIKE :like ESCAPE '\\'")
+            where.append(words.ZH_SEARCH_SQL)
             params["like"] = "%" + _like_escape(s) + "%"
     if q.origin:
         where.append("uw.origin = :origin")

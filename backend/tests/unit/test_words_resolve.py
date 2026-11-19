@@ -529,6 +529,80 @@ def test_word_brief_shape_and_my_state(seeded, user):
     assert am["phonetic"] is None and am["kind"] == "abbreviation" and am["frq"] is None
 
 
+def add_content(conn: sqlite3.Connection, wid: int, content_json: str, *, status: str = "active") -> int:
+    """A ``word_contents`` row made the word's active content (the JSON is stored as given: a test may store a broken one)."""
+    version = conn.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM word_contents WHERE word_id = ?", (wid,)).fetchone()[0]
+    cid = conn.execute(
+        "INSERT INTO word_contents(word_id, version, prompt_version, model, content_json, status) VALUES (?, ?, 'content-v2', 'm', ?, ?)",
+        (wid, version, content_json, status),
+    ).lastrowid
+    conn.execute("UPDATE words SET active_content_id = ?, content_state = 'ready' WHERE id = ?", (cid, wid))
+    return int(cid)
+
+
+def short_of(conn: sqlite3.Connection, lemma: str, user_id: int) -> str:
+    return word_brief(conn, conn.execute("SELECT * FROM words WHERE lemma = ?", (lemma,)).fetchone(), user_id)["translation_short"]
+
+
+def test_translation_short_is_the_card_meaning_else_the_dictionary_main_sense(seeded, user):
+    """API.md §9.1: a list shows what the word's card says; without a card, the dictionary line of the dominant part of speech —
+    never just the first line (ECDICT opens `cover`, a verb 75 % of the time, with its noun line)."""
+    wid = word_id(seeded, "abandon")
+    seeded.execute("UPDATE words SET translation = 'n. 盖子, 封面, 藉口\nvt. 覆盖, 掩饰, 保护\nvi. 覆盖', pos = 'n:25/v:75' WHERE id = ?", (wid,))
+    assert words.translation_short("n. 盖子, 封面, 藉口\nvt. 覆盖, 掩饰, 保护") == "n. 盖子, 封面, 藉口"  # the helper still means the first line
+    assert short_of(seeded, "abandon", user) == "vt. 覆盖, 掩饰, 保护"  # no content: the verb line
+    seeded.execute("UPDATE words SET pos = NULL WHERE id = ?", (wid,))
+    assert short_of(seeded, "abandon", user) == "n. 盖子, 封面, 藉口"  # no part-of-speech counts: the first line
+    seeded.execute("UPDATE words SET pos = 'n:25/v:75' WHERE id = ?", (wid,))
+
+    cid = add_content(seeded, wid, json.dumps({"word": "abandon", "meaning_zh": " v. 覆盖；涵盖；报道\n n. 封面；盖子 "}, ensure_ascii=False))
+    assert short_of(seeded, "abandon", user) == "v. 覆盖；涵盖；报道 n. 封面；盖子"  # the card's meaning, on one line
+    detail = word_detail(seeded, wid, user)
+    assert detail["word"]["translation_short"] == "v. 覆盖；涵盖；报道 n. 封面；盖子"
+    assert detail["word"]["translation"].splitlines()[0] == "n. 盖子, 封面, 藉口"  # the dictionary's own lines stay as they are
+
+    # whatever cannot be shown falls back to the dictionary: an empty meaning, a broken row, a content that is not active
+    for broken in ('{"meaning_zh": "  "}', '{"meaning_zh": 7}', '{"word": "abandon"}', "not json", "[1, 2]"):
+        seeded.execute("UPDATE word_contents SET content_json = ? WHERE id = ?", (broken, cid))
+        assert short_of(seeded, "abandon", user) == "vt. 覆盖, 掩饰, 保护", broken
+    seeded.execute("UPDATE word_contents SET content_json = ?, status = 'superseded' WHERE id = ?", (json.dumps({"meaning_zh": "旧的"}, ensure_ascii=False), cid))
+    assert short_of(seeded, "abandon", user) == "vt. 覆盖, 掩饰, 保护"
+    seeded.execute("UPDATE word_contents SET content_json = ?, status = 'active' WHERE id = ?", (json.dumps({"meaning_zh": "释" * 61}, ensure_ascii=False), cid))
+    assert short_of(seeded, "abandon", user) == "释" * 59 + "…"  # ≤ 60 chars, like a dictionary line
+
+    assert words.short_meaning({"lemma": "x", "translation": None, "pos": None}) == "" and words.short_meaning({"translation": "n. 甲\nv. 乙", "pos": "v:90/n:10"}, "  ") == "v. 乙"
+
+
+def test_word_briefs_reads_the_meanings_of_a_page_in_one_query(seeded, user):
+    a, g, d = word_id(seeded, "abandon"), word_id(seeded, "go"), word_id(seeded, "data")
+    ca = add_content(seeded, a, json.dumps({"meaning_zh": "v. 放弃"}, ensure_ascii=False))
+    cg = add_content(seeded, g, json.dumps({"meaning_zh": "v. 去；走"}, ensure_ascii=False))
+    assert words.content_meanings(seeded, [ca, cg, None, 987654, ca]) == {ca: "v. 放弃", cg: "v. 去；走"}
+    assert words.content_meanings(seeded, []) == {}
+    rows = [db.row_to_dict(r) for r in seeded.execute("SELECT * FROM words WHERE id IN (?, ?, ?) ORDER BY lemma", (a, g, d))]
+    statements: list[str] = []
+    seeded.set_trace_callback(statements.append)
+    try:
+        briefs = words.word_briefs(seeded, rows, user)
+    finally:
+        seeded.set_trace_callback(None)
+    assert [b["lemma"] for b in briefs] == ["abandon", "data", "go"]
+    assert briefs[0]["translation_short"] == "v. 放弃" and briefs[2]["translation_short"] == "v. 去；走"
+    assert briefs[1]["translation_short"] == words.translation_short(rows[1]["translation"]) != ""  # no content: the dictionary
+    assert len([s for s in statements if "word_contents" in s]) == 1 and len(statements) == 2  # + the one user_words query
+    # a meaning the caller already joined is used as it is — None included — and nothing is read for that row
+    joined = [{**rows[0], "content_meaning": "调用方给的"}, {**rows[2], "content_meaning": None}]
+    seeded.set_trace_callback(statements.append)
+    del statements[:]
+    try:
+        out = words.word_briefs(seeded, joined, user)
+    finally:
+        seeded.set_trace_callback(None)
+    assert out[0]["translation_short"] == "调用方给的" and out[1]["translation_short"] == words.translation_short(rows[2]["translation"])
+    assert not [s for s in statements if "word_contents" in s]
+    assert set(out[0]) == set(schemas.WordBrief.model_fields)  # the helper key never reaches the wire
+
+
 def test_word_briefs_batches_the_state_lookup(seeded, user):
     rows = seeded.execute("SELECT * FROM words ORDER BY lemma LIMIT 5").fetchall()
     add_bank_row(seeded, user, int(rows[1]["id"]), "new")

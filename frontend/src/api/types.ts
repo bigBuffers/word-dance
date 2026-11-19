@@ -123,7 +123,7 @@ export interface StageInfo {
 }
 export interface WordBrief {
   id: number; lemma: string; display: string; kind: WordKind; phonetic: string | null;
-  translation_short: string;            // first translation line, ≤ 60 chars
+  translation_short: string;            // the short meaning a list shows, one line of ≤ 60 chars: the active content's meaning_zh, else the dictionary's main sense (§9.1)
   stages: Stage[]; stage_min: StageIndex | null; cet6_star: boolean;
   frq: number | null; collins: number | null; oxford: boolean | null; difficulty: number | null;
   is_public: boolean; is_valid_english: boolean | null;

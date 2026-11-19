@@ -366,6 +366,9 @@ export default function WordDetailPage() {
   const dictLines = splitLines(word.translation);
   const forms = [word.lemma, word.display, ...word.forms.map((f) => f.form)];
   const deferred = data.content_deferred_until !== null;
+  // the meaning leads the page, the dictionary entry follows as reference: the card's own meaning in full once the content is
+  // ready, else what the lists show (`translation_short`: the dictionary's main sense for a word without content)
+  const meaning = (content && data.content_state === 'ready' && !deferred ? content.meaning_zh.trim() : '') || word.translation_short;
   const canRequestContent = (data.content_state === 'none' || data.content_state === 'failed') && !deferred && word.is_valid_english !== null;
   const timeZone = settings?.timezone;
   const dueSentence = mine && state === 'learning' ? formatDueSentence(mine.srs.due_at, mine.srs.step) : null;
@@ -393,6 +396,11 @@ export default function WordDetailPage() {
           replay={(settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
           semanticEnabled={(settings?.dance_mode ?? 'full') === 'full'}
         />
+        {meaning && (
+          <p className="word-detail__meaning" lang="zh-CN">
+            {meaning}
+          </p>
+        )}
         <div className="word-detail__state">
           <StateBadge state={state} srs={mine?.srs ?? null} />
           {mine && mine.times_added > 1 && <span className="badge">{zh.study.addedTimes(mine.times_added)}</span>}
@@ -435,14 +443,12 @@ export default function WordDetailPage() {
             {pos}
           </p>
         )}
-        {dictLines.length > 0 ? (
+        {dictLines.length > 0 && (
           <ul className="word-detail__lines" lang="zh-CN">
             {dictLines.map((line, i) => (
               <li key={i}>{line}</li>
             ))}
           </ul>
-        ) : (
-          <p lang="zh-CN">{word.translation_short}</p>
         )}
         {word.definition && (
           <p className="word-detail__definition muted" lang="en">
@@ -492,11 +498,6 @@ export default function WordDetailPage() {
       <section className="word-detail__section card" aria-label={zh.study.examples}>
         {content && data.content_state === 'ready' && !deferred ? (
           <>
-            {content.meaning_zh && (
-              <p className="word-detail__meaning" lang="zh-CN">
-                {content.meaning_zh}
-              </p>
-            )}
             <h2 className="word-detail__section-title">{zh.study.examples}</h2>
             <ExampleList examples={content.examples} lemma={word.lemma} forms={forms} zhMode={settings?.zh_examples ?? 'tap'} accent={settings?.accent} />
             {content.collocations.length > 0 && (

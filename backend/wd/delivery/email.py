@@ -170,7 +170,7 @@ def build_digest(conn: sqlite3.Connection, cfg: Any, batch: Mapping[str, Any], *
             continue
         content = words.active_content(conn, w) or {}
         example = (content.get("examples") or [None])[0] if isinstance(content.get("examples"), list) else None
-        meaning = str(content.get("meaning_zh") or "").strip() or words.translation_short(w.get("translation"))
+        meaning = str(content.get("meaning_zh") or "").strip() or words.short_meaning(w)
         out.append(
             DigestWord(
                 word=str(w["display"]),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
@@ -154,6 +155,36 @@ def test_vocab_search_prefix_forms_and_chinese(client: TestClient, settings, ali
     assert client.get("/api/vocab?q=" + "a" * 65).status_code == 400
     r = client.get("/api/vocab?q=100%25")  # a stray % never becomes a wildcard
     assert r.status_code == 200 and r.json()["total"] == 0
+
+
+def test_lists_show_and_search_the_card_meaning(client: TestClient, settings, alice):
+    """API.md §9.1 `translation_short` + endpoints 20 / 33: a list shows the meaning on the word's card instead of the dictionary's
+    first line, and a Chinese search finds a word by what the list shows — `项目` used to miss `project`."""
+    wid = q1(settings, "SELECT id FROM words WHERE lemma = 'abandon'")
+    assert client.get("/api/vocab?q=项目").json()["total"] == 0  # no dictionary line of the seed has the word
+    content = {
+        "word": "abandon", "valid": True, "meaning_zh": "n. 项目；工程 v. 100%投入", "meaning_en": "a planned piece of work",
+        "examples": [{"en": "They abandon the project.", "zh": "他们放弃了这个项目。"}] * 3, "collocations": [], "mnemonic_zh": "", "image_keywords": [],
+        "image_alt_zh": "", "difficulty": 2, "version": 1, "prompt_version": "content-v2", "model": "m", "created_at": "2026-11-19T00:00:00Z",
+    }
+    run(
+        settings,
+        "INSERT INTO word_contents(id, word_id, version, prompt_version, model, content_json) VALUES (9001, ?, 1, 'content-v2', 'm', ?)",
+        (wid, json.dumps(content, ensure_ascii=False)),
+    )
+    run(settings, "UPDATE words SET active_content_id = 9001, content_state = 'ready' WHERE id = ?", (wid,))
+    client.post(f"/api/words/{wid}/mark", json={"action": "unfamiliar"})
+    for url in ("/api/vocab", "/api/bank"):
+        assert [(i["lemma"], i["translation_short"]) for i in client.get(f"{url}?q=aband").json()["items"]] == [("abandon", "n. 项目；工程 v. 100%投入")], url
+        assert [i["lemma"] for i in client.get(f"{url}?q=项目").json()["items"]] == ["abandon"], url  # by the card's meaning
+        assert "abandon" in [i["lemma"] for i in client.get(f"{url}?q=放弃").json()["items"]], url  # the dictionary's lines still count
+        assert [i["lemma"] for i in client.get(f"{url}?q=100%25投").json()["items"]] == ["abandon"], url
+        assert client.get(f"{url}?q=1%25投").json()["total"] == 0, url  # a % in the query stays a literal there too
+    assert client.get(f"/api/words/{wid}").json()["word"]["translation_short"] == "n. 项目；工程 v. 100%投入"
+    run(settings, "UPDATE word_contents SET status = 'superseded' WHERE id = 9001")  # a content that is not active is neither shown nor searched
+    for url in ("/api/vocab", "/api/bank"):
+        assert client.get(f"{url}?q=项目").json()["total"] == 0, url
+        assert client.get(f"{url}?q=aband").json()["items"][0]["translation_short"].startswith("vt. 放弃"), url
 
 
 def test_vocab_status_filters(client: TestClient, settings, alice):

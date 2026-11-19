@@ -29,7 +29,8 @@ def _like_escape(s: str) -> str:
 
 
 def _search_clause(q: str, params: dict[str, Any]) -> str | None:
-    """ASCII → prefix on ``lemma`` plus ``word_forms.form``; anything else → ``translation LIKE``."""
+    """ASCII → prefix on ``lemma`` plus ``word_forms.form``; anything else → a substring of the Chinese the word is shown with
+    (``words.ZH_SEARCH_SQL``: ``translation`` or the active content's ``meaning_zh``)."""
     s = q.strip()
     if not s:
         return None
@@ -43,7 +44,7 @@ def _search_clause(q: str, params: dict[str, Any]) -> str | None:
             "SELECT 1 FROM word_forms wf WHERE wf.word_id = w.id AND wf.form >= :q AND wf.form < :q || '~'))"
         )
     params["like"] = "%" + _like_escape(s) + "%"
-    return "w.translation LIKE :like ESCAPE '\\'"
+    return words.ZH_SEARCH_SQL
 
 
 def vocab_filters(me: dict[str, Any], q: schemas.VocabQuery, *, with_letter_and_q: bool) -> tuple[str, dict[str, Any]]:
