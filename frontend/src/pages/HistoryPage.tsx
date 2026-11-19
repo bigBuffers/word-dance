@@ -1,12 +1,13 @@
-// HistoryPage — history (FRONTEND §2, §5.8; API.md 48/49/51): 12-week heat strip, streak / longest streak, day rows
-// "<date> · completed 41/41 🔥" / "<date> · offline", stubborn list from Stats.stubborn and the past batches.
-import { useEffect, useState } from 'react';
+// HistoryPage — history (FRONTEND §2, §5.8; API.md 48/49/51): streak / longest streak, the study calendar (5 weeks, the 12
+// loaded ones on demand) and ONE row per day, newest first — the day's status and what it held, linking to its batch —
+// then the stubborn list from Stats.stubborn. The calendar and the rows use the same word for a finished day.
+import { useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { errorMessage } from '@/api/client';
 import { getHistory, getHistoryBatches, getStats } from '@/api/endpoints';
-import type { BatchSummary, DayStats } from '@/api/types';
+import type { BatchSummary, DayStats, TodayCounts } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
-import { HeatStrip, type HeatDay } from '@/components/stats/HeatStrip';
+import { CALENDAR_WEEKS, CALENDAR_WEEKS_MAX, StudyCalendar, dayState, hasEarlier, weekdayName, type CalendarDay } from '@/components/stats/StudyCalendar';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Skeleton';
@@ -15,32 +16,68 @@ import { useApi } from '@/hooks/useApi';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { zh } from '@/i18n/zh';
 import { routePaths } from '@/routes';
+import { joinDot } from '@/utils/format';
 import { addDays, formatMonthDay, localDateOf } from '@/utils/srsPreview';
 import './HistoryPage.css';
 
 /** 12 weeks = 84 days including today. */
 export const HISTORY_DAYS = 84;
-const MAX_DAY_ROWS = 42;
 
+/** The day's goal from `DayStats` alone: the calendar's stand-in until `Stats.heatmap` (the server's predicate) has loaded. */
 export function dayGoalMet(d: Pick<DayStats, 'batch_total' | 'batch_done'>): boolean {
   return d.batch_total !== null && d.batch_total > 0 && d.batch_done !== null && d.batch_done >= d.batch_total;
 }
 
-/** Day row copy (FRONTEND §5.8). */
-export function dayRowText(d: DayStats): string {
-  const date = formatMonthDay(d.date);
-  if (d.offline) return `${date} · ${zh.history.offline}`;
-  if (d.batch_total !== null) return `${date} · ${zh.history.completed(d.batch_done ?? 0, d.batch_total)}${dayGoalMet(d) ? ' 🔥' : ''}`;
-  return `${date} · ${zh.history.gradedCount(d.graded)}`;
+/** API.md §9.1 `goal_met` of a batch summary: completed once, or every review / new / extra item final (a screen-only batch counts its screen items). */
+export function batchGoalMet(b: Pick<BatchSummary, 'counts' | 'completed_at'>): boolean {
+  if (b.completed_at !== null) return true;
+  const c = b.counts;
+  const study = c.review + c.new + c.extra;
+  if (study > 0) return c.review_done + c.new_done + c.extra_done >= study;
+  return c.total > 0 && c.done >= c.total;
 }
 
-/** Days worth a row: a batch, an offline gap or any grading — newest first. */
-export function visibleDays(days: readonly DayStats[]): DayStats[] {
-  return days
-    .filter((d) => d.batch_id !== null || d.offline || d.graded > 0)
-    .slice()
-    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
-    .slice(0, MAX_DAY_ROWS);
+/** `done` = goal met · today's open batch is `progress` once something is graded, `pending` before · an older open batch is `unfinished`. */
+export type DayStatus = keyof typeof zh.history.status;
+
+export function batchStatus(b: Pick<BatchSummary, 'counts' | 'completed_at' | 'local_date'>, today: string): DayStatus {
+  if (batchGoalMet(b)) return 'done';
+  if (b.local_date !== today) return 'unfinished';
+  return b.counts.done > 0 ? 'progress' : 'pending';
+}
+
+/** What the day held, per kind: plain totals once every item is done, done/total while something is left. */
+export function kindsText(c: TodayCounts): string {
+  const allDone = c.done >= c.total;
+  const kinds = [
+    { label: zh.today.counts.review, done: c.review_done, total: c.review },
+    { label: zh.today.counts.new, done: c.new_done, total: c.new },
+    { label: zh.today.counts.screen, done: c.screen_done, total: c.screen },
+    { label: zh.today.counts.extra, done: c.extra_done, total: c.extra },
+  ].filter((k) => k.total > 0);
+  return joinDot(kinds.map((k) => (allDone ? `${k.label} ${k.total}` : `${k.label} ${k.done}/${k.total}`)));
+}
+
+export type DayRow =
+  | { kind: 'batch'; date: string; batch: BatchSummary }
+  | { kind: 'idle'; date: string } // a batch without items: nothing was due that day
+  | { kind: 'graded'; date: string; graded: number } // graded (yesterday's leftovers) on a day without a batch
+  | { kind: 'offline'; date: string };
+
+/**
+ * One row per day, newest first: the loaded batches, plus the batch-less days of `days` that were studied or offline. While
+ * older batches are still to be loaded, a batch-less day older than the oldest loaded batch waits for its neighbours.
+ */
+export function buildDayRows(batches: readonly BatchSummary[], days: readonly DayStats[], allLoaded: boolean): DayRow[] {
+  const rows: DayRow[] = batches.map((b) => (b.counts.total > 0 ? { kind: 'batch', date: b.local_date, batch: b } : { kind: 'idle', date: b.local_date }));
+  const batchDates = new Set(batches.map((b) => b.local_date));
+  const oldest = batches.reduce<string | null>((min, b) => (min === null || b.local_date < min ? b.local_date : min), null);
+  for (const d of days) {
+    if (d.batch_id !== null || batchDates.has(d.date) || (d.graded <= 0 && !d.offline)) continue;
+    if (!allLoaded && oldest !== null && d.date < oldest) continue;
+    rows.push(d.graded > 0 ? { kind: 'graded', date: d.date, graded: d.graded } : { kind: 'offline', date: d.date });
+  }
+  return rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 }
 
 export default function HistoryPage() {
@@ -52,25 +89,35 @@ export default function HistoryPage() {
 
   const history = useApi((signal) => getHistory({ from, to: today }, signal), [from, today]);
   const stats = useApi((signal) => getStats(signal), []);
+  // The pages accumulate inside the fetcher's result, so the list and its total arrive in one render: the day rows are built
+  // from both, and a list filled one render after its page would first show the batch-less days alone.
   const [page, setPage] = useState(1);
-  const [batches, setBatches] = useState<BatchSummary[]>([]);
-  const [batchTotal, setBatchTotal] = useState(0);
-  const batchPage = useApi((signal) => getHistoryBatches(page, signal), [page]);
-  const pageData = batchPage.data;
-  useEffect(() => {
-    if (!pageData) return;
-    setBatchTotal(pageData.total);
-    setBatches((prev) => (page === 1 ? pageData.items : [...prev, ...pageData.items.filter((b) => !prev.some((p) => p.id === b.id))]));
-  }, [pageData, page]);
+  const loadedRef = useRef<BatchSummary[]>([]);
+  const batchPage = useApi(
+    async (signal) => {
+      const next = await getHistoryBatches(page, signal);
+      const prev = page === 1 ? [] : loadedRef.current;
+      loadedRef.current = [...prev, ...next.items.filter((b) => !prev.some((p) => p.id === b.id))];
+      return { items: loadedRef.current, total: next.total };
+    },
+    [page],
+  );
+  const batches = batchPage.data?.items ?? [];
+  const batchTotal = batchPage.data?.total ?? 0;
+  const [expanded, setExpanded] = useState(false);
 
   const days = history.data?.days ?? [];
-  const heatDays: HeatDay[] = stats.data?.heatmap ?? days.map((d) => ({ date: d.date, graded: d.graded, goal_met: dayGoalMet(d) }));
-  const rows = visibleDays(days);
+  const goalByDate = new Map((stats.data?.heatmap ?? []).map((h) => [h.date, h.goal_met]));
+  const calendarDays: CalendarDay[] = days.map((d) => ({ date: d.date, graded: d.graded, goal_met: goalByDate.get(d.date) ?? dayGoalMet(d) }));
+  const batchByDate = new Map(days.flatMap((d) => (d.batch_id !== null && (d.batch_total ?? 0) > 0 ? [[d.date, d.batch_id] as const] : [])));
+  const earlier = hasEarlier(calendarDays, today);
+  const rows = buildDayRows(batches, days, batches.length >= batchTotal);
   const streak = history.data?.streak_days ?? stats.data?.streak_days ?? 0;
   const longest = history.data?.longest_streak ?? stats.data?.longest_streak ?? 0;
   const stubborn = stats.data?.stubborn ?? [];
-  const loading = (history.loading && !history.data) || (batchPage.loading && !pageData && page === 1);
-  const empty = !loading && history.data !== null && rows.length === 0 && batches.length === 0 && heatDays.every((d) => d.graded === 0);
+  const loading = (history.loading && !history.data) || (batchPage.loading && !batchPage.data);
+  const listFailed = batchPage.error !== null && !batchPage.data; // the days cannot be listed without their batches
+  const empty = !loading && history.data !== null && !listFailed && rows.length === 0 && calendarDays.every((d) => dayState(d) === 'none');
 
   if (history.error && !history.data) {
     return (
@@ -93,39 +140,71 @@ export default function HistoryPage() {
 
       {loading ? (
         <div aria-busy="true" className="stack">
-          <Skeleton height={110} />
+          <Skeleton height={280} />
           <Skeleton lines={5} />
         </div>
       ) : empty ? (
         <EmptyState title={zh.history.empty} action={{ label: zh.today.start, to: routePaths.today }} />
       ) : (
         <>
-          <section className="history__section card" aria-label={zh.history.heat}>
-            <h2 className="history__section-title">{zh.history.heat}</h2>
-            <HeatStrip days={heatDays} today={today} />
+          <section className="history__section card" aria-label={zh.history.calendar}>
+            <div className="history__section-head">
+              <h2 className="history__section-title">{zh.history.calendar}</h2>
+              {earlier && (
+                <Button variant="ghost" size="sm" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+                  {expanded ? zh.history.collapse : zh.history.earlier}
+                </Button>
+              )}
+            </div>
+            <StudyCalendar
+              days={calendarDays}
+              today={today}
+              weeks={expanded && earlier ? CALENDAR_WEEKS_MAX : CALENDAR_WEEKS}
+              hrefFor={(date) => {
+                const id = batchByDate.get(date);
+                return id === undefined ? null : routePaths.batch(id);
+              }}
+            />
           </section>
 
-          {rows.length > 0 && (
-            <section className="history__section" aria-label={zh.history.title}>
+          {listFailed && batchPage.error ? (
+            <EmptyState title={errorMessage(batchPage.error)} action={{ label: zh.common.retry, onClick: () => void batchPage.reload() }} />
+          ) : rows.length > 0 ? (
+            <section className="history__section" aria-label={zh.history.days}>
+              <h2 className="history__section-title">{zh.history.days}</h2>
               <ol className="history__days">
-                {rows.map((d) => {
-                  const text = dayRowText(d);
-                  const cls = cx('history__day', d.offline && 'history__day--offline', dayGoalMet(d) && 'history__day--goal');
-                  return (
-                    <li key={d.date}>
-                      {d.batch_id !== null ? (
-                        <Link className={cls} to={routePaths.batch(d.batch_id)}>
-                          {text}
+                {rows.map((row) => {
+                  const date = joinDot([`${formatMonthDay(row.date)} ${weekdayName(row.date)}`, row.date === today ? zh.history.today : null]);
+                  if (row.kind === 'batch') {
+                    const status = batchStatus(row.batch, today);
+                    return (
+                      <li key={row.date}>
+                        <Link className="history__day card" to={routePaths.batch(row.batch.id)}>
+                          <span className="history__day-head">
+                            <span className="history__day-date">{date}</span>
+                            <span className={cx('history__status', `history__status--${status}`)}>{zh.history.status[status]}</span>
+                          </span>
+                          <span className="history__day-kinds muted">{kindsText(row.batch.counts)}</span>
                         </Link>
-                      ) : (
-                        <span className={cls}>{text}</span>
-                      )}
+                      </li>
+                    );
+                  }
+                  const note = row.kind === 'idle' ? zh.history.noTasks : row.kind === 'offline' ? zh.history.offline : zh.history.gradedCount(row.graded);
+                  return (
+                    <li key={row.date} className={cx('history__note', row.kind === 'offline' && 'history__note--offline')}>
+                      {joinDot([date, note])}
                     </li>
                   );
                 })}
               </ol>
+              {batches.length < batchTotal && (
+                // a page that failed is asked for again, not skipped
+                <Button variant="secondary" block loading={batchPage.loading} onClick={() => (batchPage.error ? void batchPage.reload() : setPage((p) => p + 1))}>
+                  {zh.common.loadMore}
+                </Button>
+              )}
             </section>
-          )}
+          ) : null}
 
           {stubborn.length > 0 && (
             <section className="history__section card" aria-label={zh.history.stubborn}>
@@ -142,29 +221,6 @@ export default function HistoryPage() {
                   </li>
                 ))}
               </ul>
-            </section>
-          )}
-
-          {batches.length > 0 && (
-            <section className="history__section" aria-label={zh.today.title}>
-              <ul className="history__batches">
-                {batches.map((b) => (
-                  <li key={b.id}>
-                    <Link className="history__batch card" to={routePaths.batch(b.id)}>
-                      <span className="history__batch-date">{formatMonthDay(b.local_date)}</span>
-                      <span className="muted">{zh.history.completed(b.counts.done, b.counts.total)}</span>
-                      <span className="history__batch-kinds muted">
-                        {zh.today.counts.review} {b.counts.review} · {zh.today.counts.new} {b.counts.new} · {zh.today.counts.screen} {b.counts.screen}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-              {batches.length < batchTotal && (
-                <Button variant="secondary" block loading={batchPage.loading} onClick={() => setPage((p) => p + 1)}>
-                  {zh.common.loadMore}
-                </Button>
-              )}
             </section>
           )}
         </>

@@ -123,11 +123,18 @@ U = 撤销 the last 推荐词 verdict (while its toast is visible).
 
 ## 5. 记录 (`/history`, `/history/:batchId`)
 
-- [ ] 12-week heat strip (12 × 7, Monday first, 5 levels, ring on goal-met days, tooltip 「10月12日 · 学习 N 个」),
-      「连续学习 N 天」 and 「最长连续 N 天」.
-- [ ] Day rows 「10月13日 · 完成 41/41 🔥」 link to the batch; a day without a batch overlapping a recorded
-      downtime shows 「10月11日 · 服务器离线」 (`DayStats.offline`).
-- [ ] 反复遗忘 lists `Stats.stubborn` (`times_added ≥ 3`) linking to detail; past batches list with 加载更多.
+- [ ] 学习日历: a calendar, weeks as rows (一 … 日), five weeks ending with this week; every day shows its date
+      (「今」 today, M/D on the first cell and on a first of the month); a filled green day = 已完成 (the day's goal
+      met), a tinted outlined day = 学了一部分, the legend under the grid names both; tapping a day that had words
+      opens its batch; 「显示更早」 appears only when an earlier week was studied and opens the 12 weeks (收起 closes).
+      「连续学习 N 天」 and 「最长连续 N 天」 above it.
+- [ ] 每日记录: ONE row per day, newest first — 「11月18日 周三」 + a status pill 已完成 / 进行中 / 未开始 (today) /
+      未完成 (an older day) and what the day held, 「复习 6 · 新词 10 · 推荐词 45」 once everything is done,
+      「复习 5/14 · 新词 0/10 · 推荐词 0/15」 while something is left; the row links to the batch. A day whose batch
+      had no words reads 「… · 当天没有要学的词」, a day studied without a batch 「… · 学习 N 个」, a day without a
+      batch overlapping a recorded downtime 「… · 服务器离线」 (`DayStats.offline`) — one muted line each, no link.
+      No day appears twice; 加载更多 brings older days.
+- [ ] 反复遗忘 lists `Stats.stubborn` (`times_added ≥ 3`) linking to detail, under the days.
 - [ ] Fresh account: 「学习记录会在第一次学习后出现。」 + 开始学习.
 - [ ] `/history/:batchId`: title is the batch date, ring + kind counts, every item with its kind badge and
       outcome chip; 「重新浏览」 opens the replay; for today's / yesterday's open batch the button is 继续学习 and

@@ -125,7 +125,7 @@ def test_history_days_streak_heatmap_batches_and_stats(client: TestClient, setti
 
 def test_heatmap_goal_met_shares_the_stale_aware_predicate_of_today(client: TestClient, settings, frozen_clock, alice):
     """Two cards mastered in the session, the third marked 已掌握 from the 词库 page (stale, hidden) and no
-    POST /today/complete: the heat strip must say what the 今日 page and DayStats say — the goal was met."""
+    POST /today/complete: the heatmap (the 记录 page's calendar) must say what the 今日 page and DayStats say — the goal was met."""
     for lemma in ("apple", "bank", "cat"):
         assert client.post(f"/api/words/{word_id(settings, lemma)}/mark", json={"action": "unfamiliar"}).status_code == 200
     today = client.post("/api/today/build").json()

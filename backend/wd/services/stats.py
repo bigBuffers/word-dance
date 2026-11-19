@@ -120,7 +120,7 @@ def heatmap(conn: sqlite3.Connection, user_id: int, today: date, days: int = HEA
 
     ``goal_met`` is the API.md §9.1 predicate shared with ``TodayResponse.goal_met`` / ``complete_session``
     (``completed_at`` set, or every non-stale study item final — ``batches.goal_met`` over ``visible_items``), so a
-    card marked 已掌握 from the 词库 page (stale, hidden) never leaves the heat strip disagreeing with the 今日 page.
+    card marked 已掌握 from the 词库 page (stale, hidden) never leaves the 记录 page's calendar disagreeing with the 今日 page.
     """
     uid = int(user_id)
     start = today - timedelta(days=days - 1)
