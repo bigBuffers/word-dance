@@ -34,7 +34,7 @@ studio/cast/cards/sheet.svg 人物设定图的源文件
 studio/cast/family/         大人角色的设定（11-13 新增）：CAST-family.md 是爸爸、妈妈、爷爷、李老师、路人的 SVG 片段（先读 CAST.md），cards/ 是两张设定图和 7 张测试场景的源文件
 studio/tools/               letters（字形）、check（校验 + 渲染）、build_gallery（总览页），各有一个同名的 sh 包装
 studio/fonts/               Andika-Bold.ttf + OFL.txt（许可见 §8）
-studio/cards/<lemma>.svg    已导入线上的图（原始文件，未清洗）。现在是 66 张：确认过的 10 张样例，加上 2026-11-14 按 sqin 的要求先行上线的前 100 词中的 56 张（其中只有 10 张做过评审返修，另 44 个词还没画，见 studio/recovery-20261114.json）
+studio/cards/<lemma>.svg    已导入线上的图（原始文件，未清洗）。现在是 68 张：确认过的 10 张样例，加上 2026-11-14 按 sqin 的要求先行上线的前 100 词中的 56 张，再加 2026-11-20 为登录页补的 jump（11-13 画法试验里的 F2 那张）和 cold（当天新画）（其中只有 10 张做过评审返修，另 44 个词还没画，见 studio/recovery-20261114.json）
 studio/manifest.json        这些图的清单：画法版本、做图的模型、每张图的三句话
 studio/requirements.txt     工具的依赖（fonttools、skia-pathops、defusedxml）
 studio/tests/               工具的自测

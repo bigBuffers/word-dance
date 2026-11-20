@@ -59,9 +59,9 @@ function LoginDemo() {
         <WordHeader word={item.word} size="lg" as="div" showStages={false} dance={item.dance} playToken={token} autoplay="form" replay="full" />
         {/* a guest has no settings: pictures on, a memory card with its word (the defaults of show_images / image_word). The alt
             text is the picture's own description first: the demo picture is only ever the active Claude drawing, whose `alt_zh` was
-            written for that very drawing, or the template card without one (→ the content's, as before) — and a memory card arrives
-            here with `word_layer` false (API.md 77), so `WordImage` would otherwise read out the content's picture nobody drew */}
-        <WordImage image={item.image} showImages imageWord alt={item.image.alt_zh?.trim() || item.content?.image_alt_zh || null} />
+            written for that very drawing, or the template card without one (→ the content's, as before). A memory card arrives with
+            `word_layer` true and a dancing card with `dancing` true (API.md 77): the picture is drawn inline and its word dances */}
+        <WordImage image={item.image} showImages imageWord alt={item.image.alt_zh?.trim() || item.content?.image_alt_zh || null} word={item.word.display} dance={item.dance} danceMode="full" />
         <p className="login-demo__meaning" lang="zh-CN">
           {item.content?.meaning_zh || item.word.translation_short}
         </p>

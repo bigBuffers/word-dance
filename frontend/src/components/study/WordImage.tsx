@@ -100,7 +100,8 @@ export function WordImage({ image, showImages, imageWord, alt, word, dance, danc
   const altText = (image.word_layer && image.alt_zh?.trim()) || alt?.trim() || image.alt_zh || '';
   // a memory card is not offered for replacement (design D6): the provider chain would put a stock picture in its place
   const refresh = image.word_layer ? undefined : onRefresh;
-  const inline = image.dancing && word !== undefined && !inlineFailed;
+  // inline: a dancing card always (its word is printed by the page); a memory card while its word layer is shown and the word has a dance
+  const inline = word !== undefined && !inlineFailed && (image.dancing || (image.word_layer && imageWord && !!dance));
 
   return (
     <figure className={cx('word-image', className)}>
@@ -111,8 +112,9 @@ export function WordImage({ image, showImages, imageWord, alt, word, dance, danc
             key={src}
             className={cx('word-image__img', loaded && 'is-loaded')}
             src={src}
-            word={imageWord ? word : null}
+            word={image.dancing && imageWord && word !== undefined ? word : null}
             twins={dance?.marks.double}
+            spec={dance}
             mode={danceMode}
             alt={altText}
             onLoaded={() => {

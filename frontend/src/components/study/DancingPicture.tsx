@@ -4,8 +4,13 @@
 // one, the word beats once, then the picture's `#actor` and the word do the motion recorded in the file (`dancingMotions.ts`).
 // `mode` is the learner's dance setting: 'off' never moves, 'form_only' stops after the letters; reduced motion and a browser
 // without element.animate show the same picture still. The file's own `style` attributes and tooltips are not carried over.
+// A memory card (`image.word_layer`: its last layer `#word-art` holds the word as one `wa-<index>-<letter>` path per letter) is drawn
+// the same way, but nothing is printed: the letters of the picture themselves dance the word's own dance (`spec` — the plans of
+// `word/dances.ts`: letters by syllable, the stress beat, then the meaning motion when it needs no stage object), in em units of
+// the drawn letters. Ids of the file are prefixed per instance, so two drawings on one page never share a gradient or a filter.
 import { useEffect, useRef, useState } from 'react';
-import type { DanceMode } from '@/api/types';
+import type { DanceMode, DanceSpec } from '@/api/types';
+import { OBJECT_OF, SEMANTIC_GAP_MS, danceDuration, dancePlan, semanticPlan } from '@/components/word/dances';
 import { cx } from '@/components/ui/cx';
 import { zh } from '@/i18n/zh';
 import { BEAT_MS, HIGHLIGHT_MS, LETTER_ENTER_MS, LETTER_STEP_MS, highlightIndexes, meaningStart, motionSteps, parseStage } from './dancingMotions';
@@ -25,6 +30,8 @@ export interface DancingPictureProps {
   word: string | null;
   /** Doubled letters of the word (`DanceSpec.marks.double`): they jump together when the drawing names no highlight. */
   twins?: [number, number][];
+  /** The word's dance spec: what the drawn letters of a memory card perform. */
+  spec?: DanceSpec | null;
   mode: DanceMode;
   alt: string;
   onLoaded?: () => void;
@@ -38,8 +45,12 @@ interface Stage {
   record: StageRecord;
   actor: SVGGraphicsElement | null;
   wordGroup: SVGGElement | null;
-  letters: SVGTextElement[];
+  letters: SVGElement[];
   lit: number[];
+  /** The letters are the picture's own (`#word-art` of a memory card): they dance `spec`, nothing is printed. */
+  drawn: boolean;
+  /** `drawn` only: the paths of each letter, by letter index. */
+  parts: SVGElement[][];
 }
 
 function reducedMotion(): boolean {
@@ -94,7 +105,36 @@ function placeLetters(letters: SVGTextElement[]) {
   });
 }
 
-export function DancingPicture({ src, word, twins, mode, alt, onLoaded, onFailed, className }: DancingPictureProps) {
+let instances = 0;
+
+/** Prefix every id of `svg` and every `url(#id)` that points at one, so that inlined drawings do not resolve each other's paints and filters. */
+export function scopeIds(svg: SVGSVGElement, prefix: string): void {
+  const ids = new Set<string>();
+  svg.querySelectorAll('[id]').forEach((el) => {
+    ids.add(el.id);
+    el.id = `${prefix}${el.id}`;
+  });
+  if (ids.size === 0) return;
+  svg.querySelectorAll('*').forEach((el) => {
+    for (const attr of ['fill', 'stroke', 'filter', 'clip-path']) {
+      const value = el.getAttribute(attr);
+      if (value && value.includes('url(')) el.setAttribute(attr, value.replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, (all, _q, id: string) => (ids.has(id) ? `url(#${prefix}${id})` : all)));
+    }
+  });
+}
+
+/** The letter paths of a memory card's word layer by letter index (`wa-<index>-<letter>…`; a split letter — the stem and the dot of a j — has
+ * several paths under one index), or [] when the layer has none. */
+function drawnLetters(art: Element): SVGElement[][] {
+  const byIndex: SVGElement[][] = [];
+  art.querySelectorAll<SVGElement>('[id^="wa-"]').forEach((el) => {
+    const at = Number(el.id.split('-')[1]);
+    if (Number.isInteger(at) && at >= 0) (byIndex[at] ??= []).push(el);
+  });
+  return Array.from(byIndex, (parts) => parts ?? []);
+}
+
+export function DancingPicture({ src, word, twins, spec, mode, alt, onLoaded, onFailed, className }: DancingPictureProps) {
   const host = useRef<HTMLSpanElement>(null);
   const stage = useRef<Stage | null>(null);
   const running = useRef<Animation[]>([]);
@@ -109,6 +149,18 @@ export function DancingPicture({ src, word, twins, mode, alt, onLoaded, onFailed
     running.current = [];
     if (!s || mode === 'off' || reducedMotion() || typeof s.svg.animate !== 'function') return;
     const run = (el: Element, frames: Keyframe[], options: KeyframeAnimationOptions) => running.current.push(el.animate(frames, options));
+    if (s.drawn) {
+      // a memory card: the drawn letters perform the word's own dance; a meaning motion that needs a stage object or ghost copies is left out
+      const sp = specRef.current;
+      if (!sp) return;
+      const semantic = mode === 'full' && sp.semantic && !OBJECT_OF[sp.semantic.primitive] && !['multiply', 'color', 'dim', 'glow'].includes(sp.semantic.primitive);
+      const steps = [...dancePlan(sp, 'currentColor'), ...(semantic ? semanticPlan(sp, 'currentColor', danceDuration(sp) + SEMANTIC_GAP_MS) : [])];
+      for (const st of steps) {
+        const els = st.target === 'letter' ? (s.parts[st.index] ?? []) : st.target === 'word' && s.wordGroup ? [s.wordGroup] : [];
+        els.forEach((el) => run(el, st.keyframes, st.options));
+      }
+      return;
+    }
     const step = (el: SVGElement, m: MotionStep, delay: number) => {
       anchor(el, m.origin);
       run(el, m.frames, { duration: m.duration, iterations: m.iterations ?? 1, delay });
@@ -152,6 +204,8 @@ export function DancingPicture({ src, word, twins, mode, alt, onLoaded, onFailed
   };
   const playRef = useRef(play);
   playRef.current = play;
+  const specRef = useRef(spec);
+  specRef.current = spec;
 
   useEffect(() => {
     let live = true;
@@ -174,10 +228,25 @@ export function DancingPicture({ src, word, twins, mode, alt, onLoaded, onFailed
         svg.setAttribute('aria-hidden', 'true');
         node.replaceChildren(svg);
         const actor = svg.querySelector<SVGGraphicsElement>('g#actor');
+        const art = svg.querySelector<SVGGElement>('g#word-art');
+        const own = art ? drawnLetters(art) : [];
+        scopeIds(svg, `dp${(instances += 1)}-`);
+        if (art && own.some((parts) => parts.length > 0)) {
+          // one em of the dance plans = the height of the drawn word; letters turn about their own centre like the headword's spans
+          const box = typeof art.getBBox === 'function' ? art.getBBox() : null;
+          art.style.setProperty('font-size', `${Math.max(40, Math.round(box?.height || 160))}px`);
+          anchor(art, '50% 100%');
+          own.flat().forEach((el) => anchor(el, '50% 50%'));
+          stage.current = { svg, record, actor: null, wordGroup: art, letters: own.flat(), lit: [], drawn: true, parts: own };
+          setReady(true);
+          callbacks.current.onLoaded?.();
+          playRef.current();
+          return;
+        }
         let lit = word ? highlightIndexes(word, record.highlight) : [];
         if (word && lit.length === 0) lit = (JSON.parse(twinKey) as [number, number][]).flat();
         const printed = word ? printWord(svg, word, lit) : null;
-        stage.current = { svg, record, actor, wordGroup: printed?.group ?? null, letters: printed?.letters ?? [], lit };
+        stage.current = { svg, record, actor, wordGroup: printed?.group ?? null, letters: printed?.letters ?? [], lit, drawn: false, parts: [] };
         // the lettering font may arrive after the first layout: measure again once it is there
         if (printed && document.fonts?.ready) void document.fonts.ready.then(() => live && placeLetters(printed.letters));
         setReady(true);

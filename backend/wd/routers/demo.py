@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse
 from .. import dance
 from ..deps import get_db
 from ..errors import ApiError
-from ..images import card_meta, render_card
+from ..images import card_meta, dancing, memo, render_card
 from ..images.service import active_image_row
 from ..schemas import DemoResponse
 from ..services import words
@@ -62,15 +62,19 @@ def _active_svg(conn: sqlite3.Connection, request: Request, word_id: int) -> tup
 
 def demo_image_meta(conn: sqlite3.Connection, request: Request, row: dict[str, Any]) -> dict[str, Any]:
     """API.md 77: ``ImageMeta`` pointing at the public demo route; ``svg`` / ``claude_svg`` for an active Claude SVG, else the card.
-    ``word_layer`` / ``hook_zh`` / ``note_zh`` stay the card's ``false`` / ``null`` / ``null`` even when that SVG is a 记忆图卡: the
-    demo route has no ``?plain=1`` (a guest has no ``image_word`` setting to switch off) and the demo card shows no 记忆 section."""
+    ``word_layer`` (a 记忆图卡) and ``dancing`` (a 跳动图卡) say what the drawing is, so the page draws it inline and lets its word
+    dance; a guest has no ``image_word`` setting, so the ``?plain=1`` variant the demo route lacks is never asked for. ``hook_zh`` /
+    ``note_zh`` stay ``null``: the demo card shows no 记忆 section."""
     word_id = int(row["id"])
     meta = card_meta(word_id)
     meta["url"] = f"/media/demo/{word_id}.svg"
     active = _active_svg(conn, request, word_id)
     if active is not None:
         image, _file = active
-        meta.update({"id": int(image["id"]), "kind": "svg", "provider": "claude_svg", "width": image["width"], "height": image["height"], "alt_zh": image["alt_zh"]})
+        # `?v=<image id>`: the route answers `Cache-Control: public, max-age=86400`, and the page now reads the file itself — a new drawing must not be
+        # met by yesterday's cached one (the route ignores the parameter)
+        meta["url"] = f"/media/demo/{word_id}.svg?v={int(image['id'])}"
+        meta.update({"id": int(image["id"]), "kind": "svg", "provider": "claude_svg", "width": image["width"], "height": image["height"], "alt_zh": image["alt_zh"], "word_layer": memo.is_memo(image), "dancing": dancing.is_dancing(image)})
     return meta
 
 
