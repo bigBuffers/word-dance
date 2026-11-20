@@ -1,6 +1,6 @@
 # 发布说明 · 2026-11 · 跳动图卡（后端 + 前端，无迁移）
 
-基线 `main @ d865321`。状态：**代码已完成、未提交、未上线**；试画 6 张已出，等 sqin 看过再画其余 44 个词、再确认上线。
+基线 `main @ d865321`；本次发布 = 提交 `cae93ef`。状态：**已上线**（2026-11-20 14:25，这台 Mac，前端快照 `frontend-releases/cae93ef`，服务重启约 1 秒；46 张图卡 14:27 导入，见第 4 节）。
 起因：2026-11-20 sqin：「单词图片生成耗费的 token 过大……是否可以生成更加简洁的图片，结合单词跳动主题，帮助记忆」→ 看过六词样例后「可以，按照这个做」「上限 100，开始做」。
 
 ## 1 是什么
@@ -45,6 +45,23 @@
 - 真实链路：线上库的临时副本 + 不带后台线程的实例（127.0.0.1:8011），把 6 张试画存进副本，用无头 Chrome 打开六个单词的详情页：图内联显示、字体加载、动画在跑、hear / book 的提示出现在「记忆」区、没有脚本报错。副本和实例事后已删除。
 - 没有覆盖到的：真机和平板上的流畅度；学习卡翻面时的观感（卡片顶上的单词也会做它的语义舞，两处先后在动）；深色模式下的图卡（图本身是浅色的）。
 
-## 4 上线和回滚（未执行）
+## 4 上线记录（2026-11-20，sqin：「上线」）
 
-上线 = 提交 → 前端快照 + `launchctl kickstart`（同 `2026-11-short-meaning.md` §3）。回滚 = `git revert` 该提交 + 指回上一个前端快照；已经存成 `svg-v3` 的图在旧代码下就是普通的简笔画（多一条看不见的 `<desc>`），不需要处理。
+1. 其余 44 个词按第 2 节的流程画到 `studio/tmp/dancing-pilot/`（43 次调用 + `place` 重画一次，约 $0.67），逐张看过。整理：`mother`、`now` 的动作改为不动（标出的活动部分是头 / 一根表针）；`keep`、`kind`、`head`、`month` 的提示句太牵强，去掉。sqin 看过 46 张的页面后回复「上线」。
+2. `cae93ef` 提交在 `main`（未推送）。上线前没有正在执行的任务；数据库备份 `backups/pre-dancing-cards-20261120-1425.db.gz`。
+3. 14:25:58 切换前端快照并 `launchctl kickstart -k`，14:25:59 健康检查通过（`frontend.prev` = `frontend-releases/969d1df`，三个安装包原样带过去）。
+4. 14:27 用 `store.activate_svg(..., prompt_version='svg-v3', stage=…)` 导入 46 张（44 个词 + jump、cold；rain、up、book 已有记忆图卡，不替换）：46 行 `svg-v3` 生效、13 张带提示句、66 张记忆图卡不变。每个词换下的旧图和新图的 id 记在 `backups/dancing-import-20261120.json`（旧图是 `superseded`，文件还在）。
+5. 上线后核对：健康检查 200；首页入口文件、`WordImage-*.js`（含新的图卡代码）、字体 `wd-letters-bold-*.woff`、学习页和详情页的文件都能取到；日志没有报错。没有做的：用 sqin 的登录态在线上打开页面；平板和真机。
+
+## 5 回滚（未执行）
+
+只退显示（图卡变回不动的简笔画，图本身留着）——前端指回上一个快照并重启：
+
+```sh
+D=/Users/sqin/word-dance-data; PREV=frontend-releases/969d1df
+test -f $D/$PREV/index.html && ln -sfn $PREV $D/frontend.tmp && python3 -c "import os; os.rename('$D/frontend.tmp','$D/frontend')" && launchctl kickstart -k gui/$(id -u)/com.word-dance.server && sleep 3 && curl -s --noproxy '*' http://127.0.0.1:8000/api/health || echo 'ROLLBACK NOT COMPLETED: fix the error above, then rerun this line'
+```
+
+代码也退回：先 `git -C /Users/sqin/word-dance -c user.name=sqin -c user.email=sqin@nvidia.com revert --no-edit cae93ef`，再执行上面那一块。已存成 `svg-v3` 的图在旧代码下就是普通的简笔画。
+
+把 46 张图也换回原来的：按 `backups/dancing-import-20261120.json` 逐词把 `words.active_image_id` 指回 `old_image_id`，旧图行 `status='active'`、新图行 `status='superseded'`（先停服务或在低峰做）；或者整库恢复 `backups/pre-dancing-cards-20261120-1425.db.gz`（会丢掉之后的学习记录，不建议）。
