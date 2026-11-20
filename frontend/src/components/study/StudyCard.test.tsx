@@ -316,6 +316,25 @@ describe('StudyCard semantic dance at the reveal (FRONTEND §5.1.2, §6.5; eleme
     delete (Element.prototype as unknown as { animate?: unknown }).animate;
   });
 
+  it('the headword on the back stays still when the picture below it has a word that dances, and plays again when it has none', () => {
+    const danced = item();
+    const memo: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, dancing: false, word_layer: true, hook_zh: null, note_zh: null };
+    danced.word = { ...danced.word, dance: spec };
+    danced.image = memo;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined))); // the picture never arrives in this test: only the headword could animate
+    const back = (showImage: boolean, imageWord: boolean) => {
+      animate.mockClear();
+      const view = renderCard({ item: danced, revealed: true, showImage, imageWord, danceMode: 'full', danceToken: 0, danceAutoplay: true });
+      const played = animate.mock.calls.length;
+      view.unmount();
+      return played;
+    };
+    expect(back(true, true)).toBe(0); // the picture's word dances: the headword does not
+    expect(back(true, false)).toBeGreaterThan(0); // no word on the picture
+    expect(back(false, true)).toBeGreaterThan(0); // no picture
+    vi.unstubAllGlobals();
+  });
+
   it("full mode: the front autoplays the form dance, the back autoplays the meaning; form_only never plays the meaning", () => {
     const danced = item();
     danced.word = { ...danced.word, dance: spec };

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ImageMeta } from '@/api/types';
 import { DancingPicture } from './DancingPicture';
 import { DANCING_MOTIONS, highlightIndexes, meaningStart, motionSteps, parseStage } from './dancingMotions';
-import { WordImage } from './WordImage';
+import { pictureWordDances, WordImage } from './WordImage';
 
 const SRC = '/media/images/ab/0123.svg';
 const stageOf = (motion: string, highlight = '') => `<desc id="wd-stage">${JSON.stringify({ v: 1, motion, highlight }).replace(/"/g, '&quot;')}</desc>`;
@@ -179,5 +179,24 @@ describe('a memory card', () => {
     const phrase = render(<WordImage image={card} showImages imageWord word="ice cream" dance={null} danceMode="full" />);
     expect(phrase.container.querySelector('img')!.getAttribute('src')).toBe(SRC);
     expect(fetched).not.toHaveBeenCalled();
+  });
+});
+
+describe('pictureWordDances', () => {
+  const spec = { version: 1 as const, letters: ['up'], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' as const };
+  const on = { showImages: true, imageWord: true, dance: spec, danceMode: 'full' as const };
+  const memo: ImageMeta = { ...image, dancing: false, word_layer: true };
+  const plain: ImageMeta = { ...image, dancing: false, word_layer: false };
+
+  it('is true only while a word on the picture really dances', () => {
+    expect(pictureWordDances(image, on)).toBe(true); // a dancing card prints its word
+    expect(pictureWordDances(memo, on)).toBe(true); // a memory card's letters perform the spec
+    expect(pictureWordDances(memo, { ...on, danceMode: 'form_only' })).toBe(true);
+    expect(pictureWordDances(memo, { ...on, dance: null })).toBe(false); // a phrase: no spec to perform
+    expect(pictureWordDances(plain, on)).toBe(false); // a photo or an older drawing
+    for (const off of [{ showImages: false }, { imageWord: false }, { danceMode: 'off' as const }]) {
+      expect(pictureWordDances(image, { ...on, ...off })).toBe(false);
+      expect(pictureWordDances(memo, { ...on, ...off })).toBe(false);
+    }
   });
 });

@@ -15,7 +15,7 @@ import type { ContentResponse, ReportTarget } from '@/api/endpoints';
 import type { MarkAction, ReportReason, ReviewLogItem, UserState, WordBrief, WordDetail } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { ExampleList } from '@/components/study/ExampleList';
-import { imageSrc, memoryLines, WordImage } from '@/components/study/WordImage';
+import { imageSrc, memoryLines, pictureWordDances, WordImage } from '@/components/study/WordImage';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -392,7 +392,7 @@ export default function WordDetailPage() {
           dance={(settings?.dance_mode ?? 'full') !== 'off' ? word.dance : undefined}
           // the page shows the meaning anyway, so an opened word dances once by itself — spelling + stress, then its meaning in
           // 'full' mode — when the header mounts (the skeleton is shown between two words, so each word mounts its own header)
-          autoplay={(settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
+          autoplay={pictureWordDances(data.image, { showImages, imageWord, dance: word.dance, danceMode: settings?.dance_mode ?? 'full' }) ? false : (settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
           replay={(settings?.dance_mode ?? 'full') === 'full' ? 'full' : 'form'}
           semanticEnabled={(settings?.dance_mode ?? 'full') === 'full'}
         />

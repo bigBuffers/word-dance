@@ -24,7 +24,7 @@ import { cloze, containsForm } from '@/utils/highlight';
 import { formatPos } from '@/utils/pos';
 import { formatMonthDay } from '@/utils/srsPreview';
 import { ExampleList } from './ExampleList';
-import { imageSrc, memoryLines, WordImage } from './WordImage';
+import { imageSrc, memoryLines, pictureWordDances, WordImage } from './WordImage';
 import './study.css';
 
 export interface StudyCardProps {
@@ -156,6 +156,8 @@ export function StudyCard({
   // semantic (`semanticEnabled={false}` below), so the word's first show gives the spelling away, never the meaning
   const dance = danceMode !== 'off' ? word.dance : undefined;
   const semanticEnabled = danceMode === 'full';
+  // the picture of the back face has a word that dances by itself: the headword above it stays still then (the pronounce button still plays it)
+  const pictureDances = pictureWordDances(item.image, { showImages: showImage, imageWord, dance: word.dance, danceMode });
   // the sticky grade / verdict bar tells the toast viewport how far it reaches up (toasts stack above the buttons)
   const barRef = useBottomBarOffset<HTMLDivElement>();
   // the picture source that could not be loaded, as `WordImage` reports it — the source and not a flag, so the failure is
@@ -332,7 +334,7 @@ export function StudyCard({
           className="study-card__word"
           dance={dance}
           playToken={danceToken}
-          autoplay={danceAutoplay && semanticEnabled ? 'semantic' : false}
+          autoplay={danceAutoplay && semanticEnabled && !pictureDances ? 'semantic' : false}
           replay={semanticEnabled ? 'full' : 'form'}
           semanticEnabled={semanticEnabled}
         />

@@ -22,7 +22,7 @@ import * as endpoints from '@/api/endpoints';
 import type { CodeChannel } from '@/api/types';
 import { useAuth } from '@/auth/AuthContext';
 import { ExampleList } from '@/components/study/ExampleList';
-import { WordImage } from '@/components/study/WordImage';
+import { pictureWordDances, WordImage } from '@/components/study/WordImage';
 import { Button } from '@/components/ui/Button';
 import { CodeSignIn } from '@/components/ui/CodeSignIn';
 import { Field } from '@/components/ui/Field';
@@ -56,7 +56,7 @@ function LoginDemo() {
       </h3>
       <p className="login-demo__hint muted">{zh.auth.demoHint}</p>
       <div className="login-demo__card card">
-        <WordHeader word={item.word} size="lg" as="div" showStages={false} dance={item.dance} playToken={token} autoplay="form" replay="full" />
+        <WordHeader word={item.word} size="lg" as="div" showStages={false} dance={item.dance} playToken={token} autoplay={pictureWordDances(item.image, { showImages: true, imageWord: true, dance: item.dance, danceMode: 'full' }) ? false : 'form'} replay="full" />
         {/* a guest has no settings: pictures on, a memory card with its word (the defaults of show_images / image_word). The alt
             text is the picture's own description first: the demo picture is only ever the active Claude drawing, whose `alt_zh` was
             written for that very drawing, or the template card without one (→ the content's, as before). A memory card arrives with

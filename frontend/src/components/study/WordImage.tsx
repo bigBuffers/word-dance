@@ -62,6 +62,17 @@ export function imageSrc(image: ImageMeta, imageWord: boolean): string {
   return image.word_layer && !imageWord ? `${image.url}?plain=1` : image.url;
 }
 
+/**
+ * Does the picture's own word dance when it appears? True for a dancing card that prints its word and for a memory card whose
+ * letters can perform the word's spec — pictures on, the word on the picture (`image_word`), the dance not switched off. The
+ * headword above such a picture does not play by itself (two words doing the same dance at once); a tap on the pronounce
+ * button still plays it. One rule with the `inline` test of the component below.
+ */
+export function pictureWordDances(image: ImageMeta, opts: { showImages: boolean; imageWord: boolean; dance: DanceSpec | null | undefined; danceMode: DanceMode }): boolean {
+  if (!opts.showImages || !opts.imageWord || opts.danceMode === 'off') return false;
+  return image.dancing || (image.word_layer && !!opts.dance);
+}
+
 export interface MemoryLines {
   text: string;
   /** The memory card's sound / meaning caveat, shown as a quieter second line; null for a content mnemonic. */
