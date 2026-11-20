@@ -78,7 +78,8 @@ function LoginDemo() {
               aria-pressed={i === index}
               onClick={() => {
                 setIndex(i);
-                setToken((t) => t + 1); // the new word dances in
+                // the new word dances in — in its picture when the picture has a dancing word (the picture plays as it appears), else up here
+                if (!pictureWordDances(it.image, { showImages: true, imageWord: true, dance: it.dance, danceMode: 'full' })) setToken((t) => t + 1);
               }}
             />
           ))}

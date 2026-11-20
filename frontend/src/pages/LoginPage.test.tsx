@@ -377,6 +377,27 @@ describe('LoginPage', () => {
     expect(screen.getByRole('status')).toHaveProperty('textContent', zh.auth.resetDone);
   });
 
+  it('switching to a word whose picture has a dancing word leaves the headword still; switching to one without lets the headword dance in', async () => {
+    const spec = (w: string) => ({ version: 1 as const, letters: [w], stress: 0, marks: { double: [], silent: [] }, semantic: null, source: 'rule' as const });
+    const memo: ImageMeta = { ...image(2), kind: 'svg', provider: 'claude_svg', word_layer: true };
+    const three: DemoResponse = { items: [{ word: word(1, 'up'), content: null, image: image(1), dance: spec('up') }, { word: word(2, 'jump'), content: null, image: memo, dance: spec('jump') }, { word: word(3, 'cold'), content: null, image: image(3), dance: spec('cold') }] };
+    // the memory card's file is not served here (404 → the plain picture), so only the headword could animate
+    mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({}), '/api/demo': () => json(200, three) });
+    const animate = vi.fn(() => ({ finished: Promise.resolve(), cancel: () => undefined }));
+    Object.defineProperty(Element.prototype, 'animate', { value: animate, configurable: true, writable: true });
+    try {
+      renderLogin();
+      await screen.findByText(zh.auth.demoTitle);
+      animate.mockClear();
+      fireEvent.click(screen.getByRole('button', { name: zh.auth.demoItem(2) }));
+      expect(animate).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: zh.auth.demoItem(3) }));
+      await waitFor(() => expect(animate).toHaveBeenCalled());
+    } finally {
+      delete (Element.prototype as unknown as { animate?: unknown }).animate;
+    }
+  });
+
   it('renders the read-only demo when /api/demo answers with items and switches words with the dots', async () => {
     mockFetch({ '/api/auth/me': unauthorized, '/api/health': health({}), '/api/demo': () => json(200, demo) });
     renderLogin();
