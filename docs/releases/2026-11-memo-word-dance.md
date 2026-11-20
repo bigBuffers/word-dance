@@ -20,6 +20,16 @@
 - 线上库的临时副本上：访客身份打开登录页看了 up、jump，登录后看了 moon，单词在跳、没有报错；副本事后已删除。
 - 没有覆盖到的：平板上的流畅度（单词组带一层投影）；卡片顶上的单词和画里的单词同时跳是否显得重复；深色模式。
 
-## 3 上线记录
+## 3 上线记录（2026-11-20，sqin：「上线」）
 
-见提交记录后的补充（第 4 节由上线时填写）。
+1. `4693426` 提交在 `main`（未推送）；上线前没有正在执行的任务。
+2. 16:08:06 切换前端快照 `frontend-releases/4693426` 并 `launchctl kickstart -k`，16:08:08 健康检查通过（`frontend.prev` = `frontend-releases/f95dc8a`；没有迁移）。
+3. `wd images-import studio/cards --manifest studio/manifest.json --only jump cold`：2 张导入（先 `--dry-run` 过）。现在 68 张精细图卡生效、44 张跳动图卡生效（jump、cold 从跳动图卡换成了精细图卡，旧图是 `superseded`）。
+4. 上线后核对：访客演示接口三个词都是 `word_layer: true`，图片地址带 `?v=`，取回的文件里有单词层和字母路径（up 2 条、jump 5 条、cold 4 条）；健康检查 200；日志没有报错。
+5. 没有做的：真机和平板；用 sqin 的登录态看学习卡。
+
+## 4 回滚（未执行）
+
+- 只退显示（精细图卡变回静止图片）：前端指回 `frontend-releases/f95dc8a` 并重启（切换命令同 `2026-11-dancing-cards.md` §5，换 PREV）；登录页会继续显示这三张精细图卡，只是不动。
+- 代码也退：先 `git revert 4693426`（会连同 `studio/cards` 里的两张图和清单一起撤掉），再切前端并重启。
+- 把 jump、cold 换回跳动图卡：写一个只含这两个词的清单，`wd images-import --undo <该清单>`（每个词回到上一张图）。
