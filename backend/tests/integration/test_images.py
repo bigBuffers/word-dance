@@ -222,7 +222,7 @@ def test_all_providers_fail_svg_rules(ctx, conn, cfg, mock_http, pinned_dns, con
         assert conn.execute("SELECT image_state FROM words WHERE id=?", (w,)).fetchone()[0] == "failed"
         meta = image_meta(conn, w)
         ImageMeta.model_validate(meta)
-        assert meta == {"id": None, "url": f"/media/card/{w}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
+        assert meta == {"id": None, "url": f"/media/card/{w}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None}
     bank_svg = svg_jobs(conn, bank_word)
     assert len(bank_svg) == 1 and bank_svg[0]["priority"] == 20 and bank_svg[0]["dedupe_key"] == f"svg:{bank_word}" and bank_svg[0]["status"] == "queued"
     assert json.loads(job(conn, jobs[bank_word])["result_json"])["svg_job_id"] == bank_svg[0]["id"]
@@ -1195,7 +1195,7 @@ def test_svg_prompt_carries_scene_example_hook_and_style(conn, cfg):
     assert svg_handler.hook_from("联想：ban 像 banner. 旗帜被禁止。") == "ban 像 banner"
     assert svg_handler.hook_from("联想：a dot at the very end.") == "a dot at the very end"
     assert svg_handler.hook_from("联想：没有句号的联想") == "没有句号的联想"
-    assert svg_handler.SVG_PROMPT_VERSION == "svg-v2"
+    assert svg_handler.SVG_PROMPT_VERSION == "svg-v3"
 
 
 def test_svg_activation_records_prompt_version_model_and_text_free(ctx, conn, cfg):
@@ -1214,8 +1214,27 @@ def test_svg_activation_records_prompt_version_model_and_text_free(ctx, conn, cf
     stored = (cfg.images_dir / row["file_path"]).read_text(encoding="utf-8")
     assert "<text" not in stored and "plum" not in stored and stored.count('<desc id="aigc-label">') == 1
     assert '<desc id="aigc-label">AI-generated illustration · word-Dance · claude-sonnet-fake · ' + ctx.now()[:10] + "</desc>" in stored
+    # prompt svg-v3 (跳动图卡): the fake names the motion `hop` for its one <g id="actor">; the file records it, the meta says so
+    assert '<desc id="wd-stage">{"v":1,"motion":"hop","highlight":""}</desc><rect' in stored and stored.count('id="actor"') == 1
+    meta = image_meta(conn, wid)
+    assert (meta["dancing"], meta["word_layer"], meta["hook_zh"], meta["kind"]) == (True, False, None, "svg")
+
     assert [c["kind"] for c in ai_calls(conn)] == ["svg"] and image_state(conn, wid) == "ready" and image_meta(conn, wid)["kind"] == "svg"
     assert tuple(conn.execute("SELECT COUNT(*), SUM(text_free) FROM word_images WHERE provider = 'claude_svg'").fetchone()) == (1, 1)
+
+
+def test_a_dancing_card_keeps_its_memory_line_and_an_older_drawing_is_not_one(conn, cfg):
+    from wd.images import store
+
+    wid = insert_word(conn, "hear")
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><g id="actor"><circle cx="400" cy="200" r="80"/></g></svg>'
+    old = store.activate_svg(conn, cfg, wid, svg, "耳朵", model="m", prompt_version="svg-v2")
+    assert image_meta(conn, wid)["dancing"] is False and conn.execute("SELECT hook_zh FROM word_images WHERE id = ?", (old,)).fetchone()[0] is None
+    new = store.activate_svg(conn, cfg, wid, svg, "耳朵", model="m", prompt_version="svg-v3", stage={"display": "hear", "motion": "pulse", "highlight": "ear", "hook_zh": " hear 里藏着 ear "})
+    meta = image_meta(conn, wid)
+    assert (meta["id"], meta["dancing"], meta["hook_zh"], meta["note_zh"], meta["word_layer"]) == (new, True, "hear 里藏着 ear", None, False)
+    stored = (cfg.images_dir / conn.execute("SELECT file_path FROM word_images WHERE id = ?", (new,)).fetchone()[0]).read_text(encoding="utf-8")
+    assert '<desc id="wd-stage">{"v":1,"motion":"pulse","highlight":"ear"}</desc>' in stored
 
 
 def test_svg_repaired_counts_the_sanitisers_repairs_and_only_for_an_accepted_drawing(ctx, conn, cfg, monkeypatch, caplog):

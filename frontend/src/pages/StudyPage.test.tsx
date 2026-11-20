@@ -40,7 +40,7 @@ import { completeToday, gradeItem, getToday, markWord } from '@/api/endpoints';
 import StudyPage, { PENDING_GRADES_KEY } from './StudyPage';
 
 const T0 = '2026-10-28T08:00:00.000Z';
-const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+const image: ImageMeta = { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null };
 const counts: TodayCounts = { total: 2, done: 0, review: 0, review_done: 0, new: 2, new_done: 0, screen: 0, screen_done: 0, extra: 0, extra_done: 0, pending_content: 0, deferred_reviews: 0 };
 
 function mine(id: number, over: Partial<UserWord> = {}): UserWord {

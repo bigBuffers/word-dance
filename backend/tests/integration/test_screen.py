@@ -302,7 +302,7 @@ def test_a_verdict_stored_before_migration_0021_replays_with_todays_image_meta(c
     from wd.services import screen
 
     assert screen.upgrade_stored({"study_item": None, "today": None}) == {"study_item": None, "today": None}
-    assert screen.upgrade_stored({"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h"}}}) == {"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h", "note_zh": None}}}
+    assert screen.upgrade_stored({"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h"}}}) == {"study_item": {"image": {"id": 7, "word_layer": True, "hook_zh": "h", "dancing": False, "note_zh": None}}}
 
 
 def test_in_batch_verdict_on_yesterdays_batch_checks_todays_quota(client: TestClient, settings, alice):

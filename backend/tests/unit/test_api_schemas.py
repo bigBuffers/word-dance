@@ -223,7 +223,7 @@ def test_dto_shapes_match_api_md_section_9():
     assert set(schemas.Settings.model_fields) == {"timezone", "push_time", "push_enabled", "daily_new_count", "daily_screen_count", "max_reviews", "stages", "current_stage", "show_images", "zh_examples", "auto_pronounce", "accent", "dance_mode", "image_word", "email_enabled", "webhook_enabled", "webhook_url", "webhook_format", "next_push_at", "email_verified", "updated_at"}
     assert set(schemas.StudyItem.model_fields) == {"item_id", "kind", "position", "result", "skip_count", "requeue_at", "word", "mine", "content", "content_state", "content_deferred_until", "image"}
     # 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.3): word_layer / hook_zh / note_zh are required on every ImageMeta — false / null / null for photos, older drawings and the card
-    assert set(schemas.ImageMeta.model_fields) == {"id", "url", "kind", "provider", "mime", "width", "height", "alt_zh", "attribution", "word_layer", "hook_zh", "note_zh"}
+    assert set(schemas.ImageMeta.model_fields) == {"id", "url", "kind", "provider", "mime", "width", "height", "alt_zh", "attribution", "word_layer", "dancing", "hook_zh", "note_zh"}
     assert all(schemas.ImageMeta.model_fields[name].is_required() for name in ("word_layer", "hook_zh", "note_zh"))
     assert schemas.SettingsUpdateRequest.model_fields["image_word"].default is None and not schemas.SettingsUpdateRequest.model_fields["image_word"].is_required()
     assert set(schemas.TodayResponse.model_fields) == {"status", "local_date", "push_time", "next_push_at", "can_build_now", "batch", "streak_days", "goal_met", "added", "previous_open_batch", "suggestions_open"}

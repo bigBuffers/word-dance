@@ -382,6 +382,32 @@
       "alt_zh": {
         "type": "string",
         "description": "one Chinese sentence describing the picture"
+      },
+      "motion": {
+        "type": "string",
+        "enum": [
+          "none",
+          "hop",
+          "rise",
+          "fall",
+          "shiver",
+          "sway",
+          "spin",
+          "pulse",
+          "grow",
+          "shrink",
+          "dash",
+          "float"
+        ],
+        "description": "what the #actor group does once"
+      },
+      "highlight": {
+        "type": "string",
+        "description": "letters of the word to light up, or empty"
+      },
+      "hook_zh": {
+        "type": "string",
+        "description": "one short Chinese memory line, or empty"
       }
     },
     "required": [

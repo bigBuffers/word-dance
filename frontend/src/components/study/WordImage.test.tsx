@@ -10,12 +10,12 @@ import { imageCaption, imageSrc, memoryLines, WordImage } from './WordImage';
 
 const URL_SVG = '/media/images/ab/0123.svg';
 /** An older drawing (svg-v2): same provider, no word layer, no texts of its own. */
-const drawing: ImageMeta = { id: 7, url: URL_SVG, kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'ALT-ZH', attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+const drawing: ImageMeta = { id: 7, url: URL_SVG, kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'ALT-ZH', attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null };
 const memoryCard: ImageMeta = { ...drawing, id: 8, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
 const photo: ImageMeta = {
   id: 9, url: '/media/images/cd/4567.jpg', kind: 'photo', provider: 'wikimedia', mime: 'image/jpeg', width: 1024, height: 640, alt_zh: 'PHOTO-ALT-ZH',
   attribution: { title: 'Red Apple', creator: 'Abhijit Tembhekar', creator_url: null, license: 'CC BY 2.0', license_url: null, landing_url: 'https://commons.wikimedia.org/wiki/File:Red_Apple.jpg', text: '"Red Apple" · Abhijit Tembhekar · CC BY 2.0' },
-  word_layer: false, hook_zh: null, note_zh: null,
+  dancing: false, word_layer: false, hook_zh: null, note_zh: null,
 };
 
 const img = () => screen.getByRole('img') as HTMLImageElement;

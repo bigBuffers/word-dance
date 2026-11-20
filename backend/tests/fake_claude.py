@@ -258,10 +258,10 @@ def svg_output(word: str) -> dict:
     safe = word.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">'
-        '<rect width="800" height="500" fill="#e0f2fe"/><circle cx="400" cy="220" r="120" fill="#38bdf8"/>'
+        '<rect width="800" height="500" fill="#e0f2fe"/><g id="actor"><circle cx="400" cy="220" r="120" fill="#38bdf8"/></g>'
         f'<text x="400" y="440" font-size="40" text-anchor="middle" font-family="Inter, system-ui, sans-serif">{safe}</text></svg>'
     )
-    return {"svg": svg, "alt_zh": f"一幅表示 {word} 的简单示意图"}
+    return {"svg": svg, "alt_zh": f"一幅表示 {word} 的简单示意图", "motion": "hop", "highlight": "", "hook_zh": ""}
 
 
 REQUIRED_DROP = {"content": "meaning_zh", "lookup": "headword", "consolidate": "verdict", "svg": "alt_zh", "probe": "echo", "dance": "letters"}

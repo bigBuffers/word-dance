@@ -7,12 +7,15 @@
 // never offers refresh-image (the fetch chain would trade the drawing for a stock picture); flag-image stays. The texts that
 // come with it (`hook_zh` / `note_zh`) feed the mnemonic section of the card and the detail page through `memoryLines` — while
 // the picture is on screen, which is why the component tells its parent when a source could not be loaded (`onFailed`).
+// Dancing cards (API.md §9.1 `image.dancing`): the drawing is put into the page by `DancingPicture`, which prints `word` on it and
+// plays its motion; when that file cannot be read inline the same source is shown through the plain <img> below, still.
 import { useEffect, useState } from 'react';
-import type { ImageMeta } from '@/api/types';
+import type { DanceMode, DanceSpec, ImageMeta } from '@/api/types';
 import { Button } from '@/components/ui/Button';
 import { cx } from '@/components/ui/cx';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { zh } from '@/i18n/zh';
+import { DancingPicture } from './DancingPicture';
 import './study.css';
 
 export interface WordImageProps {
@@ -23,6 +26,12 @@ export interface WordImageProps {
   imageWord: boolean;
   /** Alt text (content.image_alt_zh, else the image's alt_zh, else the word); a memory card's own alt_zh comes before it. */
   alt?: string | null;
+  /** The headword a dancing card prints on its ground (with `imageWord` on); without it such a card is shown as a plain picture. */
+  word?: string;
+  /** The word's dance spec: its doubled letters jump together on a dancing card. */
+  dance?: DanceSpec | null;
+  /** The learner's dance setting for a dancing card; omitted → 'off' (the picture and its word stay still). */
+  danceMode?: DanceMode;
   onRefresh?: () => void;
   onFlag?: () => void;
   /** refresh-image in flight. */
@@ -72,13 +81,15 @@ export function memoryLines(image: ImageMeta, shown: boolean, mnemonic: string |
   return mnemonic ? { text: mnemonic, note: null } : null;
 }
 
-export function WordImage({ image, showImages, imageWord, alt, onRefresh, onFlag, refreshing = false, onFailed, onLoaded, className }: WordImageProps) {
+export function WordImage({ image, showImages, imageWord, alt, word, dance, danceMode = 'off', onRefresh, onFlag, refreshing = false, onFailed, onLoaded, className }: WordImageProps) {
   const src = imageSrc(image, imageWord);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [inlineFailed, setInlineFailed] = useState(false);
   useEffect(() => {
     setLoaded(false);
     setFailed(false);
+    setInlineFailed(false);
   }, [src]);
 
   if (!showImages) return null;
@@ -89,12 +100,29 @@ export function WordImage({ image, showImages, imageWord, alt, onRefresh, onFlag
   const altText = (image.word_layer && image.alt_zh?.trim()) || alt?.trim() || image.alt_zh || '';
   // a memory card is not offered for replacement (design D6): the provider chain would put a stock picture in its place
   const refresh = image.word_layer ? undefined : onRefresh;
+  const inline = image.dancing && word !== undefined && !inlineFailed;
 
   return (
     <figure className={cx('word-image', className)}>
       <div className={cx('word-image__box', image.kind !== 'photo' && 'word-image__box--flat')}>
         {!loaded && !failed && <Skeleton className="word-image__skeleton" />}
-        {!failed && (
+        {inline && (
+          <DancingPicture
+            key={src}
+            className={cx('word-image__img', loaded && 'is-loaded')}
+            src={src}
+            word={imageWord ? word : null}
+            twins={dance?.marks.double}
+            mode={danceMode}
+            alt={altText}
+            onLoaded={() => {
+              setLoaded(true);
+              onLoaded?.(src);
+            }}
+            onFailed={() => setInlineFailed(true)}
+          />
+        )}
+        {!inline && !failed && (
           <img
             key={src}
             className={cx('word-image__img', loaded && 'is-loaded')}

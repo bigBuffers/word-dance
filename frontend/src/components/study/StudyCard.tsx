@@ -345,6 +345,9 @@ export function StudyCard({
             showImages={showImage}
             imageWord={imageWord}
             alt={content?.image_alt_zh ?? null}
+            word={word.display}
+            dance={word.dance}
+            danceMode={danceMode}
             onRefresh={readOnly ? undefined : onImageRefresh}
             onFlag={readOnly ? undefined : onImageFlag}
             refreshing={imageRefreshing}

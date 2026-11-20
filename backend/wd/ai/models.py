@@ -99,6 +99,9 @@ class ConsolidateOutput(Mirror):
 class SvgOutput(Mirror):
     svg: str
     alt_zh: str
+    motion: Literal["none", "hop", "rise", "fall", "shiver", "sway", "spin", "pulse", "grow", "shrink", "dash", "float"] = "none"  # 跳动图卡 (images.dancing.MOTIONS); optional in svg_v1.json
+    highlight: str = ""
+    hook_zh: str = ""
 
 
 class DanceItem(Mirror):

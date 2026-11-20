@@ -136,7 +136,7 @@ def test_activate_memo_cleans_with_effects_labels_stores_and_activates(conn, cfg
     ImageMeta.model_validate(meta)
     assert meta == {
         "id": image_id, "url": f"/media/images/{new['file_path']}", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500,
-        "alt_zh": ALT, "attribution": None, "word_layer": True, "hook_zh": HOOK, "note_zh": NOTE,
+        "alt_zh": ALT, "attribution": None, "word_layer": True, "dancing": False, "hook_zh": HOOK, "note_zh": NOTE,
     }
     assert photo_mix(conn) == {"with_photo": 0, "with_claude_svg": 1, "card_only": 0}  # a card counts as a Claude drawing everywhere else
 
@@ -151,7 +151,7 @@ def test_image_meta_shapes_for_an_older_drawing_a_photo_and_the_template_card(co
     assert "<filter" not in stored and "feGaussianBlur" not in stored and " filter=" not in stored  # activate_svg never passes effects
     assert image_meta(conn, drawing) == {
         "id": drawing_id, "url": f"/media/images/{row['file_path']}", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500,
-        "alt_zh": "月亮", "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None,
+        "alt_zh": "月亮", "attribution": None, "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None,
     }
     conn.execute("UPDATE word_images SET hook_zh = '不该出现', note_zh = '不该出现' WHERE id = ?", (drawing_id,))  # captions on a row that is no card are never served
     assert (image_meta(conn, drawing)["hook_zh"], image_meta(conn, drawing)["note_zh"]) == (None, None)
@@ -163,10 +163,10 @@ def test_image_meta_shapes_for_an_older_drawing_a_photo_and_the_template_card(co
     assert meta == {
         "id": photo_id, "url": f"/media/images/{jpg.file_path}", "kind": "photo", "provider": "wikimedia", "mime": "image/jpeg", "width": 640, "height": 400, "alt_zh": None,
         "attribution": {"title": "Red Apple", "creator": "A", "creator_url": None, "license": "CC0", "license_url": None, "landing_url": None, "text": '"Red Apple" · A · CC0'},
-        "word_layer": False, "hook_zh": None, "note_zh": None,
+        "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None,
     }
     bare = insert_word(conn, "pear")
-    card = {"id": None, "url": f"/media/card/{bare}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
+    card = {"id": None, "url": f"/media/card/{bare}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None}
     assert image_meta(conn, bare) == card == service.card_meta(bare)
     from wd.services import words
 
@@ -259,7 +259,7 @@ def test_api_serves_the_card_meta_and_both_pictures(client: TestClient, settings
         c.close()
     expected = {
         "id": image_id, "url": f"/media/images/{file_path}", "kind": "svg", "provider": "claude_svg", "mime": "image/svg+xml", "width": 800, "height": 500,
-        "alt_zh": ALT, "attribution": None, "word_layer": True, "hook_zh": HOOK, "note_zh": NOTE,
+        "alt_zh": ALT, "attribution": None, "word_layer": True, "dancing": False, "hook_zh": HOOK, "note_zh": NOTE,
     }
     r = client.get(f"/api/words/{wid}/image")
     assert r.status_code == 200 and r.json() == expected
@@ -704,7 +704,7 @@ def test_undo_goes_back_to_the_template_card_when_there_is_no_earlier_picture(co
     assert "  undone     moon → back on the template card (no earlier picture to restore)" in out and "(0 word(s) back on the previous picture, 1 on the template card)" in out
     assert word_state(conn, wid) == ("none", None) and [(r["id"], r["status"]) for r in images(conn, wid)] == [(card_id, "superseded")]
     meta = image_meta(conn, wid)
-    assert meta == {"id": None, "url": f"/media/card/{wid}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
+    assert meta == {"id": None, "url": f"/media/card/{wid}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None}
     # a rejected photo is never brought back, and an earlier picture whose file was pruned is skipped for the one before it
     pear = insert_word(conn, "pear")
     jpg_a, jpg_b = store.write_bytes(cfg, b"\xff\xd8\xff" + b"a" * 100, "jpg"), store.write_bytes(cfg, b"\xff\xd8\xff" + b"b" * 100, "jpg")
@@ -903,7 +903,7 @@ def test_generate_svg_fallback_never_draws_over_a_memory_card(ctx, conn, cfg, mo
     result = json.loads(job(conn, requested)["result_json"])
     assert "image_id" in result and word_state(conn, wid) == ("ready", result["image_id"])
     drawn = [r for r in images(conn, wid) if r["id"] == result["image_id"]][0]
-    assert drawn["prompt_version"] == "svg-v2" and not memo.is_memo(drawn) and image_meta(conn, wid)["word_layer"] is False
+    assert drawn["prompt_version"] == "svg-v3" and not memo.is_memo(drawn) and image_meta(conn, wid)["word_layer"] is False
     assert conn.execute("SELECT status FROM word_images WHERE id = ?", (card_id,)).fetchone()[0] == "superseded"
     # the admin's `provider: "claude_svg"` refetch reaches generate_svg through fetch_image although the word wore a card
     noon = insert_word(conn, "noon")

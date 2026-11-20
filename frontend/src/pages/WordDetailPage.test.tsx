@@ -96,7 +96,7 @@ function detailOf(mine: UserWord | null, word: Partial<WordDetail['word']> = {})
     content: null,
     content_state: 'none',
     content_deferred_until: null,
-    image: { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null },
+    image: { id: null, url: '/media/card/1.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null },
     mine,
     redirected_from: null,
     history: [],
@@ -243,7 +243,7 @@ describe('WordDetailPage word dance (FRONTEND §6.5)', () => {
 });
 
 describe('WordDetailPage memory cards (FRONTEND §5.8; docs/MEMORY_CARDS_DESIGN.md §3.6–3.7)', () => {
-  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
+  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, dancing: false, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
   const content: Content = {
     word: 'abandon', valid: true, meaning_zh: 'MEANING-ZH', meaning_en: 'to leave', examples: [{ en: 'She abandoned hope.', zh: 'EXAMPLE-ZH' }], collocations: ['abandon ship'], mnemonic_zh: 'MNEMONIC-ZH',
     image_keywords: [], image_alt_zh: 'ALT-ZH', difficulty: 2, version: 1, prompt_version: 'content_v1', model: 'sonnet', created_at: '2026-10-13T00:00:00Z',
@@ -301,7 +301,7 @@ describe('WordDetailPage memory cards (FRONTEND §5.8; docs/MEMORY_CARDS_DESIGN.
 
     h.settings.show_images = true;
     h.settings.image_word = false;
-    h.detail = ready({ ...memoryCard, word_layer: false, hook_zh: null, note_zh: null }); // an older drawing
+    h.detail = ready({ ...memoryCard, dancing: false, word_layer: false, hook_zh: null, note_zh: null }); // an older drawing
     renderDetail();
     await screen.findByText('MEANING-ZH');
     expect(src()).toBe('/media/images/ab/0123.svg'); // nothing to drop
@@ -352,9 +352,9 @@ describe('WordDetailPage memory cards (FRONTEND §5.8; docs/MEMORY_CARDS_DESIGN.
 });
 
 describe('WordDetailPage picture reports (FRONTEND §5.8, API.md 28; docs/MEMORY_CARDS_DESIGN.md §8)', () => {
-  const photo: ImageMeta = { id: 5, url: '/media/images/cd/4567.jpg', kind: 'photo', provider: 'wikimedia', mime: 'image/jpeg', width: 1024, height: 640, alt_zh: 'PHOTO-ZH', attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+  const photo: ImageMeta = { id: 5, url: '/media/images/cd/4567.jpg', kind: 'photo', provider: 'wikimedia', mime: 'image/jpeg', width: 1024, height: 640, alt_zh: 'PHOTO-ZH', attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null };
   /** An older drawing (svg-v2): same provider as a memory card, no word layer. */
-  const drawing: ImageMeta = { id: 7, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+  const drawing: ImageMeta = { id: 7, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null };
   const memoryCard: ImageMeta = { ...drawing, id: 8, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
   /** What `GET …/image` answers once the reported picture is down. */
   const next: ImageMeta = { ...photo, id: 6, url: '/media/images/ef/89ab.jpg' };

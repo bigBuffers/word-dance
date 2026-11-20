@@ -487,6 +487,9 @@ export default function WordDetailPage() {
         showImages={showImages}
         imageWord={imageWord}
         alt={content?.image_alt_zh ?? null}
+        word={word.display}
+        dance={word.dance}
+        danceMode={settings?.dance_mode ?? 'full'}
         onRefresh={() => void refreshImage()}
         onFlag={() => void flagImage()}
         refreshing={imageRefreshing}

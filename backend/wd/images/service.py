@@ -37,7 +37,7 @@ from typing import Any, Mapping
 from ..clock import now_iso, parse_iso, to_iso
 from ..db import maybe_tx
 from ..jobs import queue
-from . import memo, style
+from . import dancing, memo, style
 from .store import attribution_line
 
 CARD_WIDTH, CARD_HEIGHT = 800, 500
@@ -68,6 +68,7 @@ def card_meta(word_id: int) -> dict[str, Any]:
         "alt_zh": None,
         "attribution": None,
         "word_layer": False,
+        "dancing": False,
         "hook_zh": None,
         "note_zh": None,
     }
@@ -96,6 +97,7 @@ def image_meta(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
     provider = str(row["provider"])
     is_svg = provider == "claude_svg"
     is_memo = memo.is_memo(row)  # 记忆图卡: the picture has a word layer the media route can cut off, and its own memory hook
+    is_dancing = dancing.is_dancing(row)  # 跳动图卡: the page draws the file inline, prints the word on it and plays its motion
     columns = row.keys()  # hook_zh / note_zh are migration 0021: a row read from a database behind it still serialises
     attribution = None
     if not is_svg:
@@ -119,7 +121,8 @@ def image_meta(conn: sqlite3.Connection, word_id: int) -> dict[str, Any]:
         "alt_zh": row["alt_zh"],
         "attribution": attribution,
         "word_layer": is_memo,
-        "hook_zh": (row["hook_zh"] or None) if is_memo and "hook_zh" in columns else None,
+        "dancing": is_dancing,
+        "hook_zh": (row["hook_zh"] or None) if (is_memo or is_dancing) and "hook_zh" in columns else None,
         "note_zh": (row["note_zh"] or None) if is_memo and "note_zh" in columns else None,
     }
 

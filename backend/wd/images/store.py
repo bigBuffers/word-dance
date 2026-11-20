@@ -36,7 +36,7 @@ from ..clock import now_iso
 from ..config import Settings
 from ..db import maybe_tx
 from ..interfaces import Candidate
-from . import memo, sanitize_svg
+from . import dancing, memo, sanitize_svg
 
 log = logging.getLogger("wd.images.store")
 
@@ -191,6 +191,7 @@ def activate_svg(
     now: str | None = None,
     model: str | None = None,
     prompt_version: str | None = None,
+    stage: Mapping[str, Any] | None = None,
 ) -> int:
     """Sanitise a Claude-drawn SVG (CLAUDE_INTEGRATION §6.7), store it as ``.svg`` and activate it.
 
@@ -199,29 +200,38 @@ def activate_svg(
     and stored; ``model`` (``ai_calls.model_used``) and ``prompt_version`` (``ai.svg.SVG_PROMPT_VERSION``) go to the
     0012 columns. Raises :class:`wd.images.sanitize_svg.SvgRejected` when the SVG cannot be made safe; the caller
     (``ai/svg.py``) then sets ``image_state='failed'`` so the template card keeps being served.
+
+    ``stage`` (``{"display", "motion", "highlight", "hook_zh"}``, prompt ``svg-v3``) makes the drawing a 跳动图卡: the validated motion
+    and highlight are recorded inside the file (``dancing.stage_svg``) and the memory line goes to ``hook_zh`` in the same transaction.
     """
     now = now or now_iso()
     cleaned = sanitize_svg.clean(svg, allow_text=False)
+    if stage is not None:
+        cleaned = dancing.stage_svg(cleaned, str(stage.get("display") or ""), motion=stage.get("motion"), highlight=stage.get("highlight"))
     cleaned = sanitize_svg.with_label(cleaned, aigc_label(model, now))
     stored = write_bytes(cfg, cleaned.encode("utf-8"), "svg")
     width, height = sanitize_svg.viewbox_size(cleaned)
-    return activate(
-        conn,
-        word_id,
-        provider="claude_svg",
-        license="generated",
-        alt_zh=(alt_zh or "").strip()[:200] or None,
-        width=width,
-        height=height,
-        file_path=stored.file_path,
-        file_bytes=stored.file_bytes,
-        sha256=stored.sha256,
-        mime="image/svg+xml",
-        now=now,
-        prompt_version=prompt_version,
-        model=model,
-        text_free=True,
-    )
+    with maybe_tx(conn):
+        image_id = activate(
+            conn,
+            word_id,
+            provider="claude_svg",
+            license="generated",
+            alt_zh=(alt_zh or "").strip()[:200] or None,
+            width=width,
+            height=height,
+            file_path=stored.file_path,
+            file_bytes=stored.file_bytes,
+            sha256=stored.sha256,
+            mime="image/svg+xml",
+            now=now,
+            prompt_version=prompt_version,
+            model=model,
+            text_free=True,
+        )
+        if stage is not None:
+            conn.execute("UPDATE word_images SET hook_zh = ? WHERE id = ?", (dancing.hook_of(stage.get("hook_zh")), image_id))
+    return image_id
 
 
 # ------------------------------------------------------------------------- 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3)

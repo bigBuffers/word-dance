@@ -247,7 +247,7 @@ def test_a_grade_stored_before_migration_0021_replays_with_todays_image_meta(cli
     assert first["study_item"] is not None and first["duplicate"] is False
     assert (first["study_item"]["image"]["word_layer"], first["study_item"]["image"]["hook_zh"], first["study_item"]["image"]["note_zh"]) == (False, None, None)
     stored = json.loads(q1(settings, "SELECT result_json FROM review_logs WHERE client_event_id = ?", (event,)))
-    for key in ("word_layer", "hook_zh", "note_zh"):
+    for key in ("word_layer", "dancing", "hook_zh", "note_zh"):
         del stored["study_item"]["image"][key]  # the snapshot as ea77832 wrote it
     assert len(stored["study_item"]["image"]) == 9
     run(settings, "UPDATE review_logs SET result_json = ? WHERE client_event_id = ?", (json.dumps(stored, ensure_ascii=False), event))

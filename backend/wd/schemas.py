@@ -1261,6 +1261,7 @@ class ImageMeta(Model):
     alt_zh: str | None
     attribution: Attribution | None
     word_layer: bool
+    dancing: bool
     hook_zh: str | None
     note_zh: str | None
 

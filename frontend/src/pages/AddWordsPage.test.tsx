@@ -59,7 +59,7 @@ const detail = (w: WordBrief, m: UserWord | null): WordDetail => ({
   content: null,
   content_state: 'none',
   content_deferred_until: null,
-  image: { id: null, url: '/media/card/7.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null },
+  image: { id: null, url: '/media/card/7.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null },
   mine: m,
   redirected_from: null,
   history: [],

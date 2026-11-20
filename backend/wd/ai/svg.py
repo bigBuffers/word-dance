@@ -47,7 +47,7 @@ HOOK_PREFIXES = ("联想：", "联想:")  # content_system rule 5: a playful ass
 # the first full stop of a hook: 「。」, or an ASCII period that ends a sentence (followed by whitespace or the end and not
 # preceded by a capital) — a decimal point (3.5 米) or an abbreviation (U.S.) is not the end of the association
 HOOK_STOP_RE = re.compile(r"。|(?<![A-Z])\.(?=\s|$)")
-SVG_PROMPT_VERSION = "svg-v2"  # written to word_images.prompt_version (0012); bump together with svg_system.txt
+SVG_PROMPT_VERSION = "svg-v3"  # written to word_images.prompt_version (0012); bump together with svg_system.txt
 STYLE_TEXT: dict[str, str] = {
     image_style.STYLE_KID: "child-friendly picture-book style for 6–11-year-olds: bright warm colours, rounded shapes, friendly simple characters, everyday school, home and playground scenes familiar to a child in China.",
     image_style.STYLE_NEUTRAL: "clean flat educational illustration for teenagers and adults: calm colours, clear geometry, realistic proportions.",
@@ -193,7 +193,9 @@ def handle_generate_svg(ctx: JobContext, jobs: list[Job]) -> None:
                 if not isinstance(svg, str) or not svg.strip():
                     raise ValueError("response carries no svg string")
                 repairs = count_bare_ampersands(svg)  # the sanitiser's own CDATA-aware count, not a plain BARE_AMP_RE.findall
-                image_id = activate_svg(conn, cfg, wid, svg, alt, now=now, model=result.model_used, prompt_version=SVG_PROMPT_VERSION)
+                # svg-v3 (跳动图卡): the motion / highlight / memory line the model names are data — validated and recorded by images.dancing
+                stage = {"display": str(word["display"]), "motion": structured.get("motion"), "highlight": structured.get("highlight"), "hook_zh": structured.get("hook_zh")}
+                image_id = activate_svg(conn, cfg, wid, svg, alt, now=now, model=result.model_used, prompt_version=SVG_PROMPT_VERSION, stage=stage)
             except ValueError as e:  # images.sanitize_svg.SvgRejected is a ValueError
                 mark_failed(conn, wid, now=now)
                 queue.finish(conn, job.id, {"rejected": str(e)[:300], "cost_usd": round(result.cost_usd, 6)}, now=now)

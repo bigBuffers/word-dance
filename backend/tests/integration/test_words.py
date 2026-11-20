@@ -110,7 +110,7 @@ def test_detail_by_id_lemma_form_and_ambiguous(client: TestClient, settings, ali
     assert r.status_code == 200, r.text
     d = r.json()
     assert d["word"]["lemma"] == "go" and d["redirected_from"] is None and d["mine"] is None and d["history"] == []
-    assert d["image"] == {"id": None, "url": f"/media/card/{go}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "hook_zh": None, "note_zh": None}
+    assert d["image"] == {"id": None, "url": f"/media/card/{go}.svg", "kind": "card", "provider": "card_svg", "mime": "image/svg+xml", "width": 800, "height": 500, "alt_zh": None, "attribution": None, "word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None}
     assert d["content"] is None and d["content_state"] == "none" and d["content_deferred_until"] is None
     assert {"form": "went", "kind": "p"} in d["word"]["forms"] and d["word"]["confusables"] == [] and d["word"]["source"] == "seed"
     r = client.get("/api/words/went")

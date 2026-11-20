@@ -525,6 +525,7 @@ def card_image_meta(word_id: int) -> dict[str, Any]:
         "alt_zh": None,
         "attribution": None,
         "word_layer": False,  # the template card is no 记忆图卡 (docs/MEMORY_CARDS_DESIGN.md §3.3): no word layer to cut, no hook of its own
+        "dancing": False,
         "hook_zh": None,
         "note_zh": None,
     }

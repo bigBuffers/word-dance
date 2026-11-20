@@ -30,7 +30,7 @@ const word = (id: number, lemma: string): WordBrief => ({
   id, lemma, display: lemma, kind: 'word', phonetic: null, translation_short: `zh-${lemma}`, stages: ['xs'], stage_min: 1, cet6_star: false, frq: null, collins: null, oxford: null, difficulty: null,
   is_public: true, is_valid_english: true, my_state: null, content_state: 'ready', image_state: 'none',
 });
-const image = (id: number): ImageMeta => ({ id: null, url: `/media/demo/${id}.svg`, kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null });
+const image = (id: number): ImageMeta => ({ id: null, url: `/media/demo/${id}.svg`, kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: null, height: null, alt_zh: null, attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null });
 const content = (lemma: string): Content => ({
   word: lemma, valid: true, meaning_zh: `meaning-${lemma}`, meaning_en: 'x', examples: [{ en: `Look ${lemma}.`, zh: `zh-example-${lemma}` }, { en: 'second', zh: 'second' }], collocations: [], mnemonic_zh: '',
   image_keywords: [], image_alt_zh: '', difficulty: 1, version: 1, prompt_version: 'p', model: 'm', created_at: ISO,

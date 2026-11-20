@@ -167,7 +167,8 @@ export interface ImageMeta {
   mime: 'image/jpeg' | 'image/svg+xml'; width: number | null; height: number | null;
   alt_zh: string | null; attribution: Attribution | null;      // null for the card
   word_layer: boolean;                                        // 记忆图卡 (a drawing whose last layer `#word-art` is the word itself): `url` + '?plain=1' is the same picture without the word (endpoint 52); false for photos, older drawings and the template card
-  hook_zh: string | null; note_zh: string | null;             // 记忆图卡 only: the memory hook the picture acts out, and an optional sound / meaning caveat — the 记忆 section shows them instead of content.mnemonic_zh; null otherwise
+  dancing: boolean;                                           // 跳动图卡 (a drawing of prompt svg-v3): the page draws the file inline, prints the word on its ground and plays the motion recorded in its `<desc id="wd-stage">` (§9.1); false for every other image
+  hook_zh: string | null; note_zh: string | null;             // 记忆图卡, and hook_zh of a 跳动图卡: the memory hook the picture acts out, and an optional sound / meaning caveat — the 记忆 section shows them instead of content.mnemonic_zh; null otherwise
 }
 export interface WordDetail {
   word: WordBrief & {

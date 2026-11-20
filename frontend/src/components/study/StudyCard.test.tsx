@@ -11,7 +11,7 @@ import type { Grade, ImageMeta, StudyItem } from '@/api/types';
 import { zh } from '@/i18n/zh';
 import { contentMode, resultLabel, StudyCard } from './StudyCard';
 
-const image: ImageMeta = { id: null, url: '/media/card/5.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, word_layer: false, hook_zh: null, note_zh: null };
+const image: ImageMeta = { id: null, url: '/media/card/5.svg', kind: 'card', provider: 'card_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: null, attribution: null, dancing: false, word_layer: false, hook_zh: null, note_zh: null };
 
 function item(over: Partial<StudyItem> = {}): StudyItem {
   return {
@@ -379,7 +379,7 @@ describe('StudyCard semantic dance at the reveal (FRONTEND §5.1.2, §6.5; eleme
 });
 
 describe('StudyCard memory cards (FRONTEND §5.1.2; docs/MEMORY_CARDS_DESIGN.md §3.6–3.7)', () => {
-  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
+  const memoryCard: ImageMeta = { id: 8, url: '/media/images/ab/0123.svg', kind: 'svg', provider: 'claude_svg', mime: 'image/svg+xml', width: 800, height: 500, alt_zh: 'SCENE-ZH', attribution: null, dancing: false, word_layer: true, hook_zh: 'HOOK-ZH', note_zh: 'NOTE-ZH' };
   const mnemonic = () => screen.queryByRole('region', { name: zh.study.mnemonic });
   const lines = () => Array.from(mnemonic()?.querySelectorAll('p') ?? []).map((p) => p.textContent);
   const src = () => (screen.getByRole('img') as HTMLImageElement).getAttribute('src');

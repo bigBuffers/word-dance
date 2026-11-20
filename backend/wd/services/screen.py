@@ -137,7 +137,7 @@ def today_counts_for(conn: sqlite3.Connection, user_id: int, batch: dict[str, An
 # ``ImageMeta`` fields that did not exist when older responses were stored whole in ``review_logs.result_json``, with what they
 # mean for a picture of that time: the three of migration 0021 (记忆图卡) — every picture stored before it was a photo, an
 # online drawing or the template card, none of them a card with a word layer and a hook
-STORED_IMAGE_DEFAULTS: dict[str, Any] = {"word_layer": False, "hook_zh": None, "note_zh": None}
+STORED_IMAGE_DEFAULTS: dict[str, Any] = {"word_layer": False, "dancing": False, "hook_zh": None, "note_zh": None}  # dancing: 跳动图卡 release
 
 
 def upgrade_stored(data: dict[str, Any]) -> dict[str, Any]:
