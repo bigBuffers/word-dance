@@ -470,7 +470,7 @@ def test_confusables_and_suggestions_open_on_today(client: TestClient, settings,
 
 
 # ------------------------------------------------------------------------- 磨耳朵 (123 GET /api/today/playlist)
-LISTEN_ITEM_KEYS = {"item_id", "word_id", "kind", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"}
+LISTEN_ITEM_KEYS = {"item_id", "word_id", "kind", "assigned", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"}
 
 
 def test_playlist_requires_a_session_and_onboarding_and_never_builds(client: TestClient, settings, frozen_clock):

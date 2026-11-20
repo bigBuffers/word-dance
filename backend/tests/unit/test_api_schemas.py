@@ -419,11 +419,11 @@ def test_listen_contract_models_follow_the_design():
     """磨耳朵 (docs/LISTEN_MODE_DESIGN.md §4; API.md §9 / §2 row 123): `ListenItem` / `ListenPlaylist` in the §9 field order with every field
     required (the server always sends them — a null is a statement, an omission a contract break), `ServerFlags.audio_zh` required, and the
     ENDPOINT_MODELS row."""
-    assert list(schemas.ListenItem.model_fields) == ["item_id", "word_id", "kind", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"]
+    assert list(schemas.ListenItem.model_fields) == ["item_id", "word_id", "kind", "assigned", "done", "display", "phonetic", "spoken_en", "meaning_zh", "gloss_zh", "sentence_en", "sentence_zh"]
     assert list(schemas.ListenPlaylist.model_fields) == ["batch_id", "local_date", "items"]
     assert all(f.is_required() for f in schemas.ListenItem.model_fields.values()) and all(f.is_required() for f in schemas.ListenPlaylist.model_fields.values())
     assert schemas.ServerFlags.model_fields["audio_zh"].is_required()
-    item = dict(item_id=1, word_id=2, kind="new", done=False, display="moon", phonetic=None, spoken_en="moon", meaning_zh="", gloss_zh=None, sentence_en=None, sentence_zh=None)
+    item = dict(item_id=1, word_id=2, kind="new", assigned=False, done=False, display="moon", phonetic=None, spoken_en="moon", meaning_zh="", gloss_zh=None, sentence_en=None, sentence_zh=None)
     assert schemas.ListenPlaylist(batch_id=None, local_date="2026-10-14", items=[]).items == []
     assert schemas.ListenPlaylist(batch_id=7, local_date="2026-10-14", items=[item]).items[0].gloss_zh is None
     for bad in ({**item, "kind": "listen"}, {**item, "meaning_zh": None}, {k: v for k, v in item.items() if k != "sentence_zh"}, {**item, "position": 3}):

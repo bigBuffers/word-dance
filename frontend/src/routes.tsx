@@ -29,6 +29,7 @@ const HistoryPage = lazy(() => import('@/pages/HistoryPage'));
 const BatchPage = lazy(() => import('@/pages/BatchPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 const ChildrenPage = lazy(() => import('@/pages/ChildrenPage'));
+const AssignPage = lazy(() => import('@/pages/AssignPage'));
 const ChildLoginPage = lazy(() => import('@/pages/ChildLoginPage'));
 const AdminPage = lazy(() => import('@/pages/AdminPage'));
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
@@ -57,6 +58,7 @@ export const routePaths = {
   batch: (batchId: number) => `/history/${batchId}`,
   settings: '/settings',
   children: '/children',
+  assign: '/assign',
   admin: '/admin',
 } as const;
 
@@ -114,6 +116,7 @@ export function AppRoutes() {
             <Route path="/bank/suggestions" element={<SuggestionsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/children" element={<ChildrenPage />} />
+            <Route path="/assign" element={<AssignPage />} />
 
             <Route element={<RequireAdmin />}>
               <Route path="/admin" element={<AdminPage />} />

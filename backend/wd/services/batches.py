@@ -20,7 +20,7 @@ import logging
 import math
 import sqlite3
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -28,7 +28,7 @@ from .. import db
 from ..clock import day_start, local_date as clock_local_date, parse_iso, to_iso
 from ..errors import ApiError
 from ..jobs import queue
-from . import bank, learn_order, screen, srs, stats, stats_core, suggestions, words
+from . import assignments, bank, learn_order, screen, srs, stats, stats_core, suggestions, words
 
 log = logging.getLogger("wd.batches")
 
@@ -123,10 +123,13 @@ class Selection:
     deferred: int
     news: list[dict[str, Any]]
     screens: list[dict[str, Any]]
+    # 布置词汇 (services/assignments.py): assigned words the learner is already studying and that are not due today — one
+    # `extra` item each. Assigned rows of every list carry ``aw_ids``, the assignment_words rows the new item answers.
+    extras: list[dict[str, Any]] = field(default_factory=list)
 
     def word_ids(self) -> list[int]:
         out: list[int] = []
-        for row in [*self.reviews, *self.news, *self.screens]:
+        for row in [*self.reviews, *self.news, *self.extras, *self.screens]:
             wid = int(row["word_id"])
             if wid not in out:
                 out.append(wid)
@@ -264,6 +267,18 @@ def select_words(conn: sqlite3.Connection, user_id: int, settings_row: Mapping[s
         f"AND w.merged_into_word_id IS NULL ORDER BY {_NEWS_ORDER} LIMIT ?",
         (uid, daily_new),
     )
+    # assigned words come first and take the day's new-word quota (a `today` list may exceed it; then no ordinary new word is added)
+    extras: list[dict[str, Any]] = []
+    taken = assignments.take_for_batch(conn, uid, daily_new)
+    if taken:
+        by_word = {int(t["word_id"]): t for t in taken}
+        for r in reviews:
+            if int(r["word_id"]) in by_word:
+                r["aw_ids"] = by_word[int(r["word_id"])]["aw_ids"]
+        due = {int(r["word_id"]) for r in reviews}
+        as_row = lambda t: {"uw_id": t["uw_id"], "word_id": t["word_id"], "lemma": t["lemma"], "aw_ids": t["aw_ids"]}  # noqa: E731
+        extras = [as_row(t) for t in taken if t["state"] == "learning" and int(t["word_id"]) not in due]
+        news = [as_row(t) for t in taken if t["state"] == "new"] + [n for n in news if int(n["word_id"]) not in by_word][: max(0, daily_new - len(taken))]
     stages = list(settings_row.get("stages") or bank.DEFAULT_STAGES)
     screens = _rows(
         conn,
@@ -272,7 +287,7 @@ def select_words(conn: sqlite3.Connection, user_id: int, settings_row: Mapping[s
         f"ORDER BY {_SCREEN_ORDER} LIMIT :limit",
         {"me": uid, "cur": bank.current_stage_index(settings_row), "limit": daily_screen},
     )
-    return Selection(reviews=reviews, deferred=max(0, due_total - len(reviews)), news=news, screens=screens)
+    return Selection(reviews=reviews, deferred=max(0, due_total - len(reviews)), news=news, screens=screens, extras=extras)
 
 
 def preview_selection(conn: sqlite3.Connection, user_id: int, local_date: str | date, now: datetime | str | None = None) -> list[int]:
@@ -288,7 +303,7 @@ def preview_selection(conn: sqlite3.Connection, user_id: int, local_date: str | 
 def order_items(selection: Selection) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
     """Step 5: ``core = spread_similar(interleave(reviews, news))``; cold start puts the 推荐词 first."""
     reviews = [("review", r) for r in selection.reviews]
-    news = [("new", r) for r in selection.news]
+    news = [("new", r) for r in selection.news] + [("extra", r) for r in selection.extras]
     screens = [("screen", r) for r in selection.screens]
     core = spread_similar(interleave(reviews, news), key=lambda t: str(t[1]["lemma"]))
     cold_start = not core
@@ -327,15 +342,17 @@ def build_batch(conn: sqlite3.Connection, user_id: int, local_date: str | date, 
         selection = select_words(conn, uid, s, ld)
         ordered, _cold = order_items(selection)
         for position, (kind, row) in enumerate(ordered):
-            conn.execute(
+            item_id = conn.execute(
                 "INSERT INTO push_items(batch_id, word_id, user_word_id, kind, position) VALUES (?, ?, ?, ?, ?)",
                 (batch_id, int(row["word_id"]), row.get("uw_id"), kind, position),
-            )
+            ).lastrowid
+            if row.get("aw_ids"):
+                assignments.mark_scheduled(conn, row["aw_ids"], int(item_id), ld)
         conn.execute(
-            "UPDATE push_batches SET review_count = ?, new_count = ?, screen_count = ?, deferred_reviews = ? WHERE id = ?",
-            (len(selection.reviews), len(selection.news), len(selection.screens), selection.deferred, batch_id),
+            "UPDATE push_batches SET review_count = ?, new_count = ?, screen_count = ?, extra_count = ?, deferred_reviews = ? WHERE id = ?",
+            (len(selection.reviews), len(selection.news), len(selection.screens), len(selection.extras), selection.deferred, batch_id),
         )
-        uw_ids = [int(r["uw_id"]) for r in [*selection.reviews, *selection.news] if r.get("uw_id") is not None]
+        uw_ids = [int(r["uw_id"]) for r in [*selection.reviews, *selection.news, *selection.extras] if r.get("uw_id") is not None]
         if uw_ids:
             marks = ",".join("?" * len(uw_ids))
             conn.execute(f"UPDATE user_words SET times_pushed = times_pushed + 1, updated_at = ? WHERE id IN ({marks})", (now_s, *uw_ids))
@@ -447,7 +464,7 @@ def batch_items(conn: sqlite3.Connection, user_id: int, batch_id: int) -> tuple[
     user's word states."""
     rows = _rows(
         conn,
-        f"SELECT pi.*, w.merged_into_word_id, w.content_state, uw.state AS uw_state, {_SUPERSEDED_SQL} FROM push_items pi "
+        f"SELECT pi.*, w.merged_into_word_id, w.content_state, uw.state AS uw_state, {_SUPERSEDED_SQL}, {assignments.ASSIGNED_SQL} FROM push_items pi "
         "JOIN push_batches pb ON pb.id = pi.batch_id JOIN words w ON w.id = pi.word_id "
         "LEFT JOIN user_words uw ON uw.user_id = ? AND uw.word_id = pi.word_id "
         "WHERE pi.batch_id = ? ORDER BY pi.position, pi.id",
@@ -462,11 +479,12 @@ def visible_items(conn: sqlite3.Connection, user_id: int, batch_id: int) -> list
     return hide_stale(rows, states)
 
 
-def _order_key(item: Mapping[str, Any]) -> tuple[int, int, int]:
-    """``Batch.items``: ungraded first (skipped after unskipped), then graded; by position inside each group."""
+def _order_key(item: Mapping[str, Any]) -> tuple[int, int, int, int]:
+    """``Batch.items``: ungraded first (skipped after unskipped), then graded; inside each group the assigned items (布置词汇)
+    first, then by position."""
     graded = 0 if item.get("result") is None else 1
     skipped = int(item.get("skip_count") or 0) if not graded else 0
-    return (graded, 1 if skipped else 0, int(item["position"]))
+    return (graded, 1 if skipped else 0, 0 if item.get("assigned") else 1, int(item["position"]))
 
 
 def remaining_count(items: Iterable[Mapping[str, Any]]) -> int:
@@ -596,6 +614,7 @@ def today_response(
                 "gradable": bool(gradable),
                 "counts": counts,
                 "items": dtos,
+                "assigned_item_ids": [int(it["id"]) for it in sorted(items, key=_order_key) if it.get("assigned") and it["kind"] in STUDY_KINDS],
                 "extra_rounds": int(batch.get("extra_rounds") or 0),
                 "can_request_more": batch["local_date"] == today and int(batch.get("extra_rounds") or 0) < MAX_EXTRA_ROUNDS,
                 "built_at": str(batch["built_at"]),
@@ -639,6 +658,9 @@ def _append_item(conn: sqlite3.Connection, batch: Mapping[str, Any], user_id: in
         conn.execute("UPDATE user_words SET times_pushed = times_pushed + 1, updated_at = ? WHERE id = ?", (now_s, uw["id"]))
     bank.enqueue_content_if_needed(conn, word, priority=CONTENT_PRIORITY_BATCH, now=now_s)
     return item_id
+
+
+append_item = _append_item  # services/assignments.apply_today appends its `extra` items through the same rules
 
 
 def append_to_today(conn: sqlite3.Connection, user_id: int, word_id: int, kind: str, now: datetime | str | None) -> int | None:

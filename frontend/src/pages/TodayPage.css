@@ -190,3 +190,7 @@
     flex: 0 1 auto;
   }
 }
+
+/* 布置词汇: the assigned words of the day under the count chips */
+.today__note--assigned { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+.today__assigned-words { flex-basis: 100%; color: var(--muted); font-size: var(--text-sm); overflow-wrap: anywhere; }

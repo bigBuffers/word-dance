@@ -128,7 +128,7 @@ function today(items: StudyItem[]): TodayResponse {
       gradable: true,
       counts: { ...counts, total: items.length, new: items.length },
       items,
-      extra_rounds: 0,
+      assigned_item_ids: [], extra_rounds: 0,
       can_request_more: false,
       built_at: T0,
       published_at: T0,

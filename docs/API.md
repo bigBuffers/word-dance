@@ -208,6 +208,12 @@ Base path `/api` (media at `/media`, SPA at `/`). JSON in/out, `Content-Type: ap
 | 121 | POST | `/api/auth/apple/callback` | – (form_post from Apple, CSRF-exempt) | id_token → sub → grant → 302 to 122 |
 | 122 | GET | `/api/auth/oauth/finish` | – | the one-time grant becomes the session cookie on THIS origin; 302 to the SPA |
 | 123 | GET | `/api/today/playlist` | O | 磨耳朵: today's review / new / extra words with what a voice says for each (no side effects) |
+| 124 | GET | `/api/assign/learners` | U | 布置词汇: the accounts the caller may assign to |
+| 125 | POST | `/api/assign/preview` | U | what a typed list would do for a learner (writes nothing) |
+| 126 | POST | `/api/assignments` | U | hand a learner a word list |
+| 127 | GET | `/api/assignments` | U | the lists the caller handed out, with progress |
+| 128 | GET | `/api/assignments/{id}` | U | one list, word by word |
+| 129 | POST | `/api/assignments/{id}/withdraw` | U | take back the words not yet scheduled |
 
 ## 3. Health, auth, account, onboarding
 
@@ -347,6 +353,22 @@ Design: docs/AUTH_SIGNUP_DESIGN.md §5.3 (微信、QQ、Apple — 第二步), §
 **46 `POST /api/today/more`** — `{source: "new"|"screen", count?: 1..20 (default 10)}` → `TodayResponse` with appended `extra` (source new: more bank `new` words — words that already have a `review`/`new`/`extra` row in the batch are skipped, a word present only as `screen` is eligible; source screen: more 推荐词 as `kind='screen'`). Works on **any** existing batch for today (`building`, `ready` or `published` — appending never waits for content, and with AI paused a batch may legitimately stay `building`); 409 `batch_not_ready` only when no batch exists yet for today (the client offers 立即生成); 429 after 3 rounds; `200` with no new items when nothing is available (`added:0`).
 **47 `POST /api/today/complete`** → `{summary: SessionSummary}`; sets `completed_at` when every non-stale non-screen item has `result IS NOT NULL` (an item still in the 10-minute step keeps the batch open); idempotent.
 **123 `GET /api/today/playlist`** → `ListenPlaylist` — 磨耳朵 (docs/LISTEN_MODE_DESIGN.md; `services/listen.py`): today's words prepared for a voice instead of a card — 跟着听 plays word → gloss → sentence → translation, 听写 the word alone. **No side effects**: it never builds, grades nothing and writes no `review_logs` / `daily_stats` row, so listening moves no review interval and counts toward neither the streak nor `goal_met`. No batch for the user's current local date → `{batch_id: null, local_date, items: []}`. Otherwise the batch whatever its `status` (`building` too — listening never waits for content) with the stale-item rule of 43 applied, and of it: the `review` / `new` / `extra` rows only (推荐词 are not in the bank yet), without the words that have left the bank since (`user_words.state` now `mastered` / `known` / `removed` — the word's **current** state decides, not the grade of its item: the stale-item rule looks at ungraded rows only, so a word marked 已掌握 on its word page, or removed from the bank, after its final grade leaves the list as well, and one that is back in the bank is listed again), in `position, id` order — the batch order; unlike `Batch.items` of 43, graded rows are **not** moved to the end —, one row per word (the first). A row that already has its final grade stays, with `done: true`: the list is what today is about, not what is left of it. The `counts` of 43 are per item and keep counting a row whose word has left the bank, so `review + new + extra > 0` there does not promise a non-empty playlist. Every string meant for a voice is derived on the server and has passed the text rule of endpoint 76 (the English one for `spoken_en` / `sentence_en`, the `accent=zh-CN` one for `gloss_zh` / `sentence_zh`), so the player never asks 76 for a clip it would answer 400 for, and — a spelled-out shorthand headword aside — the two English strings are exactly the texts `wd audio-prewarm` made clips of; what cannot be spoken is `null` and the player skips that segment. `spoken_en` = `display` with dictionary shorthand spelled out (`sb.` → `somebody`, `sth.` → `something`, `sb's` / `sb.'s` → `somebody's`: `give sb. a hand` → `give somebody a hand`); `meaning_zh` (shown on the player and the 听写 answer sheet, never spoken) = the active content's `meaning_zh`, else the dictionary's main sense — the `translation` line of the word's dominant part of speech, the sense 单词之舞 judges —, else `''`; `gloss_zh` = its speakable form (§9.1); `sentence_en` / `sentence_zh` = the first example of the active content whose `en` the English rule accepts (whitespace-collapsed) and its `zh` when the Chinese rule accepts that — both `null` without content. Whether the server speaks the two Chinese strings is `ServerFlags.audio_zh`.
+
+**布置词汇 (124–129; `services/assignments.py`, migration 0022).** The admin may assign to every learner account, a guardian to their own children; anyone else has no learners (124 answers an empty list, 125 / 126 answer 403 `forbidden`). A list belongs to its assigner (the admin reads every list); someone else's is 404 `not_found`.
+
+**124 `GET /api/assign/learners`** → `200 {items: AssignLearner[]}`.
+
+**125 `POST /api/assign/preview`** — `{learner_id, text}` → `200 {items: AssignPreviewItem[]}`: one row per token of `text` (split like endpoint 34: lines and commas; ≤ 50 tokens else 400 `too_many_words`; none → 400 `validation_error`). The very code of 126 run under a savepoint that is rolled back — nothing is written.
+
+**126 `POST /api/assignments`** — `{learner_id, text, mode: AssignMode, title?: string(≤40)}` → `201 AssignCreated`. Every `new` token enters the learner's bank through the learner's own add path (origin `import`; an unknown spelling becomes a provisional word with its lookup job, status `pending_ai`); `new` / `studying` / `pending_ai` words become the list (400 `validation_error` with `details.results` when there are none). A word the learner has as 已掌握 / 已认识 is reported `known` and left alone. Mode `today`: when the learner already has today's batch, each word gets an `extra` item appended at once (or is tied to the study item it already has there).
+
+**127 `GET /api/assignments`** `?learner_id=` → `200 {items: AssignmentSummary[]}` — the caller's lists, newest first (≤ 100).
+
+**128 `GET /api/assignments/{id}`** → `200 AssignmentDetail`.
+
+**129 `POST /api/assignments/{id}/withdraw`** → `200 AssignmentDetail`: every `pending` word becomes `withdrawn` (it stays an ordinary word of the learner's bank); scheduled words are untouched.
+
+How assigned words reach a day (`batches.select_words`): of the learner's pending words — validated, in the bank as `new` / `learning` — every `today` word, then `spread` words while `daily_new_count` lasts; a `new` word becomes a `new` item, a `learning` word an `extra` item (or rides on its `review` item when it is due). They count against the quota of ordinary new words (a `today` list may exceed it; then no ordinary new word joins that day). In `Batch.items` and in the 磨耳朵 playlist assigned items come first; a learner can skip them like any card.
 
 **48 `GET /api/history?from=YYYY-MM-DD&to=YYYY-MM-DD`** (≤ 370 days) → `{days: DayStats[], streak_days: number, longest_streak: number}`.
 **49 `GET /api/history/batches?page`** → `Page<BatchSummary>`. **50 `GET /api/batches/{id}`** → `TodayResponse` for that batch (404 if not mine). `batch.gradable` is `true` for today's batch and for yesterday's batch while it has ungraded, non-stale, non-superseded `review`/`new`/`extra` items (endpoint 45 accepts their grades); `false` for every older batch (replay only — the client hides the grade bar).
@@ -604,7 +626,8 @@ export interface StudyItem {
 export interface Batch {
   id: number; local_date: string; timezone: string; status: 'building' | 'ready' | 'published'; trigger: string;
   gradable: boolean;                                          // today's batch, or yesterday's while it has ungraded items (endpoint 50); false → replay only, no grade bar
-  counts: TodayCounts; items: StudyItem[];                    // ungraded first (skipped after unskipped), then graded
+  counts: TodayCounts; items: StudyItem[];                    // ungraded first (skipped after unskipped), then graded; inside each group the assigned items first
+  assigned_item_ids: number[];                                // 布置词汇 (endpoints 124–129): the review / new / extra items that answer an assignment — the 今日 page lists them as 「老师布置」
   extra_rounds: number; can_request_more: boolean; built_at: string; published_at: string | null; completed_at: string | null;
 }
 export interface PreviousOpenBatch { id: number; local_date: string; remaining: number }   // yesterday's batch with ungraded review/new/extra items (endpoint 43)
@@ -616,6 +639,7 @@ export interface TodayResponse {
 }
 export interface ListenItem {
   item_id: number; word_id: number; kind: ItemKind; done: boolean;   // kind: review | new | extra (推荐词 are not listened to); done: the item has its final grade
+  assigned: boolean;                    // 布置词汇: the item answers an assignment; assigned items come first in the playlist
   display: string; phonetic: string | null;
   spoken_en: string | null;             // what to speak for the headword (`sb.` / `sth.` spelled out); null when endpoint 76 would refuse the text
   meaning_zh: string;                   // shown on the player and on the 听写 answer sheet: content.meaning_zh, else the dictionary's main sense ('' when neither exists)
@@ -623,6 +647,24 @@ export interface ListenItem {
   sentence_en: string | null; sentence_zh: string | null;   // one example sentence endpoint 76 accepts, and its translation (null when it cannot be spoken); both null without content
 }
 export interface ListenPlaylist { batch_id: number | null; local_date: string; items: ListenItem[] }   // endpoint 123: today's review / new / extra words in batch order, one row per word, without the words that have left the bank since (已掌握 / 已认识 / removed — the word's state now, not the item's grade); batch_id null = no batch today
+export type AssignMode = 'today' | 'spread';                 // 布置词汇: today = every word goes into the learner's next batch (today's when it exists), whatever the quota; spread = the words take the daily new-word quota, a few per day
+export interface AssignLearner { id: number; name: string }   // endpoint 124: an account the caller may assign to
+export interface AssignPreviewItem {                          // endpoints 125 / 126: one typed token (lines and commas separate tokens, like 加词)
+  input: string;
+  status: 'new' | 'studying' | 'pending_ai' | 'known' | 'duplicate' | 'invalid' | 'ambiguous';   // new = enters the learner's bank; studying = already there (practised once); pending_ai = unknown spelling, assigned once its lookup validates it; known = 已掌握 / 已认识, not assigned; the last three are not assigned either
+  word_id: number | null; display: string | null; meaning: string | null; message: string | null;
+}
+export interface AssignmentCounts { total: number; pending: number; scheduled: number; done: number; withdrawn: number }   // done ⊆ scheduled: the item has its final grade
+export interface AssignmentSummary { id: number; learner: AssignLearner; title: string; mode: AssignMode; created_at: string; counts: AssignmentCounts }
+export interface AssignmentWord {
+  word_id: number; display: string; meaning: string;
+  status: 'pending' | 'scheduled' | 'withdrawn';              // pending = waiting for a batch; scheduled = it has its study item (scheduled_date, kind); withdrawn = taken back before that
+  scheduled_date: string | null; kind: ItemKind | null;
+  result: string | null; skip_count: number; graded_at: string | null;   // of that study item: the final grade (null while ungraded), how often it was skipped
+  learner_state: string | null; waiting_lookup: boolean;      // the learner's user_words.state now; waiting_lookup = the word is not validated yet
+}
+export interface AssignmentDetail extends AssignmentSummary { words: AssignmentWord[] }
+export interface AssignCreated { assignment: AssignmentDetail; results: AssignPreviewItem[] }   // endpoint 126
 export interface GradeResponse {
   item: { item_id: number; result: string | null; skip_count: number; requeue_at: string | null };   // result null + requeue_at set = intermediate grade: the item stays ungraded and is graded again later (endpoint 45)
   mine: UserWord | null; next_due_zh: string;                 // '10 分钟后' | '明天' | '今天' | 'N 天后' | '约 N 个月后' | '已掌握' | '已跳过' | '已认识' (thresholds in §9.1)

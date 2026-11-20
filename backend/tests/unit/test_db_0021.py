@@ -65,7 +65,7 @@ def test_0021_adds_three_columns_with_their_defaults_and_keeps_rows(settings, tm
 
         assert (21, "memory_cards") in result.applied and db.current_version(c) >= 21
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert set(db.table_names(c)) == before_tables and db.view_names(c) == ["v_bank"]  # no table gained or lost
+        assert set(db.table_names(c)) == before_tables | {"assignments", "assignment_words"} and db.view_names(c) == ["v_bank"]  # 0021 gains and loses no table (0022 adds its two on the way)
         assert [r["name"] for r in c.execute("PRAGMA table_info(user_settings)")] == before_settings_cols + ["image_word"]  # appended, nothing rebuilt
         assert [r["name"] for r in c.execute("PRAGMA table_info(word_images)")] == before_image_cols + ["hook_zh", "note_zh"]
         info = {r["name"]: r for r in c.execute("PRAGMA table_info(user_settings)")}

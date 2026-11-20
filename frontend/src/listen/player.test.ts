@@ -10,6 +10,7 @@ import { DEFAULT_OPTIONS, INITIAL_STATE, ListenPlayer, SEGMENT_PAUSE_MS, WORD_PA
 const item = (id: number, over: Partial<ListenItem> = {}): ListenItem => ({
   item_id: id,
   word_id: 100 + id,
+  assigned: false,
   kind: 'new',
   done: false,
   display: `w${id}`,

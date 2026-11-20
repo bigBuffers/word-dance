@@ -47,6 +47,10 @@ export const LISTEN_PREF_KEY = 'wd.listen';
 /** Chinese is read at the voice's own pace; English at the pace of every other pronunciation (design §3.6). */
 const ZH_RATE = 1;
 
+const SCOPE_OPTIONS: { value: 'all' | 'assigned'; label: string }[] = [
+  { value: 'all', label: zh.listen.scopes.all },
+  { value: 'assigned', label: zh.listen.scopes.assigned },
+];
 const MODE_OPTIONS: { value: ListenMode; label: string }[] = [
   { value: 'follow', label: zh.listen.modes.follow },
   { value: 'dictation', label: zh.listen.modes.dictation },
@@ -74,7 +78,11 @@ export default function ListenPage() {
   const barRef = useBottomBarOffset<HTMLDivElement>();
 
   const { data, error, loading, reload } = useApi<ListenPlaylist>((signal) => getListenPlaylist(signal), []);
-  const items: ListenItem[] | null = data?.items ?? null;
+  // assignments (API.md 124–129): when only some of today's words were assigned the listener may narrow the playlist to them
+  const [scope, setScope] = useState<'all' | 'assigned'>('all');
+  const everything = data?.items ?? null;
+  const mixed = !!everything && everything.some((it) => it.assigned) && everything.some((it) => !it.assigned);
+  const items: ListenItem[] | null = useMemo(() => (everything && mixed && scope === 'assigned' ? everything.filter((it) => it.assigned) : everything), [everything, mixed, scope]);
   const total = items?.length ?? 0;
 
   const [stored, setStored] = useLocalPref<unknown>(LISTEN_PREF_KEY, DEFAULT_OPTIONS);
@@ -251,6 +259,7 @@ export default function ListenPage() {
       </div>
 
       <div className="listen__options">
+        {mixed && <Segmented block size="sm" options={SCOPE_OPTIONS} value={scope} onChange={setScope} aria-label={zh.listen.scope} />}
         <Segmented block options={MODE_OPTIONS} value={options.mode} onChange={(mode) => setOption({ mode })} aria-label={zh.listen.title} />
         {dictation ? (
           <div className="listen__picks">

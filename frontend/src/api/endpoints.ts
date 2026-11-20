@@ -8,6 +8,12 @@
 import { api, buildQuery, requestText } from './client';
 import type {
   AccountKind,
+  AssignCreated,
+  AssignLearner,
+  AssignMode,
+  AssignmentDetail,
+  AssignmentSummary,
+  AssignPreviewItem,
   AddResponse,
   AddResult,
   AdminHealth,
@@ -889,3 +895,17 @@ export function importPayloadFromJsonExport(text: string): string | null {
   if (typeof version !== 'number' || !Array.isArray(words)) return null;
   return JSON.stringify({ version, words });
 }
+
+// 布置词汇 (API.md 124–129)
+// #124 GET /api/assign/learners
+export const getAssignLearners = (signal?: AbortSignal) => api.get<{ items: AssignLearner[] }>('/api/assign/learners', undefined, signal);
+// #125 POST /api/assign/preview
+export const previewAssignment = (learnerId: number, text: string) => api.post<{ items: AssignPreviewItem[] }>('/api/assign/preview', { learner_id: learnerId, text });
+// #126 POST /api/assignments
+export const createAssignment = (body: { learner_id: number; text: string; mode: AssignMode; title?: string }) => api.post<AssignCreated>('/api/assignments', body);
+// #127 GET /api/assignments
+export const getAssignments = (signal?: AbortSignal) => api.get<{ items: AssignmentSummary[] }>('/api/assignments', undefined, signal);
+// #128 GET /api/assignments/{id}
+export const getAssignment = (id: number, signal?: AbortSignal) => api.get<AssignmentDetail>(`/api/assignments/${seg(id)}`, undefined, signal);
+// #129 POST /api/assignments/{id}/withdraw
+export const withdrawAssignment = (id: number) => api.post<AssignmentDetail>(`/api/assignments/${seg(id)}/withdraw`);

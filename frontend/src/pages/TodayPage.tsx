@@ -183,6 +183,9 @@ export default function TodayPage() {
   // so the entry stays on the done card. The rule is the playlist's own, read off the items: a screen item is never listened to,
   // and a word that has left the bank (mastered / known / removed — its state now, not the item's grade) is not either, so a day
   // whose words were all marked mastered has no entry instead of one that opens an empty list
+  // assignments (API.md 124–129): the items that answer an assignment, listed first by the server
+  const assignedIds = new Set(batch.assigned_item_ids);
+  const assigned = batch.items.filter((it) => assignedIds.has(it.item_id));
   const listenable = batch.items.some((it) => it.kind !== 'screen' && (it.mine?.state === 'new' || it.mine?.state === 'learning'));
 
   return (
@@ -203,6 +206,14 @@ export default function TodayPage() {
               </li>
             ))}
           </ul>
+          {assigned.length > 0 && (
+            <p className="today__note today__note--assigned">
+              <span className="tag tag--brand">{zh.today.assigned}</span> {zh.today.assignedProgress(assigned.filter((it) => it.result !== null).length, assigned.length)}
+              <span className="today__assigned-words" lang="en">
+                {assigned.map((it) => it.word.display).join(' · ')}
+              </span>
+            </p>
+          )}
           {counts.deferred_reviews > 0 && <p className="today__note muted">{zh.today.deferred(counts.deferred_reviews)}</p>}
           {counts.pending_content > 0 && (
             <p className="today__note today__note--pending" role="status">

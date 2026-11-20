@@ -218,7 +218,7 @@ def test_playlist_lists_todays_study_words_in_batch_order_with_what_a_voice_says
     assert sorted(lemmas(conn, result)) == ["ability", "apple", "good"] and all(it["done"] is False for it in result["items"])
     by_lemma = dict(zip(lemmas(conn, result), result["items"]))
     assert by_lemma["apple"] == {
-        "item_id": rows[wid(conn, "apple")]["id"], "word_id": wid(conn, "apple"), "kind": "new", "done": False,
+        "item_id": rows[wid(conn, "apple")]["id"], "word_id": wid(conn, "apple"), "kind": "new", "assigned": False, "done": False,
         "display": "apple", "phonetic": "'æpl", "spoken_en": "apple",
         "meaning_zh": "n. 苹果；苹果树", "gloss_zh": "苹果，苹果树",  # the card's meaning, and its speakable form
         "sentence_en": "She eats an apple every day.", "sentence_zh": "她每天吃一个苹果。",  # the first example the text rule accepts

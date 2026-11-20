@@ -54,7 +54,7 @@ const today = (done: number, total: number): TodayResponse => ({
     gradable: true,
     counts: { total, done, review: total, review_done: done, new: 0, new_done: 0, screen: 0, screen_done: 0, extra: 0, extra_done: 0, pending_content: 0, deferred_reviews: 0 },
     items: [],
-    extra_rounds: 0,
+    assigned_item_ids: [], extra_rounds: 0,
     can_request_more: true,
     built_at: ISO,
     published_at: ISO,

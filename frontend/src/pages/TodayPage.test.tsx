@@ -79,7 +79,7 @@ function today(list: StudyItem[] | null, over: Partial<TodayResponse> = {}): Tod
     previous_open_batch: null,
     suggestions_open: 0,
     batch: list
-      ? { id: 7, local_date: '2026-11-12', timezone: 'UTC', status: 'published', trigger: 'scheduler', gradable: true, counts: countsOf(list), items: list, extra_rounds: 0, can_request_more: true, built_at: T0, published_at: T0, completed_at: null }
+      ? { id: 7, local_date: '2026-11-12', timezone: 'UTC', status: 'published', trigger: 'scheduler', gradable: true, counts: countsOf(list), items: list, assigned_item_ids: [], extra_rounds: 0, can_request_more: true, built_at: T0, published_at: T0, completed_at: null }
       : null,
     ...over,
   };
@@ -149,5 +149,21 @@ describe('TodayPage: the listen entry', () => {
     await renderToday(today(null));
     expect(screen.getByText(zh.today.notYet('08:00'))).toBeTruthy();
     expect(listenLink()).toBeNull();
+  });
+});
+
+describe('TodayPage — assigned words', () => {
+  it('lists the words that answer an assignment with their progress, and nothing when there are none', async () => {
+    const list = [...items(2, 'new', 'new'), ...items(1, 'review', 'learning')].map((it, i) => ({ ...it, item_id: i + 1, word: { ...it.word, display: `word${i + 1}` } }));
+    list[1] = { ...list[1]!, result: 'good' };
+    const data = today(list);
+    data.batch!.assigned_item_ids = [list[0]!.item_id, list[1]!.item_id];
+    const view = await renderToday(data);
+    expect(screen.getByText(zh.today.assigned)).toBeTruthy();
+    expect(screen.getByText(zh.today.assignedProgress(1, 2), { exact: false })).toBeTruthy();
+    expect(screen.getByText(`${list[0]!.word.display} · ${list[1]!.word.display}`)).toBeTruthy();
+    view.unmount();
+    await renderToday(today(items(1, 'new', 'new')));
+    expect(screen.queryByText(zh.today.assigned)).toBeNull();
   });
 });

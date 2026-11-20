@@ -123,6 +123,7 @@ def listen_item(conn: sqlite3.Connection, item: Mapping[str, Any], word: Mapping
         "word_id": int(word["id"]),
         "kind": item["kind"],
         "done": item.get("result") is not None,
+        "assigned": bool(item.get("assigned")),
         "display": display,
         "phonetic": word.get("phonetic") or None,
         "spoken_en": spoken_headword(display),
@@ -163,6 +164,7 @@ def playlist(conn: sqlite3.Connection, user_id: int, now: datetime | str | None,
             continue
         seen.add(wid)
         items.append(listen_item(conn, it, word))
+    items.sort(key=lambda row: 0 if row["assigned"] else 1)  # 布置词汇 first; stable, so batch order holds inside each group
     return {"batch_id": int(batch["id"]), "local_date": str(batch["local_date"]), "items": items}
 
 

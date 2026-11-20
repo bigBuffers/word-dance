@@ -841,6 +841,14 @@ function AccountSection({ user }: { user: User }) {
           </Link>
         </div>
       )}
+      {(isGuardian || user.role === 'admin') && (
+        <div className="settings__row">
+          <span>{zh.settings.assignWords}</span>
+          <Link className="btn btn--secondary btn--sm" to={routePaths.assign}>
+            <span className="btn__label">{zh.settings.assignWords}</span>
+          </Link>
+        </div>
+      )}
       {canClaim && (
         <div className="settings__row">
           <span>{zh.settings.joinFamily}</span>

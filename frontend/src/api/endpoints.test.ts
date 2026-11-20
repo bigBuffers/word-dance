@@ -8,10 +8,10 @@ describe('endpoints.ts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('declares a numbered wrapper for every catalogue entry 1–123 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders; 114 is an <img src>, 118–122 are navigation links)', () => {
+  it('declares a numbered wrapper for every catalogue entry 1–129 exactly once (76 GET /media/audio has none; 52 / 53 / 78 are URL builders; 114 is an <img src>, 118–122 are navigation links)', () => {
     const numbers = [...source.matchAll(/^\/\/ #(\d+) (GET|POST|PUT|PATCH|DELETE) (\/\S+)/gm)].map((m) => Number(m[1]));
     const withoutWrapper = new Set([76, 114, 118, 119, 120, 121, 122]);
-    const expected = Array.from({ length: 123 }, (_, i) => i + 1).filter((n) => !withoutWrapper.has(n));
+    const expected = Array.from({ length: 129 }, (_, i) => i + 1).filter((n) => !withoutWrapper.has(n));
     expect([...numbers].sort((a, b) => a - b)).toEqual(expected);
     expect(new Set(numbers).size).toBe(numbers.length);
     // the wrapper-less entries stay visible under `// #N —` comments so the numbering has no gaps

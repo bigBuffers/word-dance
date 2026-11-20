@@ -72,7 +72,7 @@ def test_0020_adds_wechat_tickets(settings, tmp_path: Path):
         assert (20, "wechat_tickets") in result.applied and db.current_version(c) >= 20
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         # exactly one table gained, empty, with its two indexes; nothing else moved
-        assert set(db.table_names(c)) == before_tables | {"wechat_tickets"}
+        assert set(db.table_names(c)) == before_tables | {"wechat_tickets", "assignments", "assignment_words"}
         assert c.execute("SELECT COUNT(*) FROM wechat_tickets").fetchone()[0] == 0
         indexes = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'wechat_tickets' AND name NOT LIKE 'sqlite_autoindex%'")}
         assert indexes == INDEXES_0020

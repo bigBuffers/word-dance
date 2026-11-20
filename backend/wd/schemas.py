@@ -1663,6 +1663,7 @@ class Batch(Model):
     gradable: bool
     counts: TodayCounts
     items: list[StudyItem]
+    assigned_item_ids: list[int]  # 布置词汇: the study items that answer an assignment, in list order (they come first in `items`)
     extra_rounds: int
     can_request_more: bool
     built_at: str
@@ -1697,6 +1698,7 @@ class ListenItem(Model):
     item_id: int
     word_id: int
     kind: ItemKind  # review | new | extra — 推荐词 are not listened to
+    assigned: bool  # 布置词汇: the item answers an assignment; such items come first
     done: bool  # push_items.result IS NOT NULL: the item has its final grade (it is played all the same)
     display: str
     phonetic: str | None
@@ -1714,6 +1716,88 @@ class ListenPlaylist(Model):
     batch_id: int | None
     local_date: str
     items: list[ListenItem]
+
+
+# ------------------------------------------------------------------------------------------------ 布置词汇 (API.md 124–129)
+AssignMode = Literal["today", "spread"]
+
+
+class AssignLearner(Model):
+    id: int
+    name: str
+
+
+class AssignLearners(Model):
+    items: list[AssignLearner]
+
+
+class AssignPreviewRequest(Model):
+    learner_id: int
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class AssignCreateRequest(Model):
+    learner_id: int
+    text: str = Field(min_length=1, max_length=4000)
+    mode: AssignMode
+    title: str | None = Field(default=None, max_length=40)
+
+
+class AssignPreviewItem(Model):
+    input: str
+    status: Literal["new", "studying", "pending_ai", "known", "duplicate", "invalid", "ambiguous"]
+    word_id: int | None
+    display: str | None
+    meaning: str | None
+    message: str | None
+
+
+class AssignPreview(Model):
+    items: list[AssignPreviewItem]
+
+
+class AssignmentCounts(Model):
+    total: int
+    pending: int
+    scheduled: int
+    done: int
+    withdrawn: int
+
+
+class AssignmentSummary(Model):
+    id: int
+    learner: AssignLearner
+    title: str
+    mode: AssignMode
+    created_at: str
+    counts: AssignmentCounts
+
+
+class AssignmentWord(Model):
+    word_id: int
+    display: str
+    meaning: str
+    status: Literal["pending", "scheduled", "withdrawn"]
+    scheduled_date: str | None
+    kind: ItemKind | None
+    result: str | None
+    skip_count: int
+    graded_at: str | None
+    learner_state: str | None
+    waiting_lookup: bool
+
+
+class AssignmentDetail(AssignmentSummary):
+    words: list[AssignmentWord]
+
+
+class AssignmentList(Model):
+    items: list[AssignmentSummary]
+
+
+class AssignCreated(Model):
+    assignment: AssignmentDetail
+    results: list[AssignPreviewItem]
 
 
 class GradeRequest(Model):

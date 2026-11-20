@@ -1,0 +1,25 @@
+/* AssignPage — the form card, the preview rows, the caller's lists */
+.assign__form { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+.assign__select, .assign__input, .assign__text { width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg); color: var(--ink); font: inherit; }
+.assign__text { resize: vertical; min-height: 7em; line-height: 1.6; }
+.assign__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.assign__found { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.assign__found-item { display: inline-flex; gap: var(--space-2); align-items: baseline; padding: var(--space-1) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--bg-2); color: var(--ink); font: inherit; font-size: var(--text-sm); cursor: pointer; max-width: 100%; }
+.assign__found-item .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 14em; }
+.assign__preview, .assign__words, .assign__lists { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.assign__preview-row, .assign__word { display: grid; grid-template-columns: minmax(5em, 1fr) minmax(0, 2fr) auto; gap: var(--space-2); align-items: baseline; padding: var(--space-2) 0; border-top: 1px solid var(--line); font-size: var(--text-sm); }
+.assign__preview-word, .assign__word-text { font-weight: 600; overflow-wrap: anywhere; }
+.assign__preview-meaning, .assign__word-meaning { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.assign__preview-row.is-off, .assign__word.is-off { color: var(--muted); }
+.assign__preview-row.is-off .assign__preview-word, .assign__word.is-off .assign__word-text { font-weight: 400; text-decoration: line-through; }
+.assign__heading { margin: var(--space-5) 0 var(--space-2); font-size: var(--text-lg); }
+.assign__lists { gap: var(--space-3); }
+.assign__list { padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); }
+.assign__list-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+.assign__list-title { display: flex; flex-direction: column; min-width: 0; }
+.assign__list-title .muted { font-size: var(--text-sm); }
+.assign__list-counts { margin: 0; font-size: var(--text-sm); }
+.assign__detail { display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; }
+.assign__words { align-self: stretch; }
+.assign__skeleton { height: 8rem; }
+.assign__error { color: var(--muted); }

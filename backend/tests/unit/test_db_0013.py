@@ -44,7 +44,7 @@ def test_upgrade_0013_keeps_rows_and_admits_alias(settings, tmp_path: Path):
 
         assert (13, "word_forms_alias") in result.applied and db.current_version(c) >= 13
         assert not c.in_transaction and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert set(db.table_names(c)) == before_tables | {"word_dances", "identities", "login_codes", "family_codes", "wechat_tickets"} == EXPECTED_TABLES  # 0016 adds word_dances, 0018 identities / login_codes, 0019 family_codes, 0020 wechat_tickets on the way
+        assert set(db.table_names(c)) == before_tables | {"word_dances", "identities", "login_codes", "family_codes", "wechat_tickets", "assignments", "assignment_words"} == EXPECTED_TABLES  # 0016 adds word_dances, 0018 identities / login_codes, 0019 family_codes, 0020 wechat_tickets on the way
         rows = [tuple(r) for r in c.execute("SELECT form, word_id, kind FROM word_forms ORDER BY word_id, form")]
         assert rows == [("goed", 1, "alt"), ("goes", 1, "3"), ("gone", 1, "d"), ("went", 1, "p"), ("tvs", 2, "s")]  # every row incl. alt survived
         c.execute("INSERT INTO word_forms(form, word_id, kind) VALUES ('t.v.', 2, 'alias')")

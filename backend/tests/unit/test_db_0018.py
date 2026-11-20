@@ -70,7 +70,7 @@ def test_0018_adds_identities_login_codes_and_the_account_columns(settings, tmp_
         assert all(r["account_kind"] == "learner" and r["age_band"] is None and r["guardian_user_id"] is None for r in rows.values())
         assert c.execute("SELECT actor_user_id FROM sessions").fetchone()[0] is None
         # the two tables and their indexes; email_codes stays with its row
-        assert set(db.table_names(c)) == before_tables | {"identities", "login_codes", "family_codes", "wechat_tickets"}  # 0019 and 0020 ride along
+        assert set(db.table_names(c)) == before_tables | {"identities", "login_codes", "family_codes", "wechat_tickets", "assignments", "assignment_words"}  # 0019 and 0020 ride along
         assert c.execute("SELECT COUNT(*) FROM email_codes").fetchone()[0] == 1
 
         def indexes(table: str) -> set[str]:

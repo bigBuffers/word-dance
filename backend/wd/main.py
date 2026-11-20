@@ -56,6 +56,7 @@ from .jobs.worker import ClaudeWorker, IoWorker
 from .logging_setup import configure_logging
 from .routers import (
     account,
+    assignments,
     admin_ops,
     admin_reports,
     admin_users,
@@ -92,6 +93,7 @@ ROUTERS = (
     auth_codes,
     account,
     guardian,  # 1-B: /api/guardian/* (94–103)
+    assignments,  # 布置词汇: /api/assign/*, /api/assignments* (124–129)
     auth_family,  # 1-B: /api/auth/switch/*, /api/auth/child-login (104–107)
     auth_wechat,  # 2-A: /api/auth/wechat/* (112–116) — dark until WD_WECHAT_* is set
     auth_oauth,  # 2-A: /api/auth/qq/*, /api/auth/apple/*, /api/auth/oauth/finish (118–122) — dark until WD_QQ_* / WD_APPLE_* is set

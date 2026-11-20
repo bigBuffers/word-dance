@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "identities", "login_codes",  # 0018 (docs/AUTH_SIGNUP_DESIGN.md §5.1)
     "family_codes",  # 0019 (docs/AUTH_SIGNUP_DESIGN.md §5.1–5.2: child login codes + claim codes, slice 1-B)
     "wechat_tickets",  # 0020 (docs/AUTH_SIGNUP_DESIGN.md §5.3: the WeChat login bridge, slice 2-A)
+    "assignments", "assignment_words",  # 0022 (布置词汇, docs/releases/2026-11-assignments.md)
 }
 
 
@@ -52,7 +53,7 @@ def test_fresh_migration_creates_schema_and_one_bookkeeping_row_per_file(setting
         assert result.from_version == 0 and result.to_version == shipped[-1][0]
         tables = set(db.table_names(c))
         assert tables == EXPECTED_TABLES
-        assert len(tables) == 30
+        assert len(tables) == 32
         assert db.view_names(c) == ["v_bank"]
         rows = c.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchall()
         assert [tuple(r) for r in rows] == shipped  # one row per file, written by the runner

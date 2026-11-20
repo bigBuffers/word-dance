@@ -76,7 +76,7 @@ def test_upgrade_0014_adds_a_nullable_column_without_rebuild(settings, tmp_path:
         assert [tuple(r)[: len(before_cols)] for r in c.execute("SELECT * FROM words ORDER BY id")] == before_words  # every value survived
         assert {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'words'")} == before_indexes
         assert "ix_words_learn_rank" not in before_indexes
-        assert set(db.table_names(c)) == before_tables | {"word_dances", "identities", "login_codes", "family_codes", "wechat_tickets"} == EXPECTED_TABLES  # 0016 adds word_dances, 0018 identities / login_codes, 0019 family_codes, 0020 wechat_tickets on the way
+        assert set(db.table_names(c)) == before_tables | {"word_dances", "identities", "login_codes", "family_codes", "wechat_tickets", "assignments", "assignment_words"} == EXPECTED_TABLES  # 0016 adds word_dances, 0018 identities / login_codes, 0019 family_codes, 0020 wechat_tickets on the way
         assert db.view_names(c) == ["v_bank"] and c.execute("SELECT COUNT(*) FROM v_bank").fetchone()[0] == before_bank
         assert {t: c.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in before_tables if t != "schema_migrations"} == {t: n for t, n in before_counts.items() if t != "schema_migrations"}
         last = c.execute("SELECT kind FROM system_events ORDER BY id DESC LIMIT 1").fetchone()

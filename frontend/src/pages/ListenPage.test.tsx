@@ -70,6 +70,7 @@ import ListenPage, { LISTEN_PREF_KEY } from './ListenPage';
 const item = (id: number, over: Partial<ListenItem> = {}): ListenItem => ({
   item_id: id,
   word_id: 100 + id,
+  assigned: false,
   kind: 'new',
   done: false,
   display: `w${id}`,
@@ -470,5 +471,25 @@ describe('ListenPage', () => {
     const spoken = said().length;
     await finish(10_000); // the clip that was cut settles late: the chain is dead
     expect(said()).toHaveLength(spoken);
+  });
+
+  it('offers the assigned-only scope when some of the words were assigned, and plays just those', async () => {
+    await renderListen([item(1, { assigned: true }), item(2), item(3, { assigned: true })]);
+    expect(screen.getByText(zh.listen.position(1, 3))).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: zh.listen.scopes.assigned }));
+    await settle();
+    expect(screen.getByText(zh.listen.position(1, 2))).toBeTruthy();
+    expect(screen.queryByText('w2')).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: zh.listen.scopes.all }));
+    await settle();
+    expect(screen.getByText(zh.listen.position(1, 3))).toBeTruthy();
+  });
+
+  it('shows no scope choice when none or all of the words were assigned', async () => {
+    const view = await renderListen();
+    expect(screen.queryByRole('radio', { name: zh.listen.scopes.assigned })).toBeNull();
+    view.unmount();
+    await renderListen([item(1, { assigned: true }), item(2, { assigned: true })]);
+    expect(screen.queryByRole('radio', { name: zh.listen.scopes.assigned })).toBeNull();
   });
 });

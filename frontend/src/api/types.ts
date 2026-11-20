@@ -233,7 +233,8 @@ export interface StudyItem {
 export interface Batch {
   id: number; local_date: string; timezone: string; status: 'building' | 'ready' | 'published'; trigger: string;
   gradable: boolean;                                          // today's batch, or yesterday's while it has ungraded items (endpoint 50); false → replay only, no grade bar
-  counts: TodayCounts; items: StudyItem[];                    // ungraded first (skipped after unskipped), then graded
+  counts: TodayCounts; items: StudyItem[];                    // ungraded first (skipped after unskipped), then graded; inside each group the assigned items first
+  assigned_item_ids: number[];                                // 布置词汇 (endpoints 124–129): the review / new / extra items that answer an assignment — the 今日 page lists them as 「老师布置」
   extra_rounds: number; can_request_more: boolean; built_at: string; published_at: string | null; completed_at: string | null;
 }
 export interface PreviousOpenBatch { id: number; local_date: string; remaining: number }   // yesterday's batch with ungraded review/new/extra items (endpoint 43)
@@ -245,6 +246,7 @@ export interface TodayResponse {
 }
 export interface ListenItem {
   item_id: number; word_id: number; kind: ItemKind; done: boolean;   // kind: review | new | extra (推荐词 are not listened to); done: the item has its final grade
+  assigned: boolean;                    // 布置词汇: the item answers an assignment; assigned items come first in the playlist
   display: string; phonetic: string | null;
   spoken_en: string | null;             // what to speak for the headword (`sb.` / `sth.` spelled out); null when endpoint 76 would refuse the text
   meaning_zh: string;                   // shown on the player and on the 听写 answer sheet: content.meaning_zh, else the dictionary's main sense ('' when neither exists)
@@ -252,6 +254,24 @@ export interface ListenItem {
   sentence_en: string | null; sentence_zh: string | null;   // one example sentence endpoint 76 accepts, and its translation (null when it cannot be spoken); both null without content
 }
 export interface ListenPlaylist { batch_id: number | null; local_date: string; items: ListenItem[] }   // endpoint 123: today's review / new / extra words in batch order, one row per word, without the words that have left the bank since (已掌握 / 已认识 / removed — the word's state now, not the item's grade); batch_id null = no batch today
+export type AssignMode = 'today' | 'spread';                 // 布置词汇: today = every word goes into the learner's next batch (today's when it exists), whatever the quota; spread = the words take the daily new-word quota, a few per day
+export interface AssignLearner { id: number; name: string }   // endpoint 124: an account the caller may assign to
+export interface AssignPreviewItem {                          // endpoints 125 / 126: one typed token (lines and commas separate tokens, like 加词)
+  input: string;
+  status: 'new' | 'studying' | 'pending_ai' | 'known' | 'duplicate' | 'invalid' | 'ambiguous';   // new = enters the learner's bank; studying = already there (practised once); pending_ai = unknown spelling, assigned once its lookup validates it; known = 已掌握 / 已认识, not assigned; the last three are not assigned either
+  word_id: number | null; display: string | null; meaning: string | null; message: string | null;
+}
+export interface AssignmentCounts { total: number; pending: number; scheduled: number; done: number; withdrawn: number }   // done ⊆ scheduled: the item has its final grade
+export interface AssignmentSummary { id: number; learner: AssignLearner; title: string; mode: AssignMode; created_at: string; counts: AssignmentCounts }
+export interface AssignmentWord {
+  word_id: number; display: string; meaning: string;
+  status: 'pending' | 'scheduled' | 'withdrawn';              // pending = waiting for a batch; scheduled = it has its study item (scheduled_date, kind); withdrawn = taken back before that
+  scheduled_date: string | null; kind: ItemKind | null;
+  result: string | null; skip_count: number; graded_at: string | null;   // of that study item: the final grade (null while ungraded), how often it was skipped
+  learner_state: string | null; waiting_lookup: boolean;      // the learner's user_words.state now; waiting_lookup = the word is not validated yet
+}
+export interface AssignmentDetail extends AssignmentSummary { words: AssignmentWord[] }
+export interface AssignCreated { assignment: AssignmentDetail; results: AssignPreviewItem[] }   // endpoint 126
 export interface GradeResponse {
   item: { item_id: number; result: string | null; skip_count: number; requeue_at: string | null };   // result null + requeue_at set = intermediate grade: the item stays ungraded and is graded again later (endpoint 45)
   mine: UserWord | null; next_due_zh: string;                 // '10 分钟后' | '明天' | '今天' | 'N 天后' | '约 N 个月后' | '已掌握' | '已跳过' | '已认识' (thresholds in §9.1)
